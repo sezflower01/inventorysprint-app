@@ -1,0 +1,50 @@
+-- Drop idx_repricer_ai_decisions_raise_safety. It has been INVALID since it
+-- was created, and 20260814054600 records a decision to keep it that was made
+-- without knowing that.
+--
+-- THE HISTORY, because a previous migration says the opposite
+-- ----------------------------------------------------------
+-- 20260814053000 created it:
+--
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_repricer_ai_decisions_raise_safety
+--     ON public.repricer_ai_decisions (user_id, created_at DESC)
+--     WHERE mode = 'SMART_RAISE' OR raise_blocked_cooldown OR raise_rejected_floor_support;
+--
+-- That CREATE did not complete. A failed or interrupted CREATE INDEX
+-- CONCURRENTLY leaves the index behind marked invalid rather than removing it,
+-- which is what happened here.
+--
+-- 20260814054600 then rescoped repricer_rule_perf_raise_safety to filter by
+-- rule_id and use idx_repricer_ai_decisions_rule_id instead, and deliberately
+-- left this index in place, with the note:
+--
+--   "idx_repricer_ai_decisions_raise_safety from the previous attempt is left
+--    in place rather than dropped -- DROP INDEX CONCURRENTLY can't run in this
+--    migration runner's pipelined execution mode, and the index is
+--    small/scoped enough to be harmless dead weight now that this RPC no
+--    longer uses it."
+--
+-- The reasoning was sound for what it assumed: a small, valid, unqueried
+-- index. Two of those three were wrong.
+--
+--   * It is INVALID, so the planner will never use it for a read under any
+--     circumstances -- but Postgres still maintains it on every INSERT and
+--     UPDATE to repricer_ai_decisions. An invalid index is the worst case: all
+--     of the write cost, none of the read benefit.
+--   * It is not small. Measured 2026-08-22: 24 MB -- the same size as
+--     idx_repricer_price_actions_error_type, one of the eight dead indexes
+--     dropped from repricer_price_actions the same evening.
+--
+-- Found by auditing pg_index WHERE NOT indisvalid after that cleanup. It was
+-- the only invalid index in the database.
+--
+-- Nothing needs to replace it: repricer_rule_perf_raise_safety has filtered by
+-- rule_id since 2026-08-14 and uses idx_repricer_ai_decisions_rule_id.
+--
+-- APPLYING THIS: the note in 20260814054600 about CONCURRENTLY not working in
+-- the migration runner still holds, so this uses a plain DROP. On the live
+-- database it was run by hand as DROP INDEX CONCURRENTLY, which the SQL Editor
+-- handles fine; the IF EXISTS below then no-ops there and keeps other
+-- environments in step.
+
+DROP INDEX IF EXISTS public.idx_repricer_ai_decisions_raise_safety;
