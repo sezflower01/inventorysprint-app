@@ -1,0 +1,71 @@
+-- text_pattern_ops index so prefix matching on sales_orders.order_id can use
+-- an index at all.
+--
+-- WHY AN ORDINARY B-TREE WAS NOT ENOUGH
+-- -------------------------------------
+-- sales_orders already has (user_id, order_id, asin) via
+-- sales_orders_user_order_asin_idx, which looks like it should serve
+-- `WHERE user_id = $1 AND order_id LIKE $2`. It cannot. Under this database's
+-- non-C collation a b-tree orders text by collation rules, and prefix LIKE
+-- semantics do not map onto that ordering, so the planner will not consider
+-- the index for a LIKE at all -- regardless of how selective the pattern is.
+--
+-- text_pattern_ops orders by raw byte value instead, which is exactly the
+-- ordering a prefix match needs. With it the planner rewrites
+--
+--   order_id LIKE '112-3065259-2877055%'
+--
+-- into a range scan
+--
+--   order_id ~>=~ '112-3065259-2877055' AND order_id ~<~ '112-3065259-2877056'
+--
+-- and the LIKE remains only as a rechecking filter.
+--
+-- WHAT WAS ACTUALLY BROKEN
+-- ------------------------
+-- backfill-customer-profiles updates a base order and its refund rows
+-- together. It did that with
+--
+--   .eq('user_id', uid)
+--   .or(`order_id.eq.${base},order_id.like.${base}-REFUND%`)
+--
+-- An OR branch the planner cannot index drags the whole predicate down, so
+-- this ran as a SEQUENTIAL SCAN of all 71,983 of the user's rows -- once per
+-- order, in a loop, inside the */15 cron (jobid 100,
+-- customer-profiles-backfill-15min). Measured 2026-08-23 with literal values,
+-- where the planner has every advantage over the real parameterised call:
+--
+--   Seq Scan, Rows Removed by Filter: 71,982, buffers 9,138, 3,341ms
+--
+-- ...to return a single row. It also holds row locks for the duration, since
+-- it is an UPDATE. That is a direct cause of the recurring
+-- "canceling statement due to statement timeout" lines, independent of the
+-- repricer_competitor_snapshots query fixed the same night.
+--
+-- The OR itself was removable for free. Amazon order ids are a fixed 3-7-7
+-- format, so nothing can begin with a complete order id except that order and
+-- its own refund rows; `order_id = A OR order_id LIKE 'A-REFUND%'` is exactly
+-- `order_id LIKE 'A%'`. Removing the OR alone changed nothing though -- still
+-- a seq scan, identical buffer count -- because the collation problem above is
+-- the real blocker. Both halves were needed.
+--
+-- Refund id forms verified against live data before collapsing the predicate:
+-- `<order>-REFUND`, `-REFUND-1`, `-REFUND-2`. 115 rows carry a numeric suffix,
+-- so the trailing % is load bearing -- an `.in([base, base || '-REFUND'])`
+-- would have silently missed every one of them.
+--
+-- MEASURED AFTER, same query:
+--   rows discarded   71,982  ->  0
+--   buffers          9,138   ->  4
+--   execution        3,341ms ->  3.3ms
+--
+-- ONE THING TO VERIFY LATER: the plan above used a literal pattern. PostgREST
+-- parameterises it, and a GENERIC plan cannot extract a prefix from an unknown
+-- parameter, so the index would go unused if Postgres ever switched to one.
+-- Custom plans can, and Postgres prefers them when they are dramatically
+-- cheaper, which is the case here. The authoritative check is
+-- pg_stat_user_indexes.idx_scan on this index after a real */15 cycle -- the
+-- same verification that confirmed idx_rpa_time_anchor.
+
+CREATE INDEX IF NOT EXISTS idx_sales_orders_user_order_prefix
+  ON public.sales_orders (user_id, order_id text_pattern_ops);

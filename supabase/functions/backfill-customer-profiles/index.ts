@@ -252,11 +252,40 @@ Deno.serve(async (req) => {
             // Path B (detect-abuse-patterns) handles this case.
             stats.skipped++;
           } else {
+            // ONE PREFIX MATCH, NOT `.or(eq, like)`.
+            //
+            // Amazon order ids are a fixed 3-7-7 format, so nothing can begin
+            // with a complete order id except that order and its own refund
+            // rows. Verified 2026-08-23 against live data: refunds are
+            // `<order>-REFUND`, `-REFUND-1`, `-REFUND-2` and so on -- 115 rows
+            // carried a numeric suffix, which is why the trailing % is load
+            // bearing and an `.in([base, base + '-REFUND'])` would have
+            // silently missed them.
+            //
+            // The OR was not merely redundant, it was ruinous. PostgREST
+            // parameterises the pattern, and an OR branch the planner cannot
+            // index drags the whole predicate down with it -- so this ran as a
+            // SEQUENTIAL SCAN of every one of the user's 71,983 sales_orders
+            // rows, ONCE PER ORDER, inside the */15 customer-profiles cron
+            // (jobid 100). Measured with literal values, where the planner has
+            // every advantage: 3,341ms and 9,138 buffers to find one row. That
+            // is a direct source of "canceling statement due to statement
+            // timeout", and it holds row locks while it scans.
+            //
+            // A prefix LIKE still cannot use an ordinary b-tree under this
+            // database's collation, so the fix is only half here: see
+            // 20260823000000_sales_orders_order_prefix_index.sql, which adds a
+            // text_pattern_ops index. With it the planner rewrites the LIKE
+            // into a range scan (order_id ~>=~ base AND order_id ~<~ base+1):
+            //
+            //   rows discarded   71,982 -> 0
+            //   buffers          9,138  -> 4
+            //   execution        3,341ms -> 3.3ms
             const { error: upErr } = await supabase
               .from('sales_orders')
               .update(patch)
               .eq('user_id', uid)
-              .or(`order_id.eq.${baseOrderId},order_id.like.${baseOrderId}-REFUND%`);
+              .like('order_id', `${baseOrderId}%`);
             if (upErr) {
               stats.errors.push(`update_failed:${baseOrderId}:${upErr.message}`);
               continue;
