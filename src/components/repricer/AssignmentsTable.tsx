@@ -338,14 +338,39 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
     const snapshotsMap: Record<string, any> = {};
     if (asins.length === 0) return snapshotsMap;
     try {
+      // Six hours: long enough that an ASIN skipped for a cycle or two still
+      // has a snapshot, short enough that the scan stays small. The
+      // hasSnapshotSignal fallback below only walks rows already fetched, so
+      // it is unaffected.
+      const SNAPSHOT_WINDOW_HOURS = 6;
+      const snapshotWindowStart = new Date(
+        Date.now() - SNAPSHOT_WINDOW_HOURS * 60 * 60 * 1000,
+      ).toISOString();
+
       const snapshotsData = await batchInQuery(
         "repricer_competitor_snapshots",
         "asin, marketplace, buybox_price, buybox_seller_id, buybox_is_fba, lowest_fba_price, lowest_overall_price, offers_count, fetched_at",
         "asin",
         asins,
-        // Each batch has up to 500 ASINs; with multiple snapshots per ASIN
-        // (time-series table), we need a high limit to ensure every ASIN gets
-        // at least one row. 5000 rows covers ~500 ASINs × 10 snapshots each.
+        // SNAPSHOT_WINDOW_HOURS is what makes this query survivable; the limit
+        // is now just a backstop.
+        //
+        // This is a time-series table the repricer appends to every cycle, and
+        // the previous version asked for the newest 5000 rows across ALL of a
+        // user's history for 500 ASINs. Measured 2026-08-23: 64,421 rows
+        // scanned and 65,937 buffers to return 5000, which exceeded the
+        // statement timeout on a cold cache.
+        //
+        // The window is not a reduction in coverage -- it is an increase.
+        // Sorting a user's entire snapshot history and taking 5000 returned
+        // roughly the last TWO hours, and silently dropped any ASIN whose
+        // snapshots fell outside that cut. Six hours yields ~2010 rows here,
+        // comfortably under the limit, so nothing is truncated and every ASIN
+        // with a recent snapshot is represented.
+        //
+        //   rows scanned   64,421 -> 2,010
+        //   buffers        65,937 -> 3,876
+        //   execution      timeout -> 47ms
         // .eq("user_id", userId) is NOT redundant with RLS, and leaving it out
         // was timing this query out in production.
         //
@@ -366,7 +391,12 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
         //
         // Every other batchInQuery in this file already passes user_id. This
         // one was the exception.
-        (q: any) => q.eq("user_id", userId).eq("marketplace", targetMarketplace).order("fetched_at", { ascending: false }).limit(5000)
+        (q: any) => q
+          .eq("user_id", userId)
+          .eq("marketplace", targetMarketplace)
+          .gte("fetched_at", snapshotWindowStart)
+          .order("fetched_at", { ascending: false })
+          .limit(5000)
       );
 
       const hasSnapshotSignal = (snap: any) =>
