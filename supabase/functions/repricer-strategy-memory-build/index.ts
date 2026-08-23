@@ -28,11 +28,29 @@ async function buildForUser(
         .eq("user_id", userId)
         .gte("created_at", since60d)
         .limit(50000),
+      // acked_at, NOT created_at. repricer_eval_acks has never had a
+      // created_at column -- see its CREATE TABLE in 20260318064706. The
+      // column above it on repricer_price_actions IS created_at, which is
+      // probably how the two got confused.
+      //
+      // This did not crash anything, which is why it survived. supabase-js
+      // returns { data: null, error } instead of throwing, so `acks` was
+      // always null, the loop below always skipped, and oscEvents was
+      // permanently 0 -- oscillation and instability events have never been
+      // counted in strategy memory. The only outward sign was
+      // "column repricer_eval_acks.created_at does not exist" in the Postgres
+      // log at 02:30 each night, when cron jobid 64
+      // (repricer-strategy-memory-daily, "30 2 * * *") fires.
+      //
+      // The identical bug was found and fixed in repricer-executive-summary
+      // earlier this week; its header still documents it. This sibling was
+      // missed. Worth grepping for `repricer_eval_acks` + `created_at`
+      // together before assuming these were the only two.
       admin
         .from("repricer_eval_acks")
-        .select("asin,reason,created_at")
+        .select("asin,reason,acked_at")
         .eq("user_id", userId)
-        .gte("created_at", since60d)
+        .gte("acked_at", since60d)
         .limit(50000),
       admin
         .from("sales_orders")
