@@ -346,7 +346,27 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
         // Each batch has up to 500 ASINs; with multiple snapshots per ASIN
         // (time-series table), we need a high limit to ensure every ASIN gets
         // at least one row. 5000 rows covers ~500 ASINs × 10 snapshots each.
-        (q: any) => q.eq("marketplace", targetMarketplace).order("fetched_at", { ascending: false }).limit(5000)
+        // .eq("user_id", userId) is NOT redundant with RLS, and leaving it out
+        // was timing this query out in production.
+        //
+        // RLS scopes the rows either way, but the predicate it injects is not
+        // something the planner can use as an index condition here, so without
+        // an explicit user_id the 46 MB idx_competitor_snapshots_user_asin_sku_marketplace
+        // and idx_repricer_snapshots_user_fetched -- both of which lead with
+        // user_id -- were unusable, and this fell back to a scan over a table
+        // the repricer appends to every cycle.
+        //
+        // This runs every 30 seconds while the page is open (see the refresh
+        // interval below), i.e. 120 times an hour, so once the table grew past
+        // the tipping point it produced a steady stream of
+        // "canceling statement due to statement timeout" in the Postgres log.
+        // Measured 2026-08-23 on the same user and marketplace: without the
+        // filter it exceeded the statement timeout; with it, 9.7ms using
+        // idx_repricer_snapshots_user_fetched.
+        //
+        // Every other batchInQuery in this file already passes user_id. This
+        // one was the exception.
+        (q: any) => q.eq("user_id", userId).eq("marketplace", targetMarketplace).order("fetched_at", { ascending: false }).limit(5000)
       );
 
       const hasSnapshotSignal = (snap: any) =>
