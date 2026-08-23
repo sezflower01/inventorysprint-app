@@ -22,15 +22,43 @@ serve(async (req) => {
   const supabase = createClient(supabaseUrl, serviceKey);
 
   try {
-    // Find every user with a connected Amazon account
+    // seller_authorizations, NOT amazon_connections. There is no
+    // amazon_connections table in this database and there never has been, so
+    // this threw on the very first statement and the whole job aborted --
+    // dispositions have never synced for any user. The only outward trace was
+    // 'relation "public.amazon_connections" does not exist' in the Postgres log
+    // at 08:15, when cron jobid 35 (auto-sync-dispositions-daily,
+    // "15 8 * * *") fires.
     const { data: connections, error: connErr } = await supabase
-      .from('amazon_connections')
-      .select('user_id, refresh_token, marketplace_id')
+      .from('seller_authorizations')
+      .select('user_id, refresh_token, marketplace_id, is_active')
       .not('refresh_token', 'is', null);
 
     if (connErr) throw connErr;
 
-    const targets = (connections || []).filter((c: any) => c.refresh_token);
+    // ⚠️ ONE CALL PER USER, NOT PER MARKETPLACE.
+    //
+    // amazon_connections was evidently one row per user -- the loop below
+    // defaults marketplace_id to ATVPDKIKX0DER when absent. seller_authorizations
+    // is one row per (seller_id, marketplace_id), so a seller authorised in
+    // US/CA/MX/BR yields four rows. Iterating them directly would quadruple
+    // SP-API calls the first time this job ever succeeds, which is not a change
+    // to make silently on a job that has never run.
+    //
+    // Prefer the US row, since that is the marketplace the original default
+    // named; fall back to whatever the user has.
+    const byUser = new Map<string, any>();
+    for (const c of (connections || [])) {
+      if (!c.refresh_token) continue;
+      // Explicitly revoked authorizations are skipped; is_active is null on
+      // older rows, so only an explicit false excludes.
+      if (c.is_active === false) continue;
+      const prev = byUser.get(c.user_id);
+      if (!prev || (c.marketplace_id === 'ATVPDKIKX0DER' && prev.marketplace_id !== 'ATVPDKIKX0DER')) {
+        byUser.set(c.user_id, c);
+      }
+    }
+    const targets = [...byUser.values()];
     console.log(`[DISPO-DAILY] Found ${targets.length} connected users`);
 
     const stats = {

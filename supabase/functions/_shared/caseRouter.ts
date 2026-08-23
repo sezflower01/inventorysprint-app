@@ -33,7 +33,7 @@ export interface RouterCase {
   profit_floor?: number | null;
   was_bb_owner?: boolean | null;
   was_price_changed?: boolean | null;
-  decision_label?: string | null;
+  reason?: string | null;
   tuning_signal?: string | null;
   // Optional pre-computed signals from the caller. If absent the router will
   // try to fetch them.
@@ -162,14 +162,33 @@ export async function computeBehavioralSignals(
   if (candidateAsins.length === 0) return out;
 
   const cutoff = new Date(Date.now() - 24 * 3_600_000).toISOString();
+  // `reason` and `old_price`, NOT decision_label / previous_price. Neither of
+  // those columns has ever existed on repricer_price_actions -- decision_label
+  // belongs to the smart-engine case tables (20260405185550), and the price
+  // column here is old_price.
+  //
+  // The `if (error || !data) return out` below meant this never surfaced: the
+  // query errored, an EMPTY map was returned, and every caller silently saw
+  // bb_losses_24h = 0 and direction_flips_24h = 0 for every ASIN. Behavioural
+  // signals have never once been computed. The only outward trace was
+  // "column repricer_price_actions.decision_label does not exist" in the
+  // Postgres log at 08:00, when cron jobid 21
+  // (smart-engine-auto-review-morning, "0 8 * * *") fires.
+  //
+  // The error is now logged rather than swallowed, so the next schema drift of
+  // this kind shows up in the function's own logs instead of only in Postgres.
   const { data, error } = await admin
     .from("repricer_price_actions")
-    .select("asin, action_type, decision_label, created_at, new_price, previous_price")
+    .select("asin, action_type, reason, created_at, new_price, old_price")
     .eq("user_id", userId)
     .gte("created_at", cutoff)
     .in("asin", candidateAsins)
     .order("created_at", { ascending: true });
-  if (error || !data) return out;
+  if (error) {
+    console.error(`[caseRouter] computeBehavioralSignals query failed: ${error.message}`);
+    return out;
+  }
+  if (!data) return out;
 
   // Group by ASIN
   const byAsin = new Map<string, any[]>();
@@ -184,12 +203,12 @@ export async function computeBehavioralSignals(
     let flips = 0;
     let prevDir: "up" | "down" | null = null;
     for (const r of rows) {
-      const lbl = String(r.decision_label ?? "").toLowerCase();
+      const lbl = String(r.reason ?? "").toLowerCase();
       if (lbl.includes("bb_lost") || lbl.includes("buybox_lost") || lbl.includes("lost_bb")) {
         bbLosses += 1;
       }
       const np = Number(r.new_price ?? 0);
-      const pp = Number(r.previous_price ?? 0);
+      const pp = Number(r.old_price ?? 0);
       if (np > 0 && pp > 0 && np !== pp) {
         const dir: "up" | "down" = np > pp ? "up" : "down";
         if (prevDir && dir !== prevDir) flips += 1;
