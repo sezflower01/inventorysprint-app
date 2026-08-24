@@ -7,6 +7,7 @@ import { UiModeProvider } from "@/contexts/UiModeContext";
 import { SalesSyncProvider } from "@/contexts/SalesSyncContext";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as SonnerToaster } from "@/components/ui/sonner";
+import { AppVersionGate } from "@/components/AppVersionGate";
 import { Suspense, lazy, Component, ReactNode, ComponentType } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
@@ -425,6 +426,9 @@ function App() {
                   </Routes>
                 </Suspense>
                 </LazyErrorBoundary>
+                {/* Reloads this tab when a newer build ships. Never forces a
+                    reload over in-progress edits -- see AppVersionGate. */}
+                <AppVersionGate />
                 <Toaster />
                 <SonnerToaster position="top-right" richColors closeButton />
                 <DesktopOnlyWidgets />

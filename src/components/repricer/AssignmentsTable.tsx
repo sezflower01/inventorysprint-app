@@ -57,6 +57,7 @@ import {
   PaginationPrevious,
 } from "@/components/ui/pagination";
 import { toast } from "sonner";
+import { setAppBusy } from "@/lib/appBusy";
 import {
   RefreshCw,
   Search,
@@ -2237,6 +2238,19 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
       }
     };
   }, [user?.id, hasItems]);
+
+  // Publish the SAME busy signal the 15-minute refresh already defers on, so
+  // AppVersionGate can see it from the app root. These fetches write price,
+  // cost and ROI back into local state; a reload mid-flight discards them.
+  useEffect(() => {
+    const busy =
+      fetchingPrice.size > 0 ||
+      fetchingRoi.size > 0 ||
+      fetchingBbRoi.size > 0 ||
+      fetchingRoiRange.size > 0;
+    setAppBusy("repricer:price-fetch", busy);
+    return () => setAppBusy("repricer:price-fetch", false);
+  }, [fetchingPrice.size, fetchingRoi.size, fetchingBbRoi.size, fetchingRoiRange.size]);
 
   // Hard refresh full repricer dataset every 15 minutes (no manual browser refresh needed)
   // IMPORTANT: Skip background refreshes while price fetches are active to prevent

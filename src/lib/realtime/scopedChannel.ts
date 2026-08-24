@@ -43,3 +43,22 @@ export function sessionChannel(prefix: string, sessionId: string): string {
 export function sharedAdminChannel(name: string): string {
   return name;
 }
+
+/**
+ * Global broadcast channel: shared by every client of every account.
+ *
+ * The rules above exist because `postgres_changes` events carry ROW DATA, so a
+ * shared channel name is both a leak risk and a fan-out cost. Neither applies
+ * to a `broadcast` channel that carries nothing but a build identifier:
+ *
+ *   - There is no table behind it, so there is no RLS to regress and no row
+ *     content to leak. The entire payload is a git SHA.
+ *   - The fan-out is the point. A deploy notification is meaningless unless it
+ *     reaches every connected tab.
+ *
+ * Restricted to broadcast-only, version-style payloads. Do NOT reach for this
+ * for anything tenant-owned -- `userChannel` remains the default.
+ */
+export function globalBroadcastChannel(name: string): string {
+  return name;
+}
