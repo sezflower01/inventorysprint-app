@@ -1096,12 +1096,36 @@ async function captureMissingBbEstimateForOrders(
       // seller-derived estimated_price (live snapshot/repricer/order_total/
       // listings_api) with a BB competitor snapshot — the seller's own listing
       // price is the source of truth for pending orders.
+      // ⚠️ repricer_* IS NOT A READ OF OUR PRICE. It is a log of what the
+      // repricer SUBMITTED, and it goes stale the moment the listing price
+      // changes without a clean action behind it -- a manual edit, another
+      // system, or an action that moved the price without logging.
+      //
+      // It used to sit in the trusted tier below, on the premise (see the old
+      // comment) that repricer_action was "tied to THIS order's actual live
+      // price". Order 112-0854205-5253012 on 2026-08-24 disproved that:
+      //
+      //   repricer_price_actions (submitted)   $32.87   <- what we estimated
+      //   own-BB snapshots, 28 consecutive     $25.94   <- what was live
+      //   Amazon Seller Central (buyer paid)   $25.94
+      //
+      // Twenty-eight consecutive snapshots across the 5.8h before the sale, all
+      // $25.94, all Pedu-owned, all FBA, the closest 11 SECONDS before the
+      // order -- and the code logged BB_BACKFILL_SKIPPED_SELLER_DERIVED and kept
+      // $32.87. A 27% overstatement, with the correct figure already on screen
+      // in BB Discovery and marked Qualified.
+      //
+      // A qualified + owner-matched BB estimate IS seller-derived: it is our own
+      // featured offer, OBSERVED near this order's purchase time rather than
+      // assumed from an intent log. So repricer_* belongs in the soft tier by
+      // this file's own reasoning.
+      //
+      // order_total / listings_api / a live pricing_api|orders_api snapshot stay
+      // TRUSTED -- those are real reads of our price, not submissions.
       const isSellerDerivedTrusted = exactSnapshotIsLiveRead || currentEst > 0 && (
         currentSource.startsWith('snapshot_price') ||
-        currentSource.startsWith('repricer_') ||
         currentSource.startsWith('order_total') ||
         currentSource.startsWith('listings_api') ||
-        currentSource.startsWith('seller_derived:repricer') ||
         currentSource.startsWith('seller_derived:order_total') ||
         currentSource.startsWith('seller_derived:listings_api')
       );
@@ -1115,7 +1139,10 @@ async function captureMissingBbEstimateForOrders(
       const isSoftEstimate = !isSellerDerivedTrusted && currentEst > 0 && (
         currentSource.startsWith('recent_sale') ||
         currentSource.startsWith('seller_derived:recent') ||
-        currentSource.startsWith('seller_derived:snapshot')
+        currentSource.startsWith('seller_derived:snapshot') ||
+        // moved here 2026-08-24 -- see the note above the trusted list
+        currentSource.startsWith('repricer_') ||
+        currentSource.startsWith('seller_derived:repricer')
       );
       const bbPromotesOverSoftEstimate = isSoftEstimate
         && bbFields.bb_estimate_qualified && bbFields.bb_estimate_owner_match
@@ -2917,12 +2944,15 @@ Deno.serve(async (req) => {
                 orderDataWithItems.price_last_error = null;
                 console.log(`🛡️ SNAPSHOT_INSERT_RESTORED: ${orderId}/${asin} estimated_price ${localEst} -> ${exactSnapshotEstimate}`);
               }
+              // repricer_* moved to the soft tier 2026-08-24 -- see the full
+              // note in captureMissingBbEstimateForOrders. It logs what was
+              // SUBMITTED, not what was live, and order 112-0854205-5253012
+              // proved the gap: $32.87 kept over 28 consecutive own-BB
+              // snapshots reading $25.94, which is what the buyer paid.
               const localSellerDerived = exactSnapshotIsLiveRead || localEst > 0 && (
                 localSrc.startsWith('snapshot_price') ||
-                localSrc.startsWith('repricer_') ||
                 localSrc.startsWith('order_total') ||
                 localSrc.startsWith('listings_api') ||
-                localSrc.startsWith('seller_derived:repricer') ||
                 localSrc.startsWith('seller_derived:order_total') ||
                 localSrc.startsWith('seller_derived:listings_api')
               );
@@ -2933,7 +2963,9 @@ Deno.serve(async (req) => {
               const localIsSoftEstimate = !localSellerDerived && localEst > 0 && (
                 localSrc.startsWith('recent_sale') ||
                 localSrc.startsWith('seller_derived:recent') ||
-                localSrc.startsWith('seller_derived:snapshot')
+                localSrc.startsWith('seller_derived:snapshot') ||
+                localSrc.startsWith('repricer_') ||
+                localSrc.startsWith('seller_derived:repricer')
               );
               const localBbPromotes = localIsSoftEstimate
                 && bbFields.bb_estimate_qualified && bbFields.bb_estimate_owner_match
