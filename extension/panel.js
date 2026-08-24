@@ -785,6 +785,15 @@
     const pkgEl = $("apx-dims-pkg"), pkgWtEl = $("apx-dims-pkg-wt");
     const itemEl = $("apx-dims-item"), itemWtEl = $("apx-dims-item-wt");
     const srcEl = $("apx-dims-source");
+    // Guard every element, matching setChip's `if (!el) return`. These five
+    // were dereferenced directly (`pkgEl.textContent = "—"`), so a single
+    // missing id -- or being called before the panel DOM is mounted -- threw a
+    // TypeError. renderDims is 7th of 11 in renderAll(), so that throw took
+    // renderFbaEligibility, renderFbaCompliance, renderRoiAndSignal and
+    // renderSellerAmpSummary down with it: Eligible to list, Private-label
+    // risk, Active alerts and Decision Confidence all blank while everything
+    // rendered before it showed data. Observed 2026-08-23.
+    if (!pkgEl || !pkgWtEl || !itemEl || !itemWtEl || !srcEl) return;
     if (!d) {
       pkgEl.textContent = "—"; pkgWtEl.textContent = "—";
       itemEl.textContent = "—"; itemWtEl.textContent = "—";
@@ -806,6 +815,9 @@
     const fba = offers.filter(o => o.isFBA).map(o => o.landed).filter(Number.isFinite);
     const fbm = offers.filter(o => !o.isFBA).map(o => o.landed).filter(Number.isFinite);
     const bb = offers.find(o => o.isBuyBox)?.landed;
+    // Same unguarded pattern as renderDims had. renderHistory is 4th of 11, so
+    // a throw here would blank seven renderers rather than four.
+    if (!$("apx-bb") || !$("apx-fba") || !$("apx-fbm")) return;
     $("apx-bb").textContent = fmtMoney(bb, state.currency);
     $("apx-fba").textContent = fba.length ? fmtMoney(Math.min(...fba), state.currency) : "—";
     $("apx-fbm").textContent = fbm.length ? fmtMoney(Math.min(...fbm), state.currency) : "—";
@@ -1414,17 +1426,41 @@
   }
 
   function renderAll() {
-    renderMeta();
-    renderEligibility();
-    renderStability();
-    renderHistory();
-    renderHistoryChart();
-    renderSellers();
-    renderDims();
-    renderFbaEligibility();
-    renderFbaCompliance();
-    renderRoiAndSignal();
-    renderSellerAmpSummary();
+    // ⚠️ ISOLATED ON PURPOSE. These used to be eleven bare calls, so the first
+    // one to throw silently skipped every renderer after it -- and, because
+    // renderAll() runs before the Promise.allSettled in loadData(), also
+    // rejected loadData and stranded state.summaryLoading at true, leaving the
+    // panel on "Analyzing…" forever.
+    //
+    // That is one bug with two faces: partial UI (fields after the failure
+    // blank while earlier ones have data) AND a permanent skeleton. Observed
+    // 2026-08-23 via renderDims, which dereferenced five elements with no null
+    // check and sits 7th in this list -- taking the four renderers after it,
+    // including the entire seller-amp summary, down with it.
+    //
+    // A renderer failing should degrade its own section, not the panel. The
+    // console.error names which one so the next occurrence is diagnosed rather
+    // than guessed at.
+    const steps = [
+      ["meta", renderMeta],
+      ["eligibility", renderEligibility],
+      ["stability", renderStability],
+      ["history", renderHistory],
+      ["historyChart", renderHistoryChart],
+      ["sellers", renderSellers],
+      ["dims", renderDims],
+      ["fbaEligibility", renderFbaEligibility],
+      ["fbaCompliance", renderFbaCompliance],
+      ["roiAndSignal", renderRoiAndSignal],
+      ["sellerAmpSummary", renderSellerAmpSummary],
+    ];
+    for (const [name, fn] of steps) {
+      try {
+        fn();
+      } catch (e) {
+        console.error(`[arbipro] renderAll: ${name} failed`, e);
+      }
+    }
   }
 
   // ───── SellerAmp-style summary, diagnostics, and weighted verdict ─────
