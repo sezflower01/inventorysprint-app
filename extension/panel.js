@@ -1100,7 +1100,23 @@
   // ── Data load ──────────────────────────────────────────────────────
   let loadingFor = null;
   async function loadData(force = false) {
-    if (!state.asin || !state.signedIn) return;
+    if (!state.asin || !state.signedIn) {
+      // ⚠️ MUST clear summaryLoading, not just return.
+      //
+      // state.summaryLoading is initialised to TRUE (see the state literal at
+      // the top of this file) so the very first paint shows a skeleton rather
+      // than a flash of empty rows. Returning here without clearing it leaves
+      // that skeleton up permanently: the panel sits on "Analyzing…" with
+      // Decision Confidence, Eligible to list and Private-label risk blank,
+      // and nothing on screen says why.
+      //
+      // Reached whenever the panel renders before the session resolves or
+      // before an ASIN is detected -- which is timing-dependent, and is why
+      // this looked intermittent and unreproducible.
+      state.summaryLoading = false;
+      renderSellerAmpSummary();
+      return;
+    }
     const a = state.asin, m = state.marketplace;
     loadingFor = `${a}|${m}|${state.range}`;
     // Until this scan's data is fully consistent, renderSellerAmpSummary()
@@ -1110,6 +1126,28 @@
     // with new-product data and flash false "red alert" rows.
     state.summaryLoading = true;
     renderSellerAmpSummary();
+
+    // Safety net. Every task settles on its own (withTimeout resolves rather
+    // than rejecting, so Promise.allSettled below cannot hang), but the clear
+    // is still skipped on two paths: the `if (!stillCurrent()) return` after
+    // allSettled, and any throw between here and there -- readCache() on the
+    // next lines is not wrapped, for one.
+    //
+    // The slowest call is 30s, so anything past 35s means the flag was
+    // stranded, not slow. Clearing it degrades the panel to its real
+    // "unknown" states ("—", "Not enough data"), which tell the user something
+    // is missing. An eternal skeleton tells them nothing and looks like a hang.
+    //
+    // The warn is deliberate: if this ever fires, the console names the stuck
+    // scan so the underlying path can be found rather than guessed at.
+    const watchdogFor = loadingFor;
+    setTimeout(() => {
+      if (state.summaryLoading && loadingFor === watchdogFor) {
+        console.warn(`[arbipro] summary watchdog fired for ${watchdogFor} — summaryLoading was stranded, clearing`);
+        state.summaryLoading = false;
+        renderSellerAmpSummary();
+      }
+    }, 35000);
 
     const r = state.range;
     let servedFromCache = false;
