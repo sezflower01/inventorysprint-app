@@ -71,7 +71,11 @@ Two distinct usage styles, and picking the wrong one is a real bug:
 
 ### Keepa cost model
 
-The account plan is **5 tokens/min**; the gate guards at **4 calls/min** to avoid 429s. Note the gate meters **calls, not tokens** — a call returning thousands of listings may cost far more than one token, so call-count budgeting understates real consumption. Every Keepa response carries `tokensLeft`, `tokensConsumed`, `refillRate` and `refillIn`; read them when reasoning about capacity.
+The account plan is **25 tokens/min** (5 Pro + 20 API). The gate meters **tokens, not calls**, and guards at **20 tokens/min** — see `KEEPA_GUARD_LIMIT` in `_shared/keepa-rate-gate.ts`, which is the authority.
+
+⚠️ This paragraph previously read "5 tokens/min" and "guards at 4 calls/min, and meters calls not tokens". Both were wrong by 2026-08-23. Call-counting was the ORIGINAL design and it was the bug: 4 calls/min of `/seller?storefront=1` at 10 tokens each is 40 tokens/min, so it under-protected expensive calls while starving cheap ones — a single extension panel view could eat most of a minute's slots. The gate is token-aware now. Trust the constant in the source over any prose, including this.
+
+Per-call costs are in `KEEPA_COST`: `/seller?storefront=1` is a flat 10 tokens regardless of catalog size; `/product` is 1 token per ASIN. Every Keepa response carries `tokensLeft`, `tokensConsumed`, `refillRate` and `refillIn` — read them when reasoning about capacity, and report them back via `reportKeepaTokensLeft()` even from callers that do not gate, or the shared budget silently drifts from Keepa's own accounting.
 
 Keepa API gotchas already learned the hard way:
 - `/product` `offers` must be **0 or ≥20**. `offers=10` returns HTTP 200 with an `{error:...}` body, which naive code reads as "zero offers".
