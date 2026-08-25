@@ -86,7 +86,9 @@ interface VerifyResult {
   sku: string;
   db_before: { available: number; reserved: number; inbound: number };
   live: { available: number; reserved: number; inbound: number };
-  action: 'corrected' | 'unchanged' | 'not_found' | 'error';
+  // skipped_fbm_owned: FBA snapshot read 0/0/0 on a row sync-fbm-cleanup owns.
+  // Kept distinct from 'unchanged' so the report shows WHY nothing was written.
+  action: 'corrected' | 'unchanged' | 'not_found' | 'error' | 'skipped_fbm_owned';
   error?: string;
   delta?: { available: number; reserved: number; inbound: number };
 }
@@ -339,6 +341,46 @@ Deno.serve(async (req) => {
           asin: row.asin, sku: row.sku, db_before: dbBefore,
           live: dbBefore,
           action: 'not_found',
+        });
+        continue;
+      }
+
+      // ⚠️ AN FBA SNAPSHOT READING 0/0/0 IS NOT AUTHORITATIVE FOR AN FBM ROW.
+      //
+      // Same principle as the `if (!live)` guard above, one case further on.
+      // inventory.available is a SINGLE field shared by both fulfilment
+      // channels, and this function only ever reads the FBA Inventory API --
+      // there is no FBM concept anywhere in this file. A SKU that was once FBA
+      // keeps its FBA record (that is what the fnsku is) even after every unit
+      // moves to merchant-fulfilled, so Amazon correctly returns 0/0/0 for the
+      // FBA side while the seller genuinely holds stock.
+      //
+      // Without this guard the FBA writers win by sheer frequency:
+      // bulk-live-verify, refresh-stale-inventory and inventory-refresh-worker
+      // run constantly, sync-fbm-cleanup runs every 4 hours. So the FBM sync
+      // would write the real quantity and have it zeroed again within minutes.
+      //
+      // The damage is not just a wrong number. available = 0 forces
+      // listing_status = INACTIVE below, INACTIVE is in auto-assign-bulk's
+      // bad-status list, and auto-assign-bulk then disables the repricer
+      // assignment as a "broken/deleted assignment". Confirmed live on
+      // 2026-08-24, ASIN B001GQ2DB6 / SKU CM-BEP5-6YOO: the assignment was
+      // enabled at 22:45:18.28 for stock_detected and disabled at 22:45:18.59
+      // -- 310 milliseconds later -- so 5 real FBM units went unrepriced for
+      // over a week.
+      //
+      // source = 'amazon_sync_fbm' is written ONLY by sync-fbm-cleanup's FBM
+      // branch, so it is a reliable marker that the FBM sync owns this row.
+      // A genuine FBA zero still zeroes normally: those rows carry
+      // 'amazon_sync' or 'live_api', not 'amazon_sync_fbm'.
+      const rowIsFbmOwned = String(row.source || '') === 'amazon_sync_fbm';
+      const liveFbaIsAllZero = (live.available + live.reserved + live.inbound) === 0;
+      if (rowIsFbmOwned && liveFbaIsAllZero) {
+        console.log(`[BULK-VERIFY] FBM_ZERO_GUARD: keeping DB quantities for ${row.asin}/${row.sku} (FBM-owned row, FBA snapshot is 0/0/0)`);
+        results.push({
+          asin: row.asin, sku: row.sku, db_before: dbBefore,
+          live: dbBefore,
+          action: 'skipped_fbm_owned',
         });
         continue;
       }
