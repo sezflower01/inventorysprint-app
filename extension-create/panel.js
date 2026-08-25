@@ -1601,7 +1601,11 @@ async function loadFnskuOptionsLikeWeb(asin, allowAutoSync = true) {
       if (!isValidFnsku(fnsku)) continue;
       const sku = normalizeSku(r?.seller_sku);
       if (sku && deadSkus.has(sku)) {
-        console.warn(`[arbipro] FNSKU option hidden: ${fnsku} / ${sku} is a deleted or ghosted SKU`);
+        // console.log, NOT console.warn: chrome://extensions surfaces warnings
+        // in its Errors panel, and hiding a ghost SKU is EXPECTED behaviour, not an
+        // anomaly. Warning on every lookup of an ASIN with an old SKU trains the
+        // user to ignore that panel, which is worse than it being quiet.
+        console.log(`[arbipro] FNSKU option hidden: ${fnsku} / ${sku} is a deleted or ghosted SKU`);
         continue;
       }
       const condition = (r?.condition || "NEW").toString().toUpperCase();
