@@ -97,7 +97,7 @@
         }
       })
       .catch((e) => {
-        console.debug("[arbipro] fx load failed", e?.message || e);
+        console.debug("[InvSPRNT] fx load failed", e?.message || e);
         fxLoadPromise = null; // allow retry next render
       });
     return fxLoadPromise;
@@ -210,7 +210,7 @@
           return;
         }
       } catch (e) {
-        console.debug("[arbipro] fee retry failed", e?.message || e);
+        console.debug("[InvSPRNT] fee retry failed", e?.message || e);
       }
       if (state.asin === asin && state.marketplace === marketplace && getActualFeeTotal(state.fees) == null) {
         scheduleFeeRetry(asin, marketplace, attempt + 1);
@@ -256,7 +256,7 @@
           renderMeta(); renderEligibility(); renderFbaEligibility(); renderFbaCompliance(); renderSellerAmpSummary();
         }
       } catch (e) {
-        console.debug("[arbipro] gating retry failed", e?.message || e);
+        console.debug("[InvSPRNT] gating retry failed", e?.message || e);
       }
       if (state.asin === asin && state.marketplace === marketplace && selectedMarketplaceGatingStatus() !== "approved") {
         scheduleGatingRetry(asin, marketplace, attempt + 1);
@@ -415,7 +415,7 @@
         const benign = !msg || msg.includes("load failed") || msg.includes("not signed") ||
           msg.includes("no row") || msg.includes("auth") || msg.includes("network") ||
           msg.includes("fetch");
-        if (!benign) console.debug("[arbipro] loadCost db", e?.message || String(e));
+        if (!benign) console.debug("[InvSPRNT] loadCost db", e?.message || String(e));
       }
     }
     return local;
@@ -438,8 +438,8 @@
       };
       chrome.runtime.sendMessage({ type: "ARBIPRO_SAVE_COST", row }, (r) => {
         const err = chrome.runtime.lastError;
-        if (err) { console.warn("[arbipro] saveCost bridge", err.message); return; }
-        if (!r?.ok) console.warn("[arbipro] saveCost db", r?.error);
+        if (err) { console.warn("[InvSPRNT] saveCost bridge", err.message); return; }
+        if (!r?.ok) console.warn("[InvSPRNT] saveCost db", r?.error);
       });
     }, 600);
   }
@@ -1155,7 +1155,7 @@
     const watchdogFor = loadingFor;
     setTimeout(() => {
       if (state.summaryLoading && loadingFor === watchdogFor) {
-        console.warn(`[arbipro] summary watchdog fired for ${watchdogFor} — summaryLoading was stranded, clearing`);
+        console.warn(`[InvSPRNT] summary watchdog fired for ${watchdogFor} — summaryLoading was stranded, clearing`);
         state.summaryLoading = false;
         renderSellerAmpSummary();
       }
@@ -1189,7 +1189,7 @@
         // show immediately instead of a skeleton (still refreshed live below).
         state.summaryLoading = false;
         renderAll();
-        autoRecordHistory().catch((e) => console.debug("[arbipro] auto-record skipped:", e?.message || e));
+        autoRecordHistory().catch((e) => console.debug("[InvSPRNT] auto-record skipped:", e?.message || e));
         // Fall through: still issue the live fetches below so gating refreshes.
       }
     }
@@ -1204,7 +1204,7 @@
       const t = setTimeout(() => {
         if (!done) {
           lastInvokeError[label] = `timed out after ${ms}ms`;
-          console.debug(`[arbipro] ${label} timed out after ${ms}ms`);
+          console.debug(`[InvSPRNT] ${label} timed out after ${ms}ms`);
           resolve(null);
         }
       }, ms);
@@ -1214,7 +1214,7 @@
          clearTimeout(t);
          const msg = e?.message ? String(e.message) : String(e);
          lastInvokeError[label] = msg;
-         console.debug(`[arbipro] ${label} failed:`, msg, e);
+         console.debug(`[InvSPRNT] ${label} failed:`, msg, e);
          resolve(null);
        });
     });
@@ -1350,7 +1350,7 @@
 
     renderAll();
     // Auto-record this view to scan history (deduped per ASIN+marketplace)
-    autoRecordHistory().catch((e) => console.warn("[arbipro] auto-record failed", e?.message));
+    autoRecordHistory().catch((e) => console.warn("[InvSPRNT] auto-record failed", e?.message));
   }
 
   // Build a mobile_scan_history row from current state
@@ -1458,7 +1458,7 @@
       try {
         fn();
       } catch (e) {
-        console.error(`[arbipro] renderAll: ${name} failed`, e);
+        console.error(`[InvSPRNT] renderAll: ${name} failed`, e);
       }
     }
   }
