@@ -662,6 +662,41 @@ Deno.serve(async (req) => {
       }
     }
 
+    // ⚠️ A PARTIAL FEE ESTIMATE IS NOT A VALID ESTIMATE.
+    //
+    // The payload below already refuses an ALL-ZERO estimate, for the reason
+    // its own comment gives: returning {0,0,0} silently inflates ROI because
+    // profit = price - cost - 0. But the same thing happens, less visibly, when
+    // Amazon returns an FBA estimate containing ReferralFee and
+    // VariableClosingFee but NO FBAFees/FulfillmentFees line. totalFees is then
+    // non-zero, passes the `> 0` test, and is presented as a complete figure.
+    //
+    // Observed 2026-08-24 on two Sonny Angel blind boxes -- same product line,
+    // same size, so the fulfilment fee must be identical:
+    //
+    //   B09XFCCC9B  fees $7.07 = $3.21 referral + $3.86 fulfilment   ROI 30%
+    //   B09XFDB61N  fees $3.31 = $3.00 referral + $0.31 closing      ROI 52%
+    //                            ^ no fulfilment fee at all
+    //
+    // The second card therefore recommended BUY at 52% ROI on a product whose
+    // real ROI is roughly 19%, and Max Cost was derived from the same number,
+    // so it would also have authorised overpaying. A sourcing decision made on
+    // a fee estimate missing its largest component.
+    //
+    // Amazon omits the fulfilment line when it cannot compute one -- typically
+    // missing catalogue dimensions or weight. That is "unknown", not "free",
+    // and the existing feesUnavailable path already exists to say so.
+    const fbaEstimateComplete = fbaFees.totalFees > 0 && fbaFees.fbaFee > 0;
+    if (fbaFees.totalFees > 0 && !(fbaFees.fbaFee > 0)) {
+      console.warn(
+        `[LISTING_SNAPSHOT] INCOMPLETE_FEE_ESTIMATE ${asin}: total=$${fbaFees.totalFees} ` +
+        `referral=$${fbaFees.referralFee} closing=$${fbaFees.variableClosingFee} ` +
+        `fulfilment=$${fbaFees.fbaFee} — no FBAFees/FulfillmentFees line returned; ` +
+        `treating fees as UNAVAILABLE rather than showing a falsely low total`,
+      );
+      feesUnavailableReason = feesUnavailableReason || 'INCOMPLETE_NO_FULFILMENT_FEE';
+    }
+
     // Get FBA inventory status using sellerSkus parameter for direct lookup
     let available = 0;
     let reserved = 0;
@@ -1008,10 +1043,10 @@ Deno.serve(async (req) => {
         // Returning {0,0,0} on throttle/error silently inflates ROI in the
         // extension (profit = price - cost - 0). Null forces UI to show
         // "fees unavailable" instead of a fake number.
-        fees: (fbaFees.totalFees > 0) ? fbaFees : null,
-        feesUnavailable: !(fbaFees.totalFees > 0),
+        fees: fbaEstimateComplete ? fbaFees : null,
+        feesUnavailable: !fbaEstimateComplete,
         feesUnavailableReason,
-        feesSource: fbaFees.fromCache ? 'asin_fee_cache' : (fbaFees.totalFees > 0 ? 'amazon_fees_api' : null),
+        feesSource: fbaFees.fromCache ? 'asin_fee_cache' : (fbaEstimateComplete ? 'amazon_fees_api' : null),
         available,
         reserved,
         inbound,
