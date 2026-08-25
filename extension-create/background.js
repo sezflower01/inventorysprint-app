@@ -301,7 +301,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             sellerId && marketplaceId
               ? restGet(`fnsku_map?seller_id=eq.${sellerId}&marketplace_id=eq.${marketplaceId}&asin=eq.${asin}&select=fnsku,condition,seller_sku&order=updated_at.desc`)
               : Promise.resolve([]),
-            restGet(`inventory?user_id=eq.${uid}&asin=eq.${asin}&select=fnsku,sku,title,image_url&order=updated_at.desc`),
+            // listing_status / ghost_reason / deleted_reason are needed by the
+            // panel to keep DEAD SKUs out of the FNSKU label picker. Printing a
+            // ghost FNSKU sends physical units to Amazon under a SKU that no
+            // longer exists.
+            restGet(`inventory?user_id=eq.${uid}&asin=eq.${asin}&select=fnsku,sku,title,image_url,listing_status,ghost_reason,deleted_reason&order=updated_at.desc`),
             // Phase 4 — read from shared active_created_listings view (validation + ghost gate).
             restGet(`active_created_listings?user_id=eq.${uid}&asin=eq.${asin}&select=fnsku,sku,title,image_url&order=updated_at.desc`),
           ]);

@@ -1552,15 +1552,64 @@ async function loadFnskuOptionsLikeWeb(asin, allowAutoSync = true) {
   const readCached = async () => {
     const sources = await bg("ARBIPRO_LOAD_FNSKU_SOURCES", { asin, sellerId, marketplaceId });
     const rows = Array.isArray(sources?.data?.fnskuRows) ? sources.data.fnskuRows : [];
+    const inventoryRows = Array.isArray(sources?.data?.inventoryRows) ? sources.data.inventoryRows : [];
+    const createdListingRows = Array.isArray(sources?.data?.createdListingRows) ? sources.data.createdListingRows : [];
+
+    // ⚠️ GHOST SKUs MUST NOT REACH THE LABEL PICKER.
+    //
+    // fnsku_map keeps a row per (fnsku, condition) forever, including SKUs the
+    // seller has since deleted in Seller Central. This function used to filter
+    // on isValidFnsku() alone -- a FORMAT check -- so a dead SKU's FNSKU was
+    // offered exactly like a live one, and renderFnskuOptions() defaults
+    // selectedOptionIndex to 0, so it could be PRE-SELECTED.
+    //
+    // Observed 2026-08-24 on B09XFCCC9B: the picker offered X0042DN6RV
+    // (SKU 1062183890, deleted) alongside X0058P2FZV (SKU 05Y-5W2-D434, live),
+    // with the dead one selected. Printing that label sends physical units to
+    // Amazon under a SKU that no longer exists -- and unlike a bad number on a
+    // screen, it cannot be undone with an UPDATE.
+    //
+    // get-fnsku already refuses to resurrect ghost SKUs on the server side, and
+    // the background handler already fetches active_created_listings, described
+    // in its own comment as the "validation + ghost gate". Neither was wired to
+    // this list.
+    const deadSkus = new Set();
+    for (const r of inventoryRows) {
+      const sku = normalizeSku(r?.sku);
+      if (!sku) continue;
+      const status = String(r?.listing_status || "").toUpperCase();
+      // Explicit markers first. NOT_IN_CATALOG / DELETED / NOT_FOUND are
+      // unambiguous. INACTIVE is deliberately NOT treated as dead -- a listing
+      // can sit inactive and still be real, and hiding a valid FNSKU would push
+      // the user to hand-type one, which is worse.
+      const isDead = !!r?.ghost_reason || !!r?.deleted_reason ||
+        ["NOT_IN_CATALOG", "DELETED", "NOT_FOUND"].includes(status);
+      if (isDead) deadSkus.add(sku);
+    }
+
+    // SKUs backed by an active created listing are known-good; used to order
+    // the survivors so the DEFAULT selection is the safest one available.
+    const liveSkus = new Set();
+    for (const r of createdListingRows) {
+      const sku = normalizeSku(r?.sku);
+      if (sku) liveSkus.add(sku);
+    }
+
     const merged = new Map();
     for (const r of rows) {
       const fnsku = normalizeFnsku(r?.fnsku);
       if (!isValidFnsku(fnsku)) continue;
       const sku = normalizeSku(r?.seller_sku);
+      if (sku && deadSkus.has(sku)) {
+        console.warn(`[arbipro] FNSKU option hidden: ${fnsku} / ${sku} is a deleted or ghosted SKU`);
+        continue;
+      }
       const condition = (r?.condition || "NEW").toString().toUpperCase();
-      merged.set(`${fnsku}|${condition}`, { fnsku, condition, sku });
+      merged.set(`${fnsku}|${condition}`, { fnsku, condition, sku, isLive: !!(sku && liveSkus.has(sku)) });
     }
-    return Array.from(merged.values());
+
+    // Known-good first, so selectedOptionIndex = 0 lands on a live SKU.
+    return Array.from(merged.values()).sort((a, b) => Number(b.isLive) - Number(a.isLive));
   };
 
   // First read from DB cache.
