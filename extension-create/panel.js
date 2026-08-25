@@ -161,15 +161,56 @@ function generateSKU() {
 }
 
 const $ = (id) => document.getElementById(id);
-const bg = (type, extra = {}) => new Promise((res) => chrome.runtime.sendMessage({ type, ...extra }, (r) => {
-  if (r && r.ok === false) {
-    const err = String(r.error || "");
-    if (/not signed in|refresh \d|jwt|invalid token|expired/i.test(err)) {
-      setTimeout(() => { try { checkAuth(); } catch {} }, 0);
+// ⚠️ THREE THINGS THIS HAS TO HANDLE. It previously did none of them, while
+// the analyzer panel's own bg() has handled all three for a while.
+//
+// 1. chrome.runtime.lastError MUST be read inside the callback. If it is not,
+//    Chrome logs "Unchecked runtime.lastError" — which chrome://extensions
+//    files under Errors, so a routine service-worker hiccup looks like a fault.
+//
+// 2. chrome.runtime.sendMessage THROWS SYNCHRONOUSLY once the extension context
+//    is invalidated — which is exactly what reloading the extension does to an
+//    already-open panel. Inside a Promise executor that throw becomes a
+//    rejection, and every caller here expects a resolved value it can test with
+//    `r?.ok`, so the failure surfaced as an unhandled rejection instead.
+//
+// 3. MV3 service workers are terminated when idle, and the first message after
+//    termination reliably fails with "message port closed" before the worker
+//    restarts. One silent retry covers it.
+//
+// Always RESOLVES, never rejects — callers do `r?.ok ? r.data : null` or read
+// `r?.data?.x` directly, so a rejection would bypass their error handling
+// entirely. A failure is reported as { ok: false, error }.
+const bg = (type, extra = {}, retries = 1) => new Promise((res) => {
+  const attempt = (left) => {
+    try {
+      chrome.runtime.sendMessage({ type, ...extra }, (r) => {
+        const lastError = chrome.runtime.lastError;
+        if (lastError) {
+          if (left > 0) return attempt(left - 1);
+          const msg = lastError.message || "runtime_error";
+          console.log(`[InvSPRNT] bg(${type}) failed: ${msg}`);
+          return res({ ok: false, error: msg });
+        }
+        if (r && r.ok === false) {
+          const err = String(r.error || "");
+          if (/not signed in|refresh \d|jwt|invalid token|expired/i.test(err)) {
+            setTimeout(() => { try { checkAuth(); } catch {} }, 0);
+          }
+        }
+        res(r);
+      });
+    } catch (e) {
+      // Context invalidated cannot be retried back to life, but resolving with
+      // a clean failure beats an unhandled rejection from a dead panel.
+      if (left > 0) return attempt(left - 1);
+      const msg = String(e?.message || e);
+      console.log(`[InvSPRNT] bg(${type}) threw: ${msg}`);
+      res({ ok: false, error: msg });
     }
-  }
-  res(r);
-}));
+  };
+  attempt(retries);
+});
 
 const state = {
   asin: null,
