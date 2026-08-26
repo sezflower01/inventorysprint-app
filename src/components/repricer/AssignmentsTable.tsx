@@ -6408,6 +6408,20 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
     // Only show a status badge for true manual pauses. Everything else (auto-disabled,
     // needs review, pending verification, etc.) is suppressed per user request — the
     // toggle state itself communicates enabled/disabled.
+    // Amazon-blocked listings are the ONE exception to the manual-pause-only
+    // rule above. The reasoning for suppressing the rest holds -- the toggle
+    // already says enabled/disabled -- but it cannot say WHY, and this why is
+    // imposed by Amazon, stops all sales, and needs the seller to act.
+    // Observed 2026-08-25 on B0FTMPT33K: blocked pending a counterfeit appeal
+    // since 08-20, displayed as a perfectly healthy row.
+    if (s.kind === "blocked_not_buyable") {
+      return (
+        <Badge variant="outline" className="text-[10px] h-5 flex items-center gap-1 border-destructive text-destructive bg-destructive/10" title={s.tooltip}>
+          <Ban className="h-3 w-3" />
+          {s.label}
+        </Badge>
+      );
+    }
     if (s.kind !== "manually_paused") return null;
     return (
       <Badge variant="outline" className="text-[10px] h-5 flex items-center gap-1 border-destructive text-destructive bg-destructive/10" title={s.tooltip}>
