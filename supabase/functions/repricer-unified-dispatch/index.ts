@@ -768,7 +768,7 @@ async function scoreAllCandidates(
   while (true) {
     const { data: batch, error } = await supabase
       .from('repricer_assignments')
-      .select('id, asin, sku, marketplace, is_priority, is_manual_priority, rule_id, status, min_price_override, last_sp_api_check_at, last_buybox_price, last_applied_price, last_buybox_status, buybox_lost_at, last_price_change_at, last_evaluated_at, last_ack_result, last_ack_reason, last_priority_check_at, last_dispatch_at, dispatch_reason, oscillation_state, oscillation_cooldown_until, consecutive_zero_offers, is_restricted, intl_listing_status')
+      .select('id, asin, sku, marketplace, is_priority, is_manual_priority, rule_id, status, min_price_override, last_sp_api_check_at, last_buybox_price, last_applied_price, last_buybox_status, buybox_lost_at, last_price_change_at, last_evaluated_at, last_ack_result, last_ack_reason, last_priority_check_at, last_dispatch_at, dispatch_reason, oscillation_state, oscillation_cooldown_until, consecutive_zero_offers, is_restricted, intl_listing_status, is_listing_inactive_not_buyable')
       .eq('user_id', userId)
       .eq('is_enabled', true)
       .in('status', ['active', 'needs_attention'])
@@ -793,6 +793,32 @@ async function scoreAllCandidates(
     if (!a.rule_id || !a.min_price_override || a.min_price_override <= 0) return false;
     if (disabledRuleIds.has(a.rule_id)) return false;
     if (a.is_restricted) return false;
+    // ⚠️ NOT BUYABLE = DO NOT REPRICE, in ANY marketplace.
+    //
+    // is_listing_inactive_not_buyable is set by the listing-existence checks
+    // (verify-intl-listings-existence, pricing-suppression-core) when SP-API
+    // reports the offer deleted, not-in-catalog, or discoverable-only. Until
+    // now the ONLY thing that acted on it was auto-assign-bulk, which disables
+    // such assignments — but nothing schedules auto-assign-bulk for US
+    // (cron has only auto-assign-bulk-intl-sweep-6h, jobid 145). So a US
+    // assignment could be flagged not-buyable and keep repricing forever.
+    //
+    // Observed 2026-08-25 on B0FTMPT33K, blocked by Amazon pending a
+    // counterfeit appeal. Both SKUs were flagged not-buyable days earlier
+    // (08-20 and 08-22). 8GJ-WKC-BHJC happened to be disabled; 1O8-J3N-VB3V was
+    // still enabled and was evaluated at 2026-08-26 01:09 — the repricer
+    // working a listing Amazon had blocked.
+    //
+    // Note the intl_listing_status check below only covers non-US marketplaces,
+    // so US had no listing-state gate at all. This one is deliberately
+    // marketplace-agnostic.
+    //
+    // Deliberately NOT filtering on is_pricing_suppression: a price-related
+    // suppression (e.g. code 18555, "price higher than expected") is often
+    // CLEARED by repricing down, so skipping those would prevent the fix.
+    // "Not buyable" is different — there is no price that makes a deleted or
+    // blocked listing sellable.
+    if (a.is_listing_inactive_not_buyable === true) return false;
     // For international markets: only exclude confirmed-bad statuses; NULL = unverified = allow
     if (a.marketplace !== 'US' && a.intl_listing_status) {
       const ils = typeof a.intl_listing_status === 'string' ? a.intl_listing_status.toUpperCase() : JSON.stringify(a.intl_listing_status).toUpperCase();
