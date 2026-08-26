@@ -21,7 +21,7 @@ export type AssignmentStatusKind =
   | "no_inventory"                             // no matching inventory row (truly terminal)
   | "auto_suspended_no_stock"                  // 0 across available/reserved/inbound + not active
   | "auto_suspended_inbound_only_inactive"     // 0 available, inbound > 0, listing not active
-  | "blocked_not_buyable"                       // Amazon dropped BUYABLE — listing is blocked/inactive
+  | "blocked_not_buyable"                       // lost BUYABLE while stock > 0 — suppressed, blocked, or phantom qty
   | "auto_suspended_listing_inactive"          // SP-API listing state = INACTIVE/SUPPRESSED/NOT_FOUND
   | "auto_suspended_intl_stale"                // intl quantity data is stale (> 24h)
   | "auto_suspended_marketplace_not_sellable"  // marketplace_sellable=false (intl restriction)
@@ -114,21 +114,42 @@ export function deriveAssignmentStatus(i: AssignmentStatusInput): AssignmentStat
   // Observed 2026-08-25 on B0FTMPT33K, blocked by Amazon pending a counterfeit
   // appeal and flagged since 08-20.
   if (i.is_listing_inactive_not_buyable === true) {
-    const reason = (i.listing_inactive_reason_message || "").trim();
-    const code = (i.listing_inactive_reason_code || "").trim();
-    return {
-      kind: "blocked_not_buyable",
-      label: "Blocked — not buyable on Amazon",
-      tone: "danger",
-      tooltip: reason
-        ? `Amazon reports this listing is not buyable${code ? ` (${code})` : ""}: ${reason}`
-        : // No issues[] entry came back. Say so plainly rather than inventing a
-          // cause — policy actions such as authenticity or IP complaints are
-          // visible only in Seller Central, never through the Listings API.
-          "Amazon reports this listing is not buyable (status DISCOVERABLE without BUYABLE). " +
-          "Amazon returned no reason via the API — check Seller Central under the listing's " +
-          "\"Review blocked reason\" for the cause. Repricing is skipped while this holds.",
-    };
+    // ⚠️ NOT BUYABLE IS NOT THE SAME AS BLOCKED.
+    //
+    // The flag comes from SP-API summaries[].status losing BUYABLE. An FBA
+    // listing with zero units drops BUYABLE too -- there is nothing to buy --
+    // so a perfectly healthy out-of-stock ASIN sets this flag exactly like a
+    // policy-blocked one does. The API does not distinguish them, and neither
+    // can we.
+    //
+    // This branch first said "Blocked — not buyable on Amazon", which asserted
+    // a policy action the data cannot support. Reported 2026-08-26 on
+    // B071KFYY46, B0GQ2NDT59 and B07L3W8QRL: all three were simply out of
+    // stock and were labelled blocked.
+    //
+    // Stock is the only discriminator available. With nothing in stock, fall
+    // through to the existing no-stock handling, which says the right thing.
+    // With stock present, something IS wrong -- either the listing really is
+    // suppressed/blocked, or the quantity we hold is phantom -- so say that it
+    // is not buyable and let the seller check, without naming a cause.
+    const totalStock = (i.available ?? 0) + (i.reserved ?? 0) + (i.inbound ?? 0);
+    if (totalStock > 0) {
+      const reason = (i.listing_inactive_reason_message || '').trim();
+      const code = (i.listing_inactive_reason_code || '').trim();
+      return {
+        kind: 'blocked_not_buyable',
+        label: 'Not buyable on Amazon',
+        tone: 'danger',
+        tooltip: reason
+          ? `Amazon reports this listing is not buyable${code ? ` (${code})` : ''}: ${reason}`
+          : `Amazon reports this listing is not buyable (status DISCOVERABLE without BUYABLE) ` +
+            `while we still hold ${fmtInv(i)}. Amazon gives no reason via the API. ` +
+            `Most often this is a suppressed or blocked listing -- check Seller Central under ` +
+            `"Review blocked reason" -- but it can also mean the quantity above is stale. ` +
+            `Repricing is skipped while this holds.`,
+      };
+    }
+    // Zero stock: not buyable is expected, not a fault. Fall through.
   }
 
   // 2) No rule attached — never call this "paused\"
