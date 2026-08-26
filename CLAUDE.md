@@ -32,7 +32,13 @@ The product is an **Amazon FBA seller-operations platform**: repricing, inventor
 
 ### Tests
 
-There is **no frontend test runner** — no Jest, no Vitest, no test files in `src`. Don't assume `npm test` exists.
+There is no `npm test` script, but **Vitest IS available and there ARE test files in `src`** — e.g. `src/lib/repricer/__tests__/assignmentStatus.test.ts`, `src/lib/sales/__tests__/currencyConversion.test.ts`. Run them directly:
+
+```bash
+npx vitest run src/lib/repricer/__tests__/assignmentStatus.test.ts
+```
+
+⚠️ This paragraph previously read "no frontend test runner — no Jest, no Vitest, no test files in `src`". Verified false 2026-08-26: vitest ran 6 tests in that file and passed. Do not skip writing or running frontend tests on the strength of the old claim.
 
 Edge-function logic is tested with **Deno** (~20 `*_test.ts` files):
 
