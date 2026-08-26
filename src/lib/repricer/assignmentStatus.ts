@@ -21,6 +21,7 @@ export type AssignmentStatusKind =
   | "no_inventory"                             // no matching inventory row (truly terminal)
   | "auto_suspended_no_stock"                  // 0 across available/reserved/inbound + not active
   | "auto_suspended_inbound_only_inactive"     // 0 available, inbound > 0, listing not active
+  | "blocked_not_buyable"                       // Amazon dropped BUYABLE — listing is blocked/inactive
   | "auto_suspended_listing_inactive"          // SP-API listing state = INACTIVE/SUPPRESSED/NOT_FOUND
   | "auto_suspended_intl_stale"                // intl quantity data is stale (> 24h)
   | "auto_suspended_marketplace_not_sellable"  // marketplace_sellable=false (intl restriction)
@@ -54,6 +55,15 @@ export interface AssignmentStatusInput {
   intl_qty_confidence?: string | null;
   marketplace_sellable?: boolean | null;
   auto_suspended_reason?: string | null;       // NO_STOCK | INTL_STALE | LISTING_INACTIVE | INBOUND_ONLY_INACTIVE | MARKETPLACE_NOT_SELLABLE | LEGACY_UNAUDITED
+
+  // Set by pricing-suppression-core when SP-API's summaries[].status drops
+  // BUYABLE and keeps only DISCOVERABLE — exactly what Seller Central labels
+  // "Inactive". The reason fields are populated from issues[] WHEN AMAZON
+  // SENDS ONE; policy actions (counterfeit / IP complaints) carry no issues[]
+  // entry at all, so null means "Amazon did not say", not "we did not look".
+  is_listing_inactive_not_buyable?: boolean | null;
+  listing_inactive_reason_code?: string | null;
+  listing_inactive_reason_message?: string | null;
 
   status_legacy?: string | null;
   last_error_type?: string | null;
@@ -89,7 +99,39 @@ export function deriveAssignmentStatus(i: AssignmentStatusInput): AssignmentStat
     };
   }
 
-  // 2) No rule attached — never call this "paused"
+  // 1b) Amazon has made the listing non-buyable. This is a FACT ABOUT THE
+  // LISTING, not a decision of ours, so it outranks every derived reason
+  // below — no rule, no stock and stale quantities are all irrelevant if
+  // Amazon will not let anyone buy it.
+  //
+  // Placed after the manual-pause check only to preserve this file's stated
+  // rule that "Paused" belongs exclusively to a deliberate seller action.
+  //
+  // Until now nothing rendered this flag. `auto_suspended_listing_inactive`
+  // existed but keys off `auto_suspended_reason`, which no writer populates
+  // for this case — so an assignment could be correctly detected as blocked,
+  // correctly skipped by the dispatcher, and still show as "Active" on screen.
+  // Observed 2026-08-25 on B0FTMPT33K, blocked by Amazon pending a counterfeit
+  // appeal and flagged since 08-20.
+  if (i.is_listing_inactive_not_buyable === true) {
+    const reason = (i.listing_inactive_reason_message || "").trim();
+    const code = (i.listing_inactive_reason_code || "").trim();
+    return {
+      kind: "blocked_not_buyable",
+      label: "Blocked — not buyable on Amazon",
+      tone: "danger",
+      tooltip: reason
+        ? `Amazon reports this listing is not buyable${code ? ` (${code})` : ""}: ${reason}`
+        : // No issues[] entry came back. Say so plainly rather than inventing a
+          // cause — policy actions such as authenticity or IP complaints are
+          // visible only in Seller Central, never through the Listings API.
+          "Amazon reports this listing is not buyable (status DISCOVERABLE without BUYABLE). " +
+          "Amazon returned no reason via the API — check Seller Central under the listing's " +
+          "\"Review blocked reason\" for the cause. Repricing is skipped while this holds.",
+    };
+  }
+
+  // 2) No rule attached — never call this "paused\"
   if (!i.rule_id) {
     return {
       kind: "no_rule",

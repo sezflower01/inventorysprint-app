@@ -925,6 +925,10 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
       is_restricted: assignment?.is_restricted ?? false,
       intl_listing_status: assignment?.intl_listing_status || null,
       marketplace_sellable: (assignment as any)?.marketplace_sellable ?? null,
+      // Amazon-blocked listing — surfaced as "Blocked — not buyable on Amazon".
+      is_listing_inactive_not_buyable: (assignment as any)?.is_listing_inactive_not_buyable ?? null,
+      listing_inactive_reason_code: (assignment as any)?.listing_inactive_reason_code ?? null,
+      listing_inactive_reason_message: (assignment as any)?.listing_inactive_reason_message ?? null,
       eval_mode: (assignment?.eval_mode as EvalMode) || 'auto',
       active_eval_mode: (assignment?.active_eval_mode as ActiveEvalMode) || 'smart',
       eval_mode_reason: assignment?.eval_mode_reason || null,
@@ -6374,6 +6378,11 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
         (item.listing_status || "").toUpperCase() !== "ACTIVE",
       // Phase 1: pass new fact fields when present on the row
       amazon_listing_state: (item as any).amazon_listing_state ?? null,
+      // Amazon-blocked listing. Detected server-side since 2026-08 but never
+      // rendered until now, so a blocked ASIN displayed as Active.
+      is_listing_inactive_not_buyable: (item as any).is_listing_inactive_not_buyable ?? null,
+      listing_inactive_reason_code: (item as any).listing_inactive_reason_code ?? null,
+      listing_inactive_reason_message: (item as any).listing_inactive_reason_message ?? null,
       available: item.available,
       reserved: item.reserved,
       inbound: item.inbound,
