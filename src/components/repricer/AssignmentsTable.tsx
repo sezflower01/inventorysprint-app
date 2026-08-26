@@ -6364,6 +6364,44 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
   };
 
 
+  // Rendered directly under the ASIN rather than in the action column.
+  //
+  // It was originally a small badge alongside the pause/failure chips on the
+  // right-hand side, where it was easy to miss and too cramped to read -- the
+  // label is a sentence, not a one-word state. A listing Amazon will not sell
+  // belongs next to the identity of the thing that cannot be sold.
+  //
+  // Kept OUT of getErrorBadge so it is not rendered twice; that helper still
+  // owns manual-pause and failure-count chips in the action column.
+  const getListingBlockNotice = (item: InventoryWithAssignment) => {
+    if ((item as any).is_listing_inactive_not_buyable !== true) return null;
+    const totalStock = (item.available ?? 0) + (item.reserved ?? 0) + (item.inbound ?? 0);
+    // Same gate as deriveAssignmentStatus: with no stock, "not buyable" is
+    // simply what out-of-stock looks like to Amazon and is not worth flagging.
+    if (totalStock <= 0) return null;
+    const reason = String((item as any).listing_inactive_reason_message || '').trim();
+    const code = String((item as any).listing_inactive_reason_code || '').trim();
+    const tooltip = reason
+      ? `Amazon reports this listing is not buyable${code ? ` (${code})` : ''}: ${reason}`
+      : `Amazon reports this listing is not buyable (status DISCOVERABLE without BUYABLE) ` +
+        `while ${totalStock} unit${totalStock === 1 ? '' : 's'} are still recorded. Amazon gives no ` +
+        `reason via the API. Usually a suppressed or blocked listing — check Seller Central under ` +
+        `"Review blocked reason" — but it can also mean the quantity shown is stale. ` +
+        `Repricing is skipped while this holds.`;
+    return (
+      <div
+        className="flex items-start gap-1.5 rounded-md border border-destructive/60 bg-destructive/10 px-2 py-1 text-xs font-medium leading-snug text-destructive"
+        title={tooltip}
+      >
+        <Ban className="h-3.5 w-3.5 shrink-0 mt-[1px]" />
+        <span className="whitespace-normal">
+          Not buyable on Amazon
+          {reason ? <> — {reason}</> : <> — check Seller Central</>}
+        </span>
+      </div>
+    );
+  };
+
   const getErrorBadge = (item: InventoryWithAssignment) => {
     const s = deriveAssignmentStatus({
       is_enabled: item.is_enabled,
@@ -6408,20 +6446,6 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
     // Only show a status badge for true manual pauses. Everything else (auto-disabled,
     // needs review, pending verification, etc.) is suppressed per user request — the
     // toggle state itself communicates enabled/disabled.
-    // Amazon-blocked listings are the ONE exception to the manual-pause-only
-    // rule above. The reasoning for suppressing the rest holds -- the toggle
-    // already says enabled/disabled -- but it cannot say WHY, and this why is
-    // imposed by Amazon, stops all sales, and needs the seller to act.
-    // Observed 2026-08-25 on B0FTMPT33K: blocked pending a counterfeit appeal
-    // since 08-20, displayed as a perfectly healthy row.
-    if (s.kind === "blocked_not_buyable") {
-      return (
-        <Badge variant="outline" className="text-[10px] h-5 flex items-center gap-1 border-destructive text-destructive bg-destructive/10" title={s.tooltip}>
-          <Ban className="h-3 w-3" />
-          {s.label}
-        </Badge>
-      );
-    }
     if (s.kind !== "manually_paused") return null;
     return (
       <Badge variant="outline" className="text-[10px] h-5 flex items-center gap-1 border-destructive text-destructive bg-destructive/10" title={s.tooltip}>
@@ -7668,6 +7692,7 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                                   <Copy className="h-3 w-3" />
                                 </Button>
                               </div>
+                              {getListingBlockNotice(item)}
                               <SmartSuggestionBanner
                                 item={item}
                                 rules={rules}
