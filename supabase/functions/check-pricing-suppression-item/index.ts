@@ -62,7 +62,7 @@ Deno.serve(async (req) => {
 
     const { data: assignment } = await supabase
       .from('repricer_assignments')
-      .select('id, sku, asin, marketplace, is_pricing_suppression, pricing_suppression_pending_clear_at, pricing_suppression_detected_at, pricing_suppression_raw_code, pricing_suppression_raw_message, pricing_suppression_categories, pricing_suppression_enforcement_actions, pricing_suppression_severity, is_listing_inactive_not_buyable, listing_inactive_detected_at')
+      .select('id, sku, asin, marketplace, is_pricing_suppression, pricing_suppression_pending_clear_at, pricing_suppression_detected_at, pricing_suppression_raw_code, pricing_suppression_raw_message, pricing_suppression_categories, pricing_suppression_enforcement_actions, pricing_suppression_severity, is_listing_inactive_not_buyable, listing_inactive_detected_at, listing_inactive_reason_code, listing_inactive_reason_message')
       .eq('user_id', userId)
       .eq('sku', sku)
       .eq('marketplace', marketplaceCode)

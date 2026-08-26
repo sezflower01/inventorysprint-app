@@ -175,6 +175,8 @@ export interface SuppressionAssignmentRow {
   pricing_suppression_enforcement_actions: string[] | null;
   pricing_suppression_severity: string | null;
   is_listing_inactive_not_buyable: boolean | null;
+  listing_inactive_reason_code: string | null;
+  listing_inactive_reason_message: string | null;
   listing_inactive_detected_at: string | null;
 }
 
@@ -247,10 +249,34 @@ export async function checkAndUpdateSuppressionForItem(params: {
         ? matchedSummary.status
         : matchedSummary?.status ? [matchedSummary.status] : []
       ).map((s: any) => String(s || '').toUpperCase());
+      // WHY it is not buyable, not just THAT it is.
+      //
+      // issues_seen is already fetched (includedData: 'summaries,issues' above)
+      // but was consumed only by classifyIssues(), which looks for
+      // INVALID_PRICE-style entries. A counterfeit or IP block produces an
+      // issues[] entry with severity ERROR and no pricing category, so
+      // classifyIssues ignored it and the reason was discarded -- leaving the
+      // app able to say "paused" but never "blocked, and here is why".
+      //
+      // This is the text Seller Central shows as "Review blocked reason".
+      // Prefer a hard ERROR; fall back to whatever came back so a
+      // WARNING-only block is still explained rather than silently dropped.
+      const blockingIssue =
+        issues_seen.find((i: any) => String(i?.severity || '').toUpperCase() === 'ERROR') ||
+        issues_seen[0] ||
+        null;
       const notBuyablePatch: any = isNotBuyable
         ? {
             is_listing_inactive_not_buyable: true,
             listing_inactive_statuses: rawStatuses,
+            // Null rather than '' when Amazon sends no issue: Fix Price Alert
+            // deactivations genuinely carry no issues[] entry, and an empty
+            // string would read as "we looked and found nothing" when the truth
+            // is "Amazon did not say".
+            listing_inactive_reason_code: blockingIssue ? String(blockingIssue.code || '') || null : null,
+            listing_inactive_reason_message: blockingIssue
+              ? (String(blockingIssue.message || '').slice(0, 500) || null)
+              : null,
             listing_inactive_detected_at: wasNotBuyable && a.listing_inactive_detected_at
               ? a.listing_inactive_detected_at
               : new Date().toISOString(),
@@ -260,6 +286,11 @@ export async function checkAndUpdateSuppressionForItem(params: {
         : wasNotBuyable
           ? {
               is_listing_inactive_not_buyable: false,
+              // Clear the reason with the flag. A stale "counterfeit review"
+              // left on a listing Amazon has since restored is worse than no
+              // reason at all.
+              listing_inactive_reason_code: null,
+              listing_inactive_reason_message: null,
               listing_inactive_cleared_at: new Date().toISOString(),
               listing_inactive_last_checked_at: new Date().toISOString(),
             }
