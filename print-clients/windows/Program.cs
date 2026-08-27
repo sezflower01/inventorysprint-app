@@ -490,7 +490,15 @@ public static class ZplBuilder
                 break;
         }
 
-        var maxTitleLength = 40;
+        // 90, not 40. The old cap was never the binding constraint anyway: the
+        // ^FB below allowed a single line, and at font width 16 on a 2x1 label
+        // only ~20 characters fit on it -- six of which are the "New - "
+        // prefix. So roughly 14 characters of title reached the label, which is
+        // three or four words. Raising the cap without also raising the line
+        // count would have changed nothing.
+        //
+        // 90 = 3 lines x ~29 characters at the condensed width set below.
+        var maxTitleLength = 90;
         if (title.Length > maxTitleLength)
         {
             title = title.Substring(0, maxTitleLength);
@@ -508,16 +516,32 @@ public static class ZplBuilder
         var scale = dpi / 203.0;
         int x = (int)Math.Round(labelWidthDots * 0.10);
         int topY = (int)Math.Round(4 * scale);
-        int topTextHeight = Math.Max((int)Math.Round(28 * scale), (int)Math.Round(labelHeightDots * 0.16));
+        // Three lines of titleFontH plus inter-line spacing. On 2x1 @ 203dpi
+        // this is 57 dots, leaving 65..126 for the barcode and ~151 total of
+        // the 203 available -- the human-readable barcode text fits under it
+        // with margin to spare.
+        int topTextHeight = Math.Max((int)Math.Round(57 * scale), (int)Math.Round(labelHeightDots * 0.28));
         int barcodeY = topY + topTextHeight + (int)Math.Round(4 * scale);
         int barcodeHeight = Math.Max((int)Math.Round(28 * scale), (int)Math.Round(labelHeightDots * 0.30));
-        int titleFont = Math.Max(12, (int)Math.Round(16 * scale));
+        // Height and width set INDEPENDENTLY. ^A0N takes both, and the old code
+        // passed the same value for each, giving square glyphs 16 dots wide.
+        // Usable width on a 2x1 @ 203dpi is 326 dots (406 minus 10% margins
+        // each side), so 16-wide characters meant ~20 per line.
+        //
+        // Condensing to 11 wide while keeping 15 tall gives ~29 characters per
+        // line and stays legible -- narrowing glyphs costs far less readability
+        // than shrinking them vertically would.
+        int titleFontH = Math.Max(12, (int)Math.Round(15 * scale));
+        int titleFontW = Math.Max(9, (int)Math.Round(11 * scale));
         var topText = $"{condition} - {title}";
 
         // Condition + title first so printer bottom clipping cannot hide it.
         sb.AppendLine($"^FO{x},{topY}");
-        sb.AppendLine($"^A0N,{titleFont},{titleFont}");
-        sb.AppendLine($"^FB{labelWidthDots - (x * 2)},1,0,C,0");
+        sb.AppendLine($"^A0N,{titleFontH},{titleFontW}");
+        // 3 lines instead of 1, and left-aligned instead of centred: wrapped
+        // text is much easier to read ragged-right than centred, where every
+        // line starts at a different x.
+        sb.AppendLine($"^FB{labelWidthDots - (x * 2)},3,0,L,0");
         sb.AppendLine($"^FD{topText}^FS");
 
         // Barcode CODE128 under the title, intentionally smaller to leave visible title space.
@@ -673,17 +697,26 @@ public static class GdiLabelPrinter
             float drawW = labelW - padX * 2;
 
             // Layout: condition/title first, with the barcode reduced to leave guaranteed visible text room.
-            float titleRowH = Math.Max(0.18f, labelH * 0.18f);
+            // 0.30in, not 0.18in. Arial 6.5pt runs ~0.09in per line, so 0.18in
+            // held 1.7 lines -- and LineLimit below refuses to draw a partial
+            // line, so exactly ONE printed and the rest was ellipsed. 0.30in
+            // fits three whole lines.
+            float titleRowH = Math.Max(0.30f, labelH * 0.30f);
             float barcodeH = Math.Max(0.20f, labelH * 0.32f);
             float y = 0.02f;
 
             var normalizedCondition = condition.ToUpperInvariant().Contains("NEW") ? "New" : condition.ToUpperInvariant();
             var topText = $"{normalizedCondition} - {title}";
-            using (var f = new System.Drawing.Font("Arial", 7.5f, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point))
+            // 6.5pt: ~37 characters per line across the 1.68in draw width,
+            // versus ~32 at 7.5pt. Combined with three lines that is ~111
+            // characters against the ~26 that used to reach the label.
+            using (var f = new System.Drawing.Font("Arial", 6.5f, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Point))
             {
                 var sf = new System.Drawing.StringFormat
                 {
-                    Alignment = System.Drawing.StringAlignment.Center,
+                    // Near, not Center: see the ZPL note above -- centred
+                    // wrapped text is harder to scan than ragged-right.
+                    Alignment = System.Drawing.StringAlignment.Near,
                     Trimming = System.Drawing.StringTrimming.EllipsisCharacter,
                     FormatFlags = System.Drawing.StringFormatFlags.LineLimit
                 };
