@@ -6389,14 +6389,24 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
         `"Review blocked reason" — but it can also mean the quantity shown is stale. ` +
         `Repricing is skipped while this holds.`;
     return (
+      // w-[180px] matches the title div above it exactly. Without a fixed
+      // width the notice is the widest thing in the cell, so the column — and
+      // with it the whole table — stretched to fit one long sentence.
+      // line-clamp-2 caps it at two lines so a long Amazon reason cannot make
+      // the row tall either; the full text stays in the tooltip.
+      //
+      // Amber rather than red: the table body is dark navy
+      // (hsl(220,65%,18%)), where a red-on-transparent chip barely registered.
+      // Dark text on a solid amber block is the highest-contrast combination
+      // available here, and amber reads as "needs attention" without competing
+      // with the destructive red used for genuine errors elsewhere.
       <div
-        className="flex items-start gap-1.5 rounded-md border border-destructive/60 bg-destructive/10 px-2 py-1 text-xs font-medium leading-snug text-destructive"
+        className="mt-1 flex w-[180px] max-w-[180px] items-start gap-1 rounded border border-amber-500 bg-amber-300 px-1.5 py-1 text-[11px] font-semibold leading-tight text-amber-950"
         title={tooltip}
       >
-        <Ban className="h-3.5 w-3.5 shrink-0 mt-[1px]" />
-        <span className="whitespace-normal">
-          Not buyable on Amazon
-          {reason ? <> — {reason}</> : <> — check Seller Central</>}
+        <Ban className="h-3 w-3 shrink-0 mt-[1px]" />
+        <span className="line-clamp-2 whitespace-normal">
+          Not buyable on Amazon{reason ? ` — ${reason}` : ' — check Seller Central'}
         </span>
       </div>
     );
