@@ -5859,9 +5859,132 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items.length, marketplace]);
 
-  // Realtime sync: padlock (ui_edit_locked) across tabs/computers for this user.
-  // Lightweight: filter by user_id, react only when ui_edit_locked changed,
-  // patch only the affected assignment id in the local Set — never refetch.
+  // Realtime sync: padlock (ui_edit_locked) + cross-computer min/max price
+  // overrides, across tabs and computers for this user.
+  //
+  // -- WHY THIS LISTENS TWICE -------------------------------------------
+  //
+  // This used to be a single `postgres_changes` subscription on
+  // repricer_assignments. That table is 185 columns wide and takes ~9.2
+  // UPDATEs/second of pure machine bookkeeping from repricer-scheduler
+  // (last_ack_result, last_sp_api_check_at, last_buybox_status, streak
+  // counters...). Realtime broadcasts on ANY row change regardless of which
+  // column moved, so every one of those shipped a 185-column row to every
+  // subscribed tab -- so that a padlock icon could stay in sync.
+  //
+  // Measured 2026-08-20 over 51.28h: realtime.list_changes was 93% of the
+  // top-15 queries by buffers touched, 14x the next entry, and Realtime
+  // accounted for ~290 GB/month of billed egress.
+  //
+  // The five fields below are the ENTIRE set this component reads from the
+  // payload, and all four meaningful ones are human actions -- clicking the
+  // padlock, typing a price. Those happen a few times an hour, not 9.2 times
+  // a second. So the events now come from a trigger with a WHEN clause that
+  // fires only when one of those four columns actually changes
+  // (20260827120000_assignments_ui_broadcast.sql), delivered over `broadcast`
+  // rather than `postgres_changes`.
+  //
+  // Both transports are wired here ON PURPOSE, and this is a transitional
+  // state, not the end state. The broadcast trigger ships in one migration;
+  // removing the table from the supabase_realtime publication ships in a
+  // SEPARATE one. Between those two deploys both paths deliver, and after the
+  // second only broadcast does. `applyUiPatch` is idempotent -- it diffs
+  // before writing state and returns the previous object when nothing moved --
+  // so double delivery is a no-op rather than a double render.
+  //
+  // Once the publication migration is confirmed live, delete the
+  // postgres_changes half. Do NOT delete it before then: it is the only thing
+  // keeping padlock sync working if the broadcast path turns out to be wrong.
+  const applyUiPatchImpl = useCallback((row: any) => {
+    if (!row?.id) return;
+    const id = row.id as string;
+
+    // 1) Padlock sync
+    const nextLocked = !!row.ui_edit_locked;
+    setLockedIds(prev => {
+      const has = prev.has(id);
+      if (has === nextLocked) return prev;
+      const next = new Set(prev);
+      if (nextLocked) next.add(id); else next.delete(id);
+      return next;
+    });
+
+    // 2) Cross-computer min/max sync. Patch local items when another
+    // browser saves min_price_override / max_price_override / manual_min_price
+    // for this user. Respects the just-saved grace window so the sending
+    // computer never overwrites its own fresh value with an echo.
+    const nextMin = row.min_price_override;
+    const nextMax = row.max_price_override;
+    const nextManualMin = row.manual_min_price;
+    setItems(prev => {
+      let changed = false;
+      const updated = prev.map(item => {
+        if (item.assignment_id !== id) return item;
+        const savedAt = justSavedOverrideAtRef.current?.[item.id];
+        const inGrace = savedAt != null && (Date.now() - savedAt) < JUST_SAVED_OVERRIDE_GRACE_MS;
+        if (inGrace) return item;
+        const patch: any = {};
+        if (nextMin !== undefined && item.min_price_override !== nextMin) {
+          patch.min_price_override = nextMin;
+        }
+        if (nextMax !== undefined && item.max_price_override !== nextMax) {
+          patch.max_price_override = nextMax;
+        }
+        if (nextManualMin !== undefined && (item as any).manual_min_price !== nextManualMin) {
+          patch.manual_min_price = nextManualMin;
+        }
+        if (Object.keys(patch).length === 0) return item;
+        changed = true;
+        return { ...item, ...patch };
+      });
+      return changed ? updated : prev;
+    });
+  }, [setItems]);
+
+  // Held in a ref so the two subscriptions below can depend on user.id ALONE.
+  //
+  // setItems here is not a useState setter -- it is a useCallback over
+  // setItemsCache (see ~line 1522) -- so applyUiPatchImpl's identity is not
+  // guaranteed stable across renders. If the effects depended on the callback
+  // directly, an unstable identity would tear down and re-establish a realtime
+  // channel on every render. In a change whose entire purpose is cutting
+  // realtime cost, that would be a own-goal, and a subtle one: it would look
+  // like it worked.
+  //
+  // The ref is always current because the assignment runs during render, and
+  // the subscription callbacks only ever read it at event time.
+  const applyUiPatchRef = useRef(applyUiPatchImpl);
+  applyUiPatchRef.current = applyUiPatchImpl;
+
+  // Transport A -- broadcast, driven by the WHEN-gated trigger. This is the
+  // one that survives.
+  useEffect(() => {
+    if (!user?.id) return;
+    let ch: any;
+    let cancelled = false;
+    (async () => {
+      // Private channels authorise against realtime.messages RLS, which needs
+      // the caller's JWT on the socket. Without this the subscription fails
+      // closed (no events, and no error on the happy path) -- so if padlock
+      // sync ever goes quiet, check this call first.
+      try { await (supabase as any).realtime.setAuth(); } catch { /* falls back to anon; the policy then denies */ }
+      if (cancelled) return;
+      ch = (supabase as any)
+        .channel(`assignment-ui-${user.id}`, { config: { private: true } })
+        .on('broadcast', { event: 'assignment_ui' }, (msg: any) => {
+          applyUiPatchRef.current(msg?.payload?.record ?? msg?.payload);
+        })
+        .subscribe();
+    })();
+    return () => {
+      cancelled = true;
+      if (ch) (supabase as any).removeChannel(ch);
+    };
+  }, [user?.id]);
+
+  // Transport B -- legacy postgres_changes. DELETE THIS once
+  // 20260827120002_assignments_leave_realtime_publication.sql is applied and
+  // padlock sync is confirmed working on broadcast alone.
   useEffect(() => {
     if (!user?.id) return;
     const ch = (supabase as any)
@@ -5874,52 +5997,7 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
           table: "repricer_assignments",
           filter: `user_id=eq.${user.id}`,
         },
-        (payload: any) => {
-          const row = payload?.new;
-          if (!row?.id) return;
-          const id = row.id as string;
-
-          // 1) Padlock sync
-          const nextLocked = !!row.ui_edit_locked;
-          setLockedIds(prev => {
-            const has = prev.has(id);
-            if (has === nextLocked) return prev;
-            const next = new Set(prev);
-            if (nextLocked) next.add(id); else next.delete(id);
-            return next;
-          });
-
-          // 2) Cross-computer min/max sync. Patch local items when another
-          // browser saves min_price_override / max_price_override / manual_min_price
-          // for this user. Respects the just-saved grace window so the sending
-          // computer never overwrites its own fresh value with an echo.
-          const nextMin = row.min_price_override;
-          const nextMax = row.max_price_override;
-          const nextManualMin = row.manual_min_price;
-          setItems(prev => {
-            let changed = false;
-            const updated = prev.map(item => {
-              if (item.assignment_id !== id) return item;
-              const savedAt = justSavedOverrideAtRef.current?.[item.id];
-              const inGrace = savedAt != null && (Date.now() - savedAt) < JUST_SAVED_OVERRIDE_GRACE_MS;
-              if (inGrace) return item;
-              const patch: any = {};
-              if (nextMin !== undefined && item.min_price_override !== nextMin) {
-                patch.min_price_override = nextMin;
-              }
-              if (nextMax !== undefined && item.max_price_override !== nextMax) {
-                patch.max_price_override = nextMax;
-              }
-              if (nextManualMin !== undefined && (item as any).manual_min_price !== nextManualMin) {
-                patch.manual_min_price = nextManualMin;
-              }
-              if (Object.keys(patch).length === 0) return item;
-              changed = true;
-              return { ...item, ...patch };
-            });
-            return changed ? updated : prev;
-          });
-        }
+        (payload: any) => applyUiPatchRef.current(payload?.new)
       )
       .subscribe();
     return () => { (supabase as any).removeChannel(ch); };

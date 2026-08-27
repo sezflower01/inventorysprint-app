@@ -1074,33 +1074,50 @@ export default function ActionLogDialog({ asin, sku, marketplace, open, onOpenCh
     }
   }, [open, asin, sku, marketplace, user]);
 
-  // Realtime channel scoping: user-scoped. See docs/realtime-channels.md.
-  // Previously used ASIN as the sole namespace, which meant every user viewing
-  // the same ASIN shared a channel. `repricer_assignments` RLS already scopes
-  // rows to auth.uid(), but the shared channel name caused needless callback
-  // fan-out across tenants; prepending user.id bounds it per-account.
+  // Poll while open, rather than subscribing to repricer_assignments.
+  //
+  // -- WHY THIS IS NOT REALTIME ANY MORE ---------------------------------
+  //
+  // This was a `postgres_changes` UPDATE subscription on
+  // repricer_assignments. Unlike the padlock sync in AssignmentsTable, it is
+  // NOT the case that this dialog wanted only a few columns: fetchData() reads
+  // last_evaluated_at, last_sp_api_check_at, last_skip_reason, last_skip_lane,
+  // last_throttle_at and friends, which is exactly the machine bookkeeping
+  // that repricer-scheduler writes ~9.2 times a second. This dialog genuinely
+  // wanted those events.
+  //
+  // It just did not want them at that price. repricer_assignments has left the
+  // supabase_realtime publication (see
+  // 20260827120002_assignments_leave_realtime_publication.sql) because
+  // broadcasting a 185-column row on every bookkeeping write was ~93% of all
+  // Realtime work on the account. Keeping ONE dialog live is not worth
+  // reinstating that, and routing the same writes through a trigger instead
+  // would just move 9.2 inserts/second into realtime.messages -- worse, not
+  // better, since that is a real table write rather than a WAL decode.
+  //
+  // A dialog that is open on one ASIN, in front of a human who is watching it,
+  // is the textbook case for polling: the work is bounded by how long someone
+  // stares at it, and it costs one indexed lookup every 15s instead of a
+  // fleet-wide fan-out. The old subscription also had no `user_id` in its
+  // filter (it leaned entirely on RLS), so this is marginally tighter as well.
+  //
+  // 15s was chosen against the repricer's own cadence: min_fetch_interval is
+  // measured in minutes, so a faster poll cannot surface anything new and a
+  // slower one would feel stale while a price action is landing.
   useEffect(() => {
     if (!open || !asin || !user) return;
-    const filterStr = sku ? `sku=eq.${sku}` : `asin=eq.${asin}`;
-    const channel = supabase
-      .channel(`action-log-${user.id}-${asin}-${sku || 'any'}-${marketplace}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'repricer_assignments',
-          filter: filterStr,
-        },
-        () => {
-          fetchData();
-        }
-      )
-      .subscribe();
+    let cancelled = false;
+    const id = window.setInterval(() => {
+      // document.hidden: a backgrounded tab with the dialog left open should
+      // not keep querying. Reopening or refocusing picks it straight back up.
+      if (cancelled || document.hidden) return;
+      fetchData();
+    }, 15000);
     return () => {
-      supabase.removeChannel(channel);
+      cancelled = true;
+      window.clearInterval(id);
     };
-  }, [open, asin, marketplace, user]);
+  }, [open, asin, sku, marketplace, user]);
 
   const handleResume = async () => {
     if (!asin || !user) return;
