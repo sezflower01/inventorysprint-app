@@ -1,19 +1,25 @@
 -- Remove repricer_assignments from the supabase_realtime publication.
 --
--- ⚠️ DO NOT APPLY THIS UNTIL THE BROADCAST PATH IS VERIFIED. ⚠️
+-- ⚠️ THIS MIGRATION IS EXPECTED TO FAIL ON ITS FIRST RUN. ⚠️
+--
+-- That is deliberate, not a bug. It refuses to run until it can see proof that
+-- a broadcast actually landed in realtime.messages -- see "THE GATE" below.
+-- Toggle a padlock on the Repricer, then run `npm run db:push` again.
+--
+-- The gate is in the migration rather than in a runbook because a runbook step
+-- gets skipped and a RAISE EXCEPTION does not. It is safe to leave this file in
+-- the migrations directory and push the whole series in one go: the earlier
+-- migrations apply, this one stops the run, and nothing is half-done.
 --
 -- This is the migration that actually collects the win, and it is also the
--- only one in the series that can break a working feature. Ordering matters:
+-- only one in the series that can break a working feature. Ordering:
 --
 --   1. Deploy the frontend (AssignmentsTable dual-transport, ActionLogDialog
 --      poll). Vercel does this automatically on push to main.
 --   2. Apply 20260827120000 -- installs the WHEN-gated broadcast trigger.
 --      Additive; both transports now deliver.
---   3. Confirm padlock sync works. Open the Repricer on two machines as the
---      same user, toggle a padlock on one, watch it move on the other. That
---      proves broadcast specifically ONLY if you can attribute it -- see the
---      verification note below.
---   4. Apply this migration.
+--   3. Toggle a padlock. This is what produces the evidence the gate wants.
+--   4. Re-run db push. This migration now passes its own check and applies.
 --
 -- Reverting is one statement and takes effect immediately:
 --
@@ -53,7 +59,8 @@
 
 DO $$
 DECLARE
-  trg_ok boolean;
+  trg_ok   boolean;
+  evidence int;
 BEGIN
   -- Refuse to run if the replacement is not in place. Removing the table from
   -- the publication without the trigger installed would silently kill padlock
@@ -69,6 +76,31 @@ BEGIN
     RAISE EXCEPTION
       'trg_broadcast_assignment_ui is missing -- apply 20260827120000_assignments_ui_broadcast.sql first. Refusing to remove the table from realtime with no replacement transport.';
   END IF;
+
+  -- ── THE GATE ────────────────────────────────────────────────────────────
+  --
+  -- A trigger EXISTING is not evidence that it WORKS. broadcast_assignment_ui_change
+  -- swallows every exception on purpose (telemetry must never fail the write it
+  -- observes), so a wrong realtime.send() signature, a missing realtime.messages
+  -- policy, or a permissions problem all look identical from outside: the
+  -- trigger fires, does nothing, and reports success.
+  --
+  -- So require proof that a broadcast actually landed. This is the difference
+  -- between "the migration was applied" and "the thing works" -- and it is
+  -- self-enforcing rather than a note in a README that someone skips.
+  --
+  -- Expect this migration to FAIL the first time it is run. That is the design.
+  -- Toggle a padlock on the Repricer, then run db push again.
+  SELECT count(*) INTO evidence
+  FROM realtime.messages
+  WHERE topic LIKE 'assignment-ui-%'
+    AND inserted_at > now() - interval '3 days';
+
+  IF evidence = 0 THEN
+    RAISE EXCEPTION E'No broadcast evidence found, so this migration is REFUSING to remove repricer_assignments from realtime.\n\nThis is expected on the first run and is not a bug. The trigger is installed but has never been shown to deliver.\n\nTo clear the gate:\n  1. Open the Repricer and toggle a padlock on any row (lock, then unlock -- unlock code 1365).\n  2. Re-run: npm run db:push\n\nIf it still fails after toggling, the trigger is firing but realtime.send() is failing silently inside its exception handler. Do NOT force past this -- check that realtime.send(jsonb,text,text,boolean) exists and that the realtime.messages policy from 20260827120000 was actually created.';
+  END IF;
+
+  RAISE NOTICE 'broadcast evidence found: % message(s) on assignment-ui-%% in the last 3 days. Proceeding.', evidence;
 
   IF EXISTS (
     SELECT 1 FROM pg_publication_tables
