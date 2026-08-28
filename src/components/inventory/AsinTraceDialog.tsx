@@ -54,6 +54,27 @@ type Trace = {
   discrepancies: Discrepancy[];
 };
 
+// Days Amazon allows a shipment discrepancy to be claimed after the shipment
+// closes.
+//
+// 90 was reported from experience on 2026-08-28, after a seller found March
+// shipments already auto-closed and unclaimable having believed the window was
+// 18 months. It is NOT quoted from Amazon policy here, and Amazon has changed
+// these terms more than once -- which is exactly why the UI labels anything
+// near the edge as "verify" rather than asserting a deadline it cannot know.
+//
+// Set conservatively on purpose: warning too early costs a wasted look, warning
+// too late costs the whole claim.
+const CLAIM_WINDOW_DAYS = 90;
+const CLAIM_WARN_DAYS = 21;
+
+const daysSince = (v: string | null): number | null => {
+  if (!v) return null;
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(`${v}T00:00:00`) : new Date(v);
+  if (Number.isNaN(d.getTime())) return null;
+  return Math.floor((Date.now() - d.getTime()) / 86_400_000);
+};
+
 const fmtDate = (v: string | null) => {
   if (!v) return "—";
   const d = /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(`${v}T00:00:00`) : new Date(v);
@@ -291,14 +312,46 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
                         </td>
                         <td className="py-1.5 text-right font-semibold tabular-nums text-orange-700 dark:text-orange-400">
                           −{d.shipped - d.received}
+                          {(() => {
+                            // Counted from received_date, the closest thing in
+                            // our data to when the shipment closed. Where it is
+                            // absent nothing is claimed either way -- a guessed
+                            // deadline is worse than none.
+                            const age = daysSince(d.receivedDate);
+                            if (age == null) {
+                              return (
+                                <span className="block text-[10px] font-normal text-muted-foreground">
+                                  no close date — check
+                                </span>
+                              );
+                            }
+                            const left = CLAIM_WINDOW_DAYS - age;
+                            if (left <= 0) {
+                              return (
+                                <span className="block text-[10px] font-normal text-muted-foreground">
+                                  {age}d old — likely closed
+                                </span>
+                              );
+                            }
+                            return (
+                              <span className={`block text-[10px] font-semibold ${
+                                left <= CLAIM_WARN_DAYS ? "text-red-600 dark:text-red-400" : "text-emerald-700 dark:text-emerald-400"
+                              }`}>
+                                {left}d left to claim
+                              </span>
+                            );
+                          })()}
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
                 <div className="text-[10px] text-muted-foreground mt-2">
-                  Amazon normally requires a claim within a limited window after the
-                  shipment closes, so older shortfalls may no longer be claimable.
+                  Countdown assumes a {CLAIM_WINDOW_DAYS}-day window from the received date.
+                  Amazon has changed these terms before and they differ by claim type — treat
+                  this as a prompt to check, not as the deadline itself. Anything showing
+                  &quot;likely closed&quot; is still worth opening once: Amazon auto-reimburses some
+                  discrepancies without a claim.
                 </div>
               </div>
             )}
