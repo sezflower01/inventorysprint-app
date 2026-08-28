@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   ListChecks,
   Receipt,
+  SearchX,
   ShieldAlert,
   Tags,
   Truck,
@@ -212,6 +213,15 @@ export const MODULE_CATEGORIES: ModuleCategory[] = [
         color: "from-indigo-500 to-blue-600",
         adminOnly: false,
         ga: "tool_menu_purchase_vs_shipment",
+      },
+      {
+        path: "/tools/unshipped-purchases",
+        label: "Unshipped Purchases",
+        description: "Money spent that never reached Amazon — find purchases with no shipment.",
+        icon: SearchX,
+        color: "from-rose-500 to-red-600",
+        adminOnly: false,
+        ga: "tool_menu_unshipped_purchases",
       },
       {
         path: "/tools/shipment-tracking",
