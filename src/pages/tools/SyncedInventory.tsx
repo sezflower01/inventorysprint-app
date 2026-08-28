@@ -89,6 +89,34 @@ const MARKETPLACE_ID_TO_CODE: Record<string, 'US' | 'CA' | 'MX' | 'BR'> = {
   A2Q3Y263D00KWC: 'BR',
 };
 
+/**
+ * Parse a listing date that may be a bare DATE rather than a timestamp.
+ *
+ * `listing_created_at` is fed from `created_listings.date_created`, which is a
+ * Postgres DATE and arrives as "2026-08-23" with no time and no zone. Passing
+ * that to `new Date()` does NOT give local midnight: ECMAScript specifies that
+ * date-only ISO forms are parsed as UTC, while date-TIME forms without a zone
+ * are parsed as local. So the bare form lands on UTC midnight, and every
+ * viewer west of UTC renders the PREVIOUS day.
+ *
+ *   new Date("2026-08-23").toLocaleDateString()  // "Aug 22" in Pacific
+ *
+ * Reported 2026-08-28: a listing created on the 23rd displayed as "Aug 22, 26".
+ * It affected every created-listing row, silently, for anyone not on UTC or
+ * east of it.
+ *
+ * Appending "T00:00:00" opts into the local-time branch of the same spec, which
+ * is what a calendar date from Amazon actually means. Timestamps that already
+ * carry a zone are passed through untouched.
+ */
+function parseListingDate(value: string | null | undefined): Date | null {
+  if (!value) return null;
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(value)
+    ? new Date(`${value}T00:00:00`)
+    : new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 function getPhysicalWarehouseUnits(item: Pick<InventoryItem, 'available' | 'reserved' | 'inbound' | 'unfulfilled'>) {
   return (item.available ?? 0) + (item.reserved ?? 0) + (item.inbound ?? 0) + (item.unfulfilled ?? 0);
 }
@@ -1799,7 +1827,7 @@ export default function SyncedInventory() {
       
       // Apply created age filter for slow-selling items
       if (matchesStock && createdAgeFilter !== 'all') {
-        const createdDate = item.listing_created_at ? new Date(item.listing_created_at) : null;
+        const createdDate = parseListingDate(item.listing_created_at);
         if (!createdDate) {
           // If no created date, INCLUDE the item - it's existing inventory that needs attention
           // Only exclude from "recent" filter since we can't confirm it's recent
@@ -1870,8 +1898,8 @@ export default function SyncedInventory() {
       return a.asin.localeCompare(b.asin);
     }
     if (sortBy === 'created') {
-      const aDate = a.listing_created_at ? new Date(a.listing_created_at).getTime() : 0;
-      const bDate = b.listing_created_at ? new Date(b.listing_created_at).getTime() : 0;
+      const aDate = parseListingDate(a.listing_created_at)?.getTime() ?? 0;
+      const bDate = parseListingDate(b.listing_created_at)?.getTime() ?? 0;
       return sortDirection === 'asc' ? aDate - bDate : bDate - aDate;
     }
     if (sortBy === 'roi') {
@@ -3100,8 +3128,8 @@ export default function SyncedInventory() {
                             )}
                             {/* BSR cell hidden */}
                             <td className="px-1 py-2 text-center text-xs">
-                              {item.listing_created_at 
-                                ? new Date(item.listing_created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
+                              {parseListingDate(item.listing_created_at)
+                                ? parseListingDate(item.listing_created_at)!.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
                                 : <span className="text-muted-foreground">—</span>
                               }
                             </td>
