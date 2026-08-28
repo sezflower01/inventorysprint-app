@@ -26,7 +26,18 @@ async function fetchWithTimeout(url: string, options: any, timeoutMs = 15000): P
   }
 }
 
-// Retry helper for network/DNS errors AND Amazon 500 errors
+// Retry helper for network/DNS errors, Amazon 500 errors AND 429 throttles.
+//
+// 429 was added 2026-08-28. The marketplace-gating path fires one SP-API
+// getListingsRestrictions per connected marketplace through Promise.all --
+// four at once for US/CA/MX/BR -- against a quota that is account-wide and
+// shared with the repricer. Some of the four would win and some would be
+// throttled, so the extension showed "BR: APPROVED, MX: APPROVED,
+// CA: ERROR, US: ERROR" and a different combination on the next press.
+//
+// This is an INTERACTIVE request, so the house rule is wait-and-retry rather
+// than skip-and-wait-for-the-next-run: a person is looking at the panel and
+// wants an answer, not a blank.
 async function fetchWithRetry(url: string, options: any, maxRetries = 3): Promise<Response> {
   let lastError: Error | null = null;
   let lastResponse: Response | null = null;
@@ -36,6 +47,22 @@ async function fetchWithRetry(url: string, options: any, maxRetries = 3): Promis
       console.log(`Fetch attempt ${attempt + 1}/${maxRetries}`);
       const response = await fetchWithTimeout(url, options, 12000);
       
+      // Throttled. Amazon may send Retry-After; honour it when present, and
+      // back off harder than the 500 path because the quota is per-second and
+      // retrying too eagerly just burns another slot.
+      if (response.status === 429) {
+        if (attempt < maxRetries - 1) {
+          const retryAfter = Number(response.headers.get('retry-after')) || 0;
+          const delayMs = retryAfter > 0
+            ? Math.min(retryAfter * 1000, 5000)
+            : 800 * Math.pow(2, attempt); // 800ms, 1.6s, 3.2s
+          console.log(`Amazon 429 (throttled), retrying in ${delayMs}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          continue;
+        }
+        return response;
+      }
+
       // Retry on Amazon 500 errors (InternalFailure)
       if (response.status === 500 || response.status === 503) {
         const clonedResponse = response.clone();
@@ -858,7 +885,11 @@ Deno.serve(async (req) => {
           
           const authorizationHeader = `${algorithm} Credential=${awsAccessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
           
-          const response = await fetchWithTimeout(url, {
+          // fetchWithRetry, NOT fetchWithTimeout. This call had no retry at
+          // all, which is why a single throttled response became a permanent
+          // "ERROR" chip for that marketplace until the user pressed Find
+          // again.
+          const response = await fetchWithRetry(url, {
             method: 'GET',
             headers: {
               'host': endpoint,
@@ -866,7 +897,7 @@ Deno.serve(async (req) => {
               'x-amz-access-token': token,
               'Authorization': authorizationHeader,
             },
-          }, 10000);
+          });
           
           if (!response.ok) {
             const errorText = await response.text();
@@ -874,6 +905,13 @@ Deno.serve(async (req) => {
             // 403/401 typically means not authorized for this marketplace
             if (response.status === 403 || response.status === 401) {
               return { marketplace: mp.id, marketplaceId: mp.marketplaceId, name: mp.name, flag: mp.flag, status: 'NO_AUTH', reasons: ['Not authorized for this marketplace'] };
+            }
+            // Distinct from ERROR on purpose. A throttle says nothing about
+            // whether the ASIN is sellable -- it means we never got to ask.
+            // Reporting it as ERROR next to a real gating result invites the
+            // reading that Amazon refused the listing, which it did not.
+            if (response.status === 429) {
+              return { marketplace: mp.id, marketplaceId: mp.marketplaceId, name: mp.name, flag: mp.flag, status: 'THROTTLED', reasons: ['Amazon rate-limited this check after retries — press Find again in a few seconds.'] };
             }
             return { marketplace: mp.id, marketplaceId: mp.marketplaceId, name: mp.name, flag: mp.flag, status: 'ERROR', reasons: [`API error: ${response.status}`] };
           }

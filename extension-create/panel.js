@@ -563,10 +563,18 @@ function renderProduct() {
   );
   for (const g of list) {
     const chip = document.createElement("span");
+    // THROTTLED is amber, not red. It means Amazon rate-limited the check --
+    // we never got an answer -- which is not the same as Amazon refusing the
+    // listing, and colouring it like a refusal reads as a much worse result
+    // than it is.
     const cls = g.status === "APPROVED" || g.status === "ELIGIBLE" ? "ok"
-              : g.status === "APPROVAL_REQUIRED" ? "req" : "bad";
+              : (g.status === "APPROVAL_REQUIRED" || g.status === "THROTTLED") ? "req" : "bad";
     chip.className = `apx-mkt-chip ${cls}`;
     chip.textContent = `${g.flag || ""} ${g.marketplace || g.name}: ${g.status}`;
+    // The backend always sends `reasons`, and the chip was throwing it away --
+    // so an "ERROR" chip gave no way to tell a 429 from a 500 from missing
+    // credentials without opening the edge-function logs.
+    chip.title = (Array.isArray(g.reasons) ? g.reasons : []).join(" · ") || String(g.status || "");
     chipsWrap.appendChild(chip);
   }
 }
