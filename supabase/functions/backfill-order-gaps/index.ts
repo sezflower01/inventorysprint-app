@@ -45,6 +45,10 @@ const corsHeaders = {
 // nothing per run, because MAX_RANGE_DAYS bounds the Orders API work regardless;
 // a larger backlog simply takes more nights to clear.
 const LOOKBACK_DAYS   = 60;
+// Hard ceiling for the `lookbackDays` override below. Amazon's Orders API will
+// not serve arbitrarily old data anyway, and an unbounded value would let one
+// call ask check_sync_parity to scan the entire order history.
+const MAX_LOOKBACK_DAYS = 400;
 const MAX_ATTEMPTS    = 3;   // then `permanent`
 const MAX_RANGE_DAYS  = 14;  // per run, per user
 
@@ -77,6 +81,28 @@ Deno.serve(async (req) => {
     // dryRun reports what it WOULD do and writes nothing -- for verifying the
     // first live run without spending Orders API calls.
     const dryRun = body?.dryRun === true;
+    // One-off deep catch-up, without touching what the nightly cron does.
+    //
+    // 60 days is right for the nightly run: it keeps the parity scan cheap and
+    // covers anything recent. It also means a gap older than 60 days is
+    // invisible FOREVER -- the job cannot see it, so it never repairs it and
+    // never marks it permanent, while reporting itself healthy.
+    //
+    // Found live 2026-08-28: check_sync_parity over 240 days showed ~47 gap
+    // days and roughly 1,300 missing orders, the worst in March and April
+    // (2026-03-17 US: 10 orders recorded against 144 in Financial Events).
+    // order_gap_repair_attempts held just 4 days, all from the 60-day window.
+    // Every March and April gap was permanently out of reach.
+    //
+    // Raising the constant would make every nightly run rescan a year. An
+    // override lets a human clear the backlog deliberately:
+    //   { "lookbackDays": 240 }
+    // MAX_RANGE_DAYS still bounds the Orders API work per run, so clearing a
+    // large backlog takes several invocations rather than one heavy one.
+    const requestedLookback = Number(body?.lookbackDays);
+    const lookbackDays = Number.isFinite(requestedLookback) && requestedLookback > 0
+      ? Math.min(Math.floor(requestedLookback), MAX_LOOKBACK_DAYS)
+      : LOOKBACK_DAYS;
 
     // Only users who can actually call the Orders API. A user without a live
     // refresh token cannot be repaired, and counting attempts against them
@@ -92,7 +118,7 @@ Deno.serve(async (req) => {
 
     for (const userId of userIds) {
       const { data: parity, error: parityErr } = await admin
-        .rpc('check_sync_parity', { p_user_id: userId, p_days: LOOKBACK_DAYS });
+        .rpc('check_sync_parity', { p_user_id: userId, p_days: lookbackDays });
       if (parityErr) {
         report.push({ userId, error: `parity: ${parityErr.message}` });
         continue;
@@ -168,7 +194,7 @@ Deno.serve(async (req) => {
       if (dryRun) {
         report.push({
           userId, gaps: gaps.length, wouldRepair: inRange.length,
-          range: { start, end }, capped, markedPermanent: toPermanent.length, dryRun: true,
+          range: { start, end }, capped, markedPermanent: toPermanent.length, dryRun: true, lookbackDays,
         });
         continue;
       }
@@ -207,7 +233,7 @@ Deno.serve(async (req) => {
 
       // Re-check parity: the only proof that matters is the gap being gone.
       const { data: after } = await admin
-        .rpc('check_sync_parity', { p_user_id: userId, p_days: LOOKBACK_DAYS });
+        .rpc('check_sync_parity', { p_user_id: userId, p_days: lookbackDays });
       const stillMissing = new Set(
         ((after ?? []) as ParityRow[])
           .filter((r) => r.gap_type === 'so_missing')
