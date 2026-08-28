@@ -46,7 +46,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowLeft, Loader2, AlertTriangle, ExternalLink, Search } from "lucide-react";
+import { ArrowLeft, Loader2, AlertTriangle, ExternalLink, Search, Route } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -55,6 +55,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { getListingUnitCostSafe } from "@/lib/cost-contract";
+import AsinTraceDialog from "@/components/inventory/AsinTraceDialog";
 
 type ListingRow = {
   id: string;
@@ -194,6 +195,7 @@ export default function UnshippedPurchases() {
   // convenience.
   const [yearFilter, setYearFilter] = useState<string>("all");
   const [monthFilter, setMonthFilter] = useState<string>("all");
+  const [traceAsin, setTraceAsin] = useState<{ asin: string; title: string } | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -535,6 +537,7 @@ export default function UnshippedPurchases() {
                   <th className="text-right">Value</th>
                   <th className="text-right">Age</th>
                   <th>Status</th>
+                  <th className="text-right">Trace</th>
                 </tr>
               </thead>
               <tbody>
@@ -607,6 +610,20 @@ export default function UnshippedPurchases() {
                           {meta.label}
                         </Badge>
                       </td>
+                      <td className="px-3 py-2 text-right">
+                        {/* Answers where the units went without leaving the
+                            page. The common answer is a sale on CA/MX/BR, which
+                            never appears in US Seller Central. */}
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2"
+                          onClick={() => setTraceAsin({ asin: r.asin, title: r.title })}
+                          title="Trace every unit of this ASIN"
+                        >
+                          <Route className="h-3.5 w-3.5" />
+                        </Button>
+                      </td>
                     </tr>
                   );
                 })}
@@ -615,6 +632,13 @@ export default function UnshippedPurchases() {
           </div>
         )}
       </div>
+
+      <AsinTraceDialog
+        asin={traceAsin?.asin ?? null}
+        title={traceAsin?.title}
+        open={traceAsin !== null}
+        onOpenChange={(o) => { if (!o) setTraceAsin(null); }}
+      />
     </div>
   );
 }
