@@ -44,9 +44,9 @@
  * than pretending otherwise.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowLeft, Loader2, AlertTriangle, ExternalLink, Search, Route } from "lucide-react";
+import { ArrowLeft, Loader2, AlertTriangle, ExternalLink, Search, Route, RefreshCw } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -181,6 +181,32 @@ async function fetchAllPaged(table: string, columns: string, userId: string): Pr
   return out;
 }
 
+// Survives unmount, so leaving the page and coming back does not re-run the
+// whole load.
+//
+// This page issues four requests, one of which aggregates ~70k sales rows.
+// Re-running that on every mount made navigating away and back feel broken --
+// several seconds of spinner to rebuild data that had not changed. React
+// Router unmounts the route component, so component state alone cannot survive
+// it; the cache has to sit at module scope. Same approach as
+// _assignmentsFilterCache in AssignmentsTable.
+//
+// Keyed by user id: a different account must never be shown the previous
+// account's purchases from a stale cache.
+//
+// Deliberately NOT time-expired. An automatic refresh is exactly what was
+// unwanted here — the data is a reconciliation being worked through, and having
+// rows shift underneath while reading them is worse than being slightly stale.
+// Refreshing is the button's job.
+const _purchasesCache: {
+  userId: string | null;
+  loadedAt: number | null;
+  listings: ListingRow[];
+  shipItems: ShipItem[];
+  stock: Map<string, number>;
+  sold: Map<string, number>;
+} = { userId: null, loadedAt: null, listings: [], shipItems: [], stock: new Map(), sold: new Map() };
+
 export default function UnshippedPurchases() {
   const { user } = useAuth();
   const [listings, setListings] = useState<ListingRow[]>([]);
@@ -188,6 +214,7 @@ export default function UnshippedPurchases() {
   const [stockByAsin, setStockByAsin] = useState<Map<string, number>>(new Map());
   const [soldByAsin, setSoldByAsin] = useState<Map<string, number>>(new Map());
   const [loading, setLoading] = useState(true);
+  const [loadedAt, setLoadedAt] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   // "gaps" (everything except fully shipped) is the default because that is
   // the working set -- the page exists to be worked through, not browsed.
@@ -201,9 +228,19 @@ export default function UnshippedPurchases() {
   const [monthFilter, setMonthFilter] = useState<string>("all");
   const [traceAsin, setTraceAsin] = useState<{ asin: string; title: string } | null>(null);
 
-  useEffect(() => {
+  const loadData = useCallback(async (force: boolean) => {
     if (!user) return;
-    let cancelled = false;
+
+    if (!force && _purchasesCache.userId === user.id && _purchasesCache.loadedAt) {
+      setListings(_purchasesCache.listings);
+      setShipItems(_purchasesCache.shipItems);
+      setStockByAsin(_purchasesCache.stock);
+      setSoldByAsin(_purchasesCache.sold);
+      setLoadedAt(_purchasesCache.loadedAt);
+      setLoading(false);
+      return;
+    }
+
     (async () => {
       setLoading(true);
       const [l, s, inv, sold] = await Promise.all([
@@ -215,8 +252,6 @@ export default function UnshippedPurchases() {
         // would understate sales -- the exact failure this is fixing.
         supabase.rpc("sold_units_by_asin"),
       ]);
-      if (cancelled) return;
-
       const stock = new Map<string, number>();
       for (const r of inv as any[]) {
         if (!r.asin) continue;
@@ -233,14 +268,26 @@ export default function UnshippedPurchases() {
         if (r.asin) soldMap.set(r.asin, Number(r.units_sold) || 0);
       }
 
+      const now = Date.now();
+      _purchasesCache.userId = user.id;
+      _purchasesCache.loadedAt = now;
+      _purchasesCache.listings = l as ListingRow[];
+      _purchasesCache.shipItems = s as ShipItem[];
+      _purchasesCache.stock = stock;
+      _purchasesCache.sold = soldMap;
+
       setListings(l as ListingRow[]);
       setShipItems(s as ShipItem[]);
       setStockByAsin(stock);
       setSoldByAsin(soldMap);
+      setLoadedAt(now);
       setLoading(false);
     })();
-    return () => { cancelled = true; };
   }, [user]);
+
+  // Mount only. Reads the cache when there is one, so returning to the page is
+  // instant and nothing moves while you are reading it.
+  useEffect(() => { void loadData(false); }, [loadData]);
 
   const allRows = useMemo<GapRow[]>(() => {
     // Shipment totals keyed by ASIN. Deliberately ASIN-level, not ASIN+SKU:
@@ -527,6 +574,23 @@ export default function UnshippedPurchases() {
               ))}
             </SelectContent>
           </Select>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void loadData(true)}
+            disabled={loading}
+            className="gap-1.5"
+            title="Re-read purchases, shipments, stock and sales"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </Button>
+          {loadedAt && (
+            <span className="text-xs text-muted-foreground">
+              Updated {new Date(loadedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+            </span>
+          )}
+
           <Link to="/tools/purchase-vs-shipment" className="ml-auto">
             <Button variant="ghost" size="sm">Purchase vs Shipment report →</Button>
           </Link>
