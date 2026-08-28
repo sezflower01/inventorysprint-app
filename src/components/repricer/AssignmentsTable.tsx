@@ -230,6 +230,30 @@ type SortDir = "asc" | "desc";
 // Normalize identifiers so searches like "B00...", ":B00...", or "B00...\n" still match.
 // - Uppercase
 // - Strip non-alphanumeric characters
+// Rule dropdowns: widen the PANEL, never the trigger.
+//
+// Rule names here are long -- they encode strategy, marketplace and threshold
+// -- and three separate dropdowns list them: the per-row assign (trigger
+// w-[100px]), bulk assign (w-[180px]) and the rule filter (w-[160px]).
+//
+// The triggers deliberately stay narrow. Widening the per-row one widens its
+// table column, and the table is already at the width where a notice added to
+// a cell pushed the whole layout sideways. So the trigger keeps showing a
+// clipped name (SelectTrigger applies [&>span]:line-clamp-1) and the open menu
+// is what gets the room.
+//
+// shadcn's SelectContent only sets min-w-[8rem] with overflow-hidden, so a long
+// name is clipped rather than expanding the panel -- that is the actual reason
+// rules were unreadable, not the trigger width.
+//
+// Radix popper aligns "start" by default, anchoring the panel's LEFT edge to
+// the trigger, so the extra width extends to the RIGHT as asked. Radix flips
+// that automatically near the viewport edge; that behaviour is wanted, so no
+// explicit align is set. max-w keeps it on-screen on a laptop, and the items
+// wrap instead of clipping if a name is longer still.
+const RULE_MENU_CLASS = "w-[520px] max-w-[calc(100vw-2rem)]";
+const RULE_ITEM_CLASS = "whitespace-normal leading-snug";
+
 const normalizeIdentifier = (value?: string | null) =>
   (value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 
@@ -7038,10 +7062,10 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
             <SelectTrigger className="w-[160px] h-9">
               <SelectValue placeholder="All Rules" />
             </SelectTrigger>
-            <SelectContent>
+            <SelectContent className={RULE_MENU_CLASS}>
               <SelectItem value="ALL">All Rules</SelectItem>
               {rules.map(r => (
-                <SelectItem key={r.id} value={r.id}>
+                <SelectItem key={r.id} value={r.id} className={RULE_ITEM_CLASS}>
                   {r.name}
                 </SelectItem>
               ))}
@@ -7056,9 +7080,9 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                 <SelectTrigger className="w-[180px]">
                   <SelectValue placeholder="Assign rule..." />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className={RULE_MENU_CLASS}>
                   {rules.map(r => (
-                    <SelectItem key={r.id} value={r.id}>
+                    <SelectItem key={r.id} value={r.id} className={RULE_ITEM_CLASS}>
                       {r.name}
                     </SelectItem>
                   ))}
@@ -8224,12 +8248,15 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                                 if (val) assignRule(item, val);
                               }}
                             >
-                              <SelectTrigger className={`h-7 text-xs w-[100px] ${!item.rule_id ? 'border-destructive/60 text-destructive' : ''}`}>
+                              <SelectTrigger
+                                className={`h-7 text-xs w-[100px] ${!item.rule_id ? 'border-destructive/60 text-destructive' : ''}`}
+                                title={item.rule_name || 'No rule assigned'}
+                              >
                                 <SelectValue placeholder="No rule" />
                               </SelectTrigger>
-                              <SelectContent>
+                              <SelectContent className={RULE_MENU_CLASS}>
                                 {rules.map(r => (
-                                  <SelectItem key={r.id} value={r.id}>
+                                  <SelectItem key={r.id} value={r.id} className={RULE_ITEM_CLASS}>
                                     {r.name}
                                   </SelectItem>
                                 ))}
