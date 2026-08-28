@@ -31,6 +31,16 @@ type Props = {
 
 type MarketRow = { marketplace: string; units: number; refunded: number; last: string | null };
 
+/** A shipment where Amazon checked in fewer units than were sent. */
+type Discrepancy = {
+  shipmentId: string;
+  name: string | null;
+  status: string | null;
+  receivedDate: string | null;
+  shipped: number;
+  received: number;
+};
+
 type Trace = {
   purchased: number;
   receivedFromSupplier: number | null;
@@ -41,6 +51,7 @@ type Trace = {
   inbound: number;
   hasInventoryRow: boolean;
   sales: MarketRow[];
+  discrepancies: Discrepancy[];
 };
 
 const fmtDate = (v: string | null) => {
@@ -66,7 +77,7 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
       // means an RLS regression would show no rows rather than someone else's.
       const [purch, ship, inv] = await Promise.all([
         supabase.from("created_listings").select("units, received_quantity, date_created, created_at").eq("user_id", user.id).eq("asin", asin),
-        supabase.from("fba_shipment_items").select("quantity_shipped, quantity_received").eq("user_id", user.id).eq("asin", asin),
+        supabase.from("fba_shipment_items").select("shipment_id, quantity_shipped, quantity_received").eq("user_id", user.id).eq("asin", asin),
         supabase.from("inventory").select("available, reserved, inbound").eq("user_id", user.id).eq("asin", asin),
       ]);
 
@@ -93,6 +104,34 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
       const pRows = purch.data ?? [];
       const sRows = ship.data ?? [];
       const iRows = inv.data ?? [];
+
+      // Per-shipment shortfalls. Amazon reconciles a claim against a specific
+      // shipment, so an ASIN-level total is not actionable -- the seller needs
+      // to know WHICH shipment to open.
+      const shortfalls = (sRows as any[]).filter(
+        (r) => r.shipment_id && (Number(r.quantity_shipped) || 0) > (Number(r.quantity_received) || 0),
+      );
+      let discrepancies: Discrepancy[] = [];
+      if (shortfalls.length > 0) {
+        const ids = Array.from(new Set(shortfalls.map((r) => r.shipment_id)));
+        const { data: shipMeta } = await supabase
+          .from("fba_shipments")
+          .select("shipment_id, shipment_name, shipment_status, received_date")
+          .eq("user_id", user.id)
+          .in("shipment_id", ids);
+        const metaById = new Map((shipMeta ?? []).map((m: any) => [m.shipment_id, m]));
+        discrepancies = shortfalls.map((r) => {
+          const m: any = metaById.get(r.shipment_id);
+          return {
+            shipmentId: r.shipment_id,
+            name: m?.shipment_name ?? null,
+            status: m?.shipment_status ?? null,
+            receivedDate: m?.received_date ?? null,
+            shipped: Number(r.quantity_shipped) || 0,
+            received: Number(r.quantity_received) || 0,
+          };
+        }).sort((a, b) => (b.shipped - b.received) - (a.shipped - a.received));
+      }
 
       const byMarket = new Map<string, MarketRow>();
       for (const o of oRows as any[]) {
@@ -124,6 +163,7 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
         inbound: (iRows as any[]).reduce((n, r) => n + (Number(r.inbound) || 0), 0),
         hasInventoryRow: iRows.length > 0,
         sales: Array.from(byMarket.values()).sort((a, b) => b.units - a.units),
+        discrepancies,
       });
       setLoading(false);
     })();
@@ -218,6 +258,50 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
                 </table>
               )}
             </div>
+
+            {trace.discrepancies.length > 0 && (
+              <div className="rounded-md border border-orange-500/40 bg-orange-500/10 p-3">
+                <div className="text-xs uppercase tracking-wide text-orange-700 dark:text-orange-400 font-semibold mb-1.5">
+                  Shipment shortfalls — reimbursement claims
+                </div>
+                <div className="text-xs text-muted-foreground mb-2">
+                  Amazon checked in fewer units than were sent. Each link opens that
+                  shipment's contents page in Seller Central, where the claim is filed.
+                </div>
+                <table className="w-full text-sm">
+                  <tbody>
+                    {trace.discrepancies.map((d) => (
+                      <tr key={d.shipmentId} className="border-b border-orange-500/20 last:border-0">
+                        <td className="py-1.5">
+                          <a
+                            href={`https://sellercentral.amazon.com/fba/inbound-shipment/summary/${d.shipmentId}/contents`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-primary hover:underline inline-flex items-center gap-1"
+                          >
+                            {d.name || d.shipmentId}
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                          <span className="block text-[10px] text-muted-foreground font-mono">
+                            {d.shipmentId}{d.status ? ` · ${d.status}` : ""}
+                          </span>
+                        </td>
+                        <td className="py-1.5 text-right text-xs text-muted-foreground whitespace-nowrap">
+                          {d.shipped} sent / {d.received} received
+                        </td>
+                        <td className="py-1.5 text-right font-semibold tabular-nums text-orange-700 dark:text-orange-400">
+                          −{d.shipped - d.received}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="text-[10px] text-muted-foreground mt-2">
+                  Amazon normally requires a claim within a limited window after the
+                  shipment closes, so older shortfalls may no longer be claimable.
+                </div>
+              </div>
+            )}
 
             <div className={`rounded-md p-3 text-sm ${
               unaccounted > 0 ? "bg-amber-500/10 border border-amber-500/30" : "bg-muted"

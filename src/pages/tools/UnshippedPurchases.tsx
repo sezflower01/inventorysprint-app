@@ -46,7 +46,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowLeft, Loader2, AlertTriangle, ExternalLink, Search, Route, RefreshCw } from "lucide-react";
+import { ArrowLeft, Loader2, AlertTriangle, ExternalLink, Search, Route, RefreshCw, FileWarning } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -760,15 +760,33 @@ export default function UnshippedPurchases() {
                         {/* Answers where the units went without leaving the
                             page. The common answer is a sale on CA/MX/BR, which
                             never appears in US Seller Central. */}
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 px-2"
-                          onClick={() => setTraceAsin({ asin: r.asin, title: r.title })}
-                          title="Trace every unit of this ASIN"
-                        >
-                          <Route className="h-3.5 w-3.5" />
-                        </Button>
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 px-2"
+                            onClick={() => setTraceAsin({ asin: r.asin, title: r.title })}
+                            title="Trace every unit of this ASIN"
+                          >
+                            <Route className="h-3.5 w-3.5" />
+                          </Button>
+                          {/* Only on rows where Amazon checked in fewer units than
+                              were sent. A claim button on every row would be noise;
+                              here it marks the rows with money actually recoverable,
+                              and opens the same dialog, which lists the specific
+                              shipments and links each to Seller Central. */}
+                          {r.shipped > r.received && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2 text-orange-600 dark:text-orange-400 hover:text-orange-700"
+                              onClick={() => setTraceAsin({ asin: r.asin, title: r.title })}
+                              title={`${r.shipped - r.received} unit(s) sent but not received by Amazon — open to file a claim`}
+                            >
+                              <FileWarning className="h-3.5 w-3.5" />
+                            </Button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
