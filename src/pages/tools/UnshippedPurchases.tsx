@@ -418,7 +418,26 @@ export default function UnshippedPurchases() {
                           <div className="min-w-0">
                             <div className="truncate max-w-[320px]" title={r.title}>{r.title}</div>
                             <div className="text-xs text-muted-foreground font-mono">
-                              {r.asin}{r.sku ? ` · ${r.sku}` : ""}
+                              {/*
+                                amazon.com specifically: created_listings is the
+                                US catalogue (the refresh enqueue scopes to US,
+                                and CA/MX/BR sell from the same US pool), so a
+                                marketplace-aware URL would have nothing to vary
+                                on here.
+
+                                Not nested inside a row-level link -- the row is
+                                not a link -- so this needs no stopPropagation.
+                              */}
+                              <a
+                                href={`https://www.amazon.com/dp/${r.asin}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-primary hover:underline"
+                                title="Open on Amazon"
+                              >
+                                {r.asin}
+                              </a>
+                              {r.sku ? ` · ${r.sku}` : ""}
                             </div>
                           </div>
                         </div>
