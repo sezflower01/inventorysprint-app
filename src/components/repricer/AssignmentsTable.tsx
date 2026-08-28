@@ -230,29 +230,27 @@ type SortDir = "asc" | "desc";
 // Normalize identifiers so searches like "B00...", ":B00...", or "B00...\n" still match.
 // - Uppercase
 // - Strip non-alphanumeric characters
-// Rule dropdowns: widen the PANEL, never the trigger.
+// Rule dropdowns, styled for the surface they actually sit on.
 //
-// Rule names here are long -- they encode strategy, marketplace and threshold
-// -- and three separate dropdowns list them: the per-row assign (trigger
-// w-[100px]), bulk assign (w-[180px]) and the rule filter (w-[160px]).
+// The whole Repricer table is wrapped in a Card of bg-[hsl(220,65%,18%)] with
+// white text. shadcn's Select defaults are built for a light page --
+// SelectTrigger uses bg-background and SelectContent stacks bg-popover then
+// bg-background -- so both rendered as white slabs dropped onto dark navy.
 //
-// The triggers deliberately stay narrow. Widening the per-row one widens its
-// table column, and the table is already at the width where a notice added to
-// a cell pushed the whole layout sideways. So the trigger keeps showing a
-// clipped name (SelectTrigger applies [&>span]:line-clamp-1) and the open menu
-// is what gets the room.
+// Colours below come from the shipment-* tokens that already exist for this
+// surface (--shipment-surface 220 65% 22%, --shipment-control 26%,
+// --shipment-row-hover 28%) rather than from literals, so this stays correct if
+// the palette moves. cn() is clsx + tailwind-merge, so these win over the
+// component defaults for the same property.
 //
-// shadcn's SelectContent only sets min-w-[8rem] with overflow-hidden, so a long
-// name is clipped rather than expanding the panel -- that is the actual reason
-// rules were unreadable, not the trigger width.
-//
-// Radix popper aligns "start" by default, anchoring the panel's LEFT edge to
-// the trigger, so the extra width extends to the RIGHT as asked. Radix flips
-// that automatically near the viewport edge; that behaviour is wanted, so no
-// explicit align is set. max-w keeps it on-screen on a laptop, and the items
-// wrap instead of clipping if a name is longer still.
-const RULE_MENU_CLASS = "w-[520px] max-w-[calc(100vw-2rem)]";
-const RULE_ITEM_CLASS = "whitespace-normal leading-snug";
+// Width is deliberately NOT set here. An earlier attempt widened the open menu
+// to 520px, which was the wrong half of the problem: the menu is glanced at
+// while choosing, the closed trigger is read constantly while scanning the
+// table. The trigger carries the width; the menu keeps its default.
+const RULE_MENU_CLASS =
+  "bg-shipment-surface border-white/20 text-white";
+const RULE_ITEM_CLASS =
+  "text-white focus:bg-shipment-row-hover focus:text-white data-[state=checked]:bg-shipment-row-hover";
 
 const normalizeIdentifier = (value?: string | null) =>
   (value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -8248,8 +8246,17 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                                 if (val) assignRule(item, val);
                               }}
                             >
+                              {/*
+                                240px, not 100px. A rule name encodes strategy,
+                                marketplace and threshold; 100px showed about a
+                                dozen characters and SelectTrigger clamps to one
+                                line ([&>span]:line-clamp-1), so the rest was
+                                simply gone with no indication it existed.
+                                This DOES widen the Rule column -- that is the
+                                trade, made deliberately.
+                              */}
                               <SelectTrigger
-                                className={`h-7 text-xs w-[100px] ${!item.rule_id ? 'border-destructive/60 text-destructive' : ''}`}
+                                className={`h-8 w-[240px] text-[13px] font-medium border-white/20 bg-shipment-control text-white hover:bg-shipment-row-hover transition-colors ${!item.rule_id ? 'border-destructive/70 bg-destructive/25 text-white' : ''}`}
                                 title={item.rule_name || 'No rule assigned'}
                               >
                                 <SelectValue placeholder="No rule" />
