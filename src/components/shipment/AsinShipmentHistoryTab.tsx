@@ -146,6 +146,18 @@ export default function AsinShipmentHistoryTab({ shipments }: Props) {
           <div className="rounded-md border border-white/10 bg-shipment-row-alt text-white/70 p-6 text-sm">
             Enter an ASIN above to generate the report.
           </div>
+        ) : query.trim().toUpperCase() !== searched.trim().toUpperCase() ? (
+          /*
+            The box has been edited but Search has not been pressed, so the
+            result below still describes the PREVIOUS ASIN. Left alone that
+            reads as "this ASIN has no shipments" while naming a different one
+            in small print -- reported 2026-08-28 as history appearing to have
+            been deleted. Show the stale state explicitly instead.
+          */
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 text-white/80 p-6 text-sm">
+            Showing results for <span className="font-mono">{searched.toUpperCase()}</span>.
+            Press <strong>Search</strong> to look up <span className="font-mono">{query.trim().toUpperCase()}</span>.
+          </div>
         ) : matches.length === 0 ? (
           <div className="rounded-md border border-white/10 bg-shipment-row-alt text-white/70 p-6 text-sm">
             No shipments found for ASIN <span className="font-mono">{searched.toUpperCase()}</span>.
