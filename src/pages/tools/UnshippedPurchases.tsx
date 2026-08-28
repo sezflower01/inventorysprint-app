@@ -90,8 +90,11 @@ type GapRow = {
   supplier: string;
   supplierUrl: string | null;
   purchased: number;
+  purchaseCount: number;
   shipped: number;
   received: number;
+  sold: number;
+  onHand: number;
   manualReceived: number | null;
   unitCost: number | null;
   moneyAtRisk: number | null;
@@ -120,12 +123,12 @@ const KIND_META: Record<GapKind, { label: string; cls: string; blurb: string }> 
   never_shipped: {
     label: "Never reached Amazon",
     cls: "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30",
-    blurb: "No FBA shipment record and no inventory row. Either it never arrived from the supplier, or it is still with you.",
+    blurb: "Nothing sold, nothing in stock, no shipment record. Either it never arrived from the supplier, or it is still with you.",
   },
   short_shipped: {
     label: "Short",
     cls: "bg-amber-500/15 text-amber-800 dark:text-amber-400 border-amber-500/30",
-    blurb: "Fewer units reached an FBA shipment than were purchased.",
+    blurb: "Fewer units can be located (sold + in stock) than were purchased.",
   },
   not_received: {
     label: "Amazon didn't receive",
@@ -182,7 +185,8 @@ export default function UnshippedPurchases() {
   const { user } = useAuth();
   const [listings, setListings] = useState<ListingRow[]>([]);
   const [shipItems, setShipItems] = useState<ShipItem[]>([]);
-  const [inventoryAsins, setInventoryAsins] = useState<Set<string>>(new Set());
+  const [stockByAsin, setStockByAsin] = useState<Map<string, number>>(new Map());
+  const [soldByAsin, setSoldByAsin] = useState<Map<string, number>>(new Map());
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   // "gaps" (everything except fully shipped) is the default because that is
@@ -202,15 +206,37 @@ export default function UnshippedPurchases() {
     let cancelled = false;
     (async () => {
       setLoading(true);
-      const [l, s, inv] = await Promise.all([
+      const [l, s, inv, sold] = await Promise.all([
         fetchAllPaged("created_listings", "id, asin, sku, title, image_url, units, received_quantity, cost, amount, date_created, created_at, supplier_links", user.id),
         fetchAllPaged("fba_shipment_items", "asin, seller_sku, quantity_shipped, quantity_received", user.id),
-        fetchAllPaged("inventory", "asin", user.id),
+        fetchAllPaged("inventory", "asin, available, reserved, inbound", user.id),
+        // Server-side aggregate. sales_orders is ~70k rows; totalling it in the
+        // browser would mean 70+ paged requests per load, and any paging slip
+        // would understate sales -- the exact failure this is fixing.
+        supabase.rpc("sold_units_by_asin"),
       ]);
       if (cancelled) return;
+
+      const stock = new Map<string, number>();
+      for (const r of inv as any[]) {
+        if (!r.asin) continue;
+        stock.set(r.asin, (stock.get(r.asin) ?? 0)
+          + (Number(r.available) || 0) + (Number(r.reserved) || 0) + (Number(r.inbound) || 0));
+      }
+      const soldMap = new Map<string, number>();
+      if ((sold as any)?.error) {
+        // Loud, not silent: without sales the page reverts to its old
+        // shipment-only behaviour, which overstates what is missing.
+        console.warn("[unshipped-purchases] sold_units_by_asin:", (sold as any).error.message);
+      }
+      for (const r of (((sold as any)?.data ?? []) as any[])) {
+        if (r.asin) soldMap.set(r.asin, Number(r.units_sold) || 0);
+      }
+
       setListings(l as ListingRow[]);
       setShipItems(s as ShipItem[]);
-      setInventoryAsins(new Set((inv as { asin: string }[]).map((r) => r.asin).filter(Boolean)));
+      setStockByAsin(stock);
+      setSoldByAsin(soldMap);
       setLoading(false);
     })();
     return () => { cancelled = true; };
@@ -248,6 +274,7 @@ export default function UnshippedPurchases() {
       const existing = byAsin.get(l.asin);
       if (existing) {
         existing.purchased += purchased;
+        existing.purchaseCount += 1;
         if (unit !== null) {
           // Weighted so a mixed-price history reports a real blended cost.
           const prevUnits = existing.purchased - purchased;
@@ -273,8 +300,11 @@ export default function UnshippedPurchases() {
         supplier: sup.name,
         supplierUrl: sup.url,
         purchased,
+        purchaseCount: 1,
         shipped: 0,
         received: 0,
+        sold: 0,
+        onHand: 0,
         manualReceived: l.received_quantity != null ? Number(l.received_quantity) : null,
         unitCost: unit,
         moneyAtRisk: null,
@@ -289,11 +319,23 @@ export default function UnshippedPurchases() {
       const ship = shippedByAsin.get(r.asin);
       r.shipped = ship?.shipped ?? 0;
       r.received = ship?.received ?? 0;
+      r.sold = soldByAsin.get(r.asin) ?? 0;
+      r.onHand = stockByAsin.get(r.asin) ?? 0;
 
-      const missing = Math.max(0, r.purchased - r.shipped);
+      // A SALE is the strongest proof a unit reached Amazon -- Amazon cannot
+      // ship to a customer what it never received -- and current stock is the
+      // same kind of evidence. Both beat fba_shipment_items, which does not
+      // reach back far enough: measured on B0G4BQ42W3 (2026-08-28) that table
+      // knew about 58 units while 977 had actually sold, so the page reported
+      // 1,422 units missing against a true figure of ~384.
+      //
+      // Shipment quantity is still counted, for units that shipped but have
+      // neither sold nor landed in stock yet.
+      const located = Math.max(r.sold + r.onHand, r.shipped);
+      const missing = Math.max(0, r.purchased - located);
       r.moneyAtRisk = r.unitCost != null ? missing * r.unitCost : null;
 
-      if (r.shipped === 0 && !inventoryAsins.has(r.asin)) {
+      if (located === 0) {
         r.kind = "never_shipped";
       } else if (missing > 0) {
         r.kind = "short_shipped";
@@ -316,12 +358,12 @@ export default function UnshippedPurchases() {
       const am = a.moneyAtRisk ?? -1;
       const bm = b.moneyAtRisk ?? -1;
       if (bm !== am) return bm - am;
-      return (b.purchased - b.shipped) - (a.purchased - a.shipped);
+      return (b.purchased - Math.max(b.sold + b.onHand, b.shipped)) - (a.purchased - Math.max(a.sold + a.onHand, a.shipped));
     });
     // Deliberately NOT dependent on the filters. Computing the full set once
     // means the dropdown can show a count per status, and the summary cards
     // stay put while you filter.
-  }, [listings, shipItems, inventoryAsins]);
+  }, [listings, shipItems, stockByAsin, soldByAsin]);
 
   // Years present in the data, newest first, so the dropdown never offers a
   // year with nothing behind it.
@@ -393,7 +435,7 @@ export default function UnshippedPurchases() {
     let money = 0, units = 0, unpriced = 0, neverShipped = 0;
     for (const r of periodRows) {
       if (r.kind === "accounted") continue;
-      units += Math.max(0, r.purchased - r.shipped);
+      units += Math.max(0, r.purchased - Math.max(r.sold + r.onHand, r.shipped));
       if (r.moneyAtRisk != null) money += r.moneyAtRisk; else unpriced++;
       if (r.kind === "never_shipped") neverShipped++;
     }
@@ -503,10 +545,11 @@ export default function UnshippedPurchases() {
             <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-500" />
             <div>
               <strong className="text-foreground">Check before contacting a supplier.</strong>{" "}
-              "Never reached Amazon" means no FBA shipment record and no inventory row for that ASIN.
-              A purchase older than your FBA shipment sync coverage can look unshipped simply because
-              the shipment predates the data — confirm against the shipment itself before treating a
-              line as a supplier shortfall.
+              Units are counted as having reached Amazon if they <strong>sold</strong> or are{" "}
+              <strong>in stock</strong> — a sale is proof, since Amazon cannot ship what it never
+              received. Shipment records are used too, but only as a third signal: they do not reach
+              back far enough to be trusted alone. Use the <strong>Trace</strong> button on a row to
+              see the per-marketplace breakdown before treating anything as a shortfall.
             </div>
           </div>
         </Card>
@@ -533,6 +576,8 @@ export default function UnshippedPurchases() {
                   <th className="text-right">Bought</th>
                   <th className="text-right">Shipped</th>
                   <th className="text-right">Received</th>
+                  <th className="text-right">Sold</th>
+                  <th className="text-right">In stock</th>
                   <th className="text-right">Missing</th>
                   <th className="text-right">Value</th>
                   <th className="text-right">Age</th>
@@ -542,7 +587,7 @@ export default function UnshippedPurchases() {
               </thead>
               <tbody>
                 {rows.map((r) => {
-                  const missing = Math.max(0, r.purchased - r.shipped);
+                  const missing = Math.max(0, r.purchased - Math.max(r.sold + r.onHand, r.shipped));
                   const meta = KIND_META[r.kind];
                   return (
                     <tr key={r.key} className="border-t hover:bg-muted/30">
@@ -586,7 +631,25 @@ export default function UnshippedPurchases() {
                           </a>
                         ) : r.supplier}
                       </td>
-                      <td className="px-3 py-2 text-right tabular-nums">{r.purchased}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">
+                        {r.purchased}
+                        {/*
+                          Without this, a total like 1,480 reads as a data
+                          error. It is normally many separate purchase records
+                          -- one seller had ~120 twelve-unit cases of a single
+                          ASIN -- and a bare aggregate gives no way to tell a
+                          large real total from a duplication bug. It cost a
+                          round of SQL to establish that once already.
+                        */}
+                        {r.purchaseCount > 1 && (
+                          <span
+                            className="block text-[10px] text-muted-foreground font-normal"
+                            title={`Summed across ${r.purchaseCount} purchase records for this ASIN`}
+                          >
+                            {r.purchaseCount} purchases
+                          </span>
+                        )}
+                      </td>
                       <td className="px-3 py-2 text-right tabular-nums">{r.shipped}</td>
                       <td className="px-3 py-2 text-right tabular-nums">
                         {r.received}
@@ -596,6 +659,8 @@ export default function UnshippedPurchases() {
                           </span>
                         )}
                       </td>
+                      <td className="px-3 py-2 text-right tabular-nums">{r.sold || "—"}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{r.onHand || "—"}</td>
                       <td className="px-3 py-2 text-right tabular-nums font-semibold">
                         {missing > 0 ? missing : "—"}
                       </td>
