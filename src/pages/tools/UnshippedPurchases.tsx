@@ -53,6 +53,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { getListingUnitCostSafe } from "@/lib/cost-contract";
 
 type ListingRow = {
@@ -137,6 +138,23 @@ const KIND_META: Record<GapKind, { label: string; cls: string; blurb: string }> 
   },
 };
 
+type StatusFilter = "gaps" | "all" | GapKind;
+
+const FILTER_LABELS: Record<StatusFilter, string> = {
+  gaps: "Discrepancies",
+  all: "All purchases",
+  never_shipped: KIND_META.never_shipped.label,
+  short_shipped: KIND_META.short_shipped.label,
+  not_received: KIND_META.not_received.label,
+  accounted: "Fully shipped",
+};
+
+// Order matters: the two summary views first, then the individual statuses
+// worst-first, so the list reads down in descending urgency.
+const FILTER_ORDER: StatusFilter[] = [
+  "gaps", "never_shipped", "short_shipped", "not_received", "accounted", "all",
+];
+
 async function fetchAllPaged(table: string, columns: string, userId: string): Promise<any[]> {
   const out: any[] = [];
   const size = 1000;
@@ -161,7 +179,9 @@ export default function UnshippedPurchases() {
   const [inventoryAsins, setInventoryAsins] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
-  const [onlyGaps, setOnlyGaps] = useState(true);
+  // "gaps" (everything except fully shipped) is the default because that is
+  // the working set -- the page exists to be worked through, not browsed.
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("gaps");
 
   useEffect(() => {
     if (!user) return;
@@ -182,7 +202,7 @@ export default function UnshippedPurchases() {
     return () => { cancelled = true; };
   }, [user]);
 
-  const rows = useMemo<GapRow[]>(() => {
+  const allRows = useMemo<GapRow[]>(() => {
     // Shipment totals keyed by ASIN. Deliberately ASIN-level, not ASIN+SKU:
     // a listing is frequently recreated under a new SKU, and matching on the
     // pair would report the original purchase as unshipped every time that
@@ -275,8 +295,37 @@ export default function UnshippedPurchases() {
       out.push(r);
     }
 
-    let list = out;
-    if (onlyGaps) list = list.filter((r) => r.kind !== "accounted");
+    // Money first — this page exists to be worked top-down. Rows with an
+    // unknown unit cost sort under the priced ones rather than to the bottom,
+    // since "unknown" is not the same as "nothing at stake".
+    return out.sort((a, b) => {
+      const am = a.moneyAtRisk ?? -1;
+      const bm = b.moneyAtRisk ?? -1;
+      if (bm !== am) return bm - am;
+      return (b.purchased - b.shipped) - (a.purchased - a.shipped);
+    });
+    // Deliberately NOT dependent on the filters. Computing the full set once
+    // means the dropdown can show a count per status, and the summary cards
+    // stay put while you filter.
+  }, [listings, shipItems, inventoryAsins]);
+
+  const counts = useMemo(() => {
+    const c: Record<StatusFilter, number> = {
+      gaps: 0, all: allRows.length,
+      never_shipped: 0, short_shipped: 0, not_received: 0, accounted: 0,
+    };
+    for (const r of allRows) {
+      c[r.kind]++;
+      if (r.kind !== "accounted") c.gaps++;
+    }
+    return c;
+  }, [allRows]);
+
+  const rows = useMemo(() => {
+    let list = allRows;
+    if (statusFilter === "gaps") list = list.filter((r) => r.kind !== "accounted");
+    else if (statusFilter !== "all") list = list.filter((r) => r.kind === statusFilter);
+
     if (query.trim()) {
       const q = query.trim().toLowerCase();
       list = list.filter(
@@ -286,28 +335,23 @@ export default function UnshippedPurchases() {
                r.supplier.toLowerCase().includes(q),
       );
     }
+    return list;
+  }, [allRows, statusFilter, query]);
 
-    // Money first — this page exists to be worked top-down. Rows with an
-    // unknown unit cost sort under the priced ones rather than to the bottom,
-    // since "unknown" is not the same as "nothing at stake".
-    return list.sort((a, b) => {
-      const am = a.moneyAtRisk ?? -1;
-      const bm = b.moneyAtRisk ?? -1;
-      if (bm !== am) return bm - am;
-      return (b.purchased - b.shipped) - (a.purchased - a.shipped);
-    });
-  }, [listings, shipItems, inventoryAsins, query, onlyGaps]);
-
+  // From allRows, never the filtered set: these cards are the headline
+  // exposure for the whole account. Recomputing them per filter would make
+  // "unaccounted value" fall every time you narrowed the view, which reads as
+  // the problem shrinking rather than the view narrowing.
   const totals = useMemo(() => {
     let money = 0, units = 0, unpriced = 0, neverShipped = 0;
-    for (const r of rows) {
+    for (const r of allRows) {
       if (r.kind === "accounted") continue;
       units += Math.max(0, r.purchased - r.shipped);
       if (r.moneyAtRisk != null) money += r.moneyAtRisk; else unpriced++;
       if (r.kind === "never_shipped") neverShipped++;
     }
-    return { money, units, unpriced, neverShipped, lines: rows.filter((r) => r.kind !== "accounted").length };
-  }, [rows]);
+    return { money, units, unpriced, neverShipped, lines: allRows.filter((r) => r.kind !== "accounted").length };
+  }, [allRows]);
 
   const money = (n: number | null) =>
     n == null ? "—" : `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -359,9 +403,21 @@ export default function UnshippedPurchases() {
               className="pl-8 w-[280px] h-9"
             />
           </div>
-          <Button variant={onlyGaps ? "default" : "outline"} size="sm" onClick={() => setOnlyGaps((v) => !v)}>
-            {onlyGaps ? "Showing gaps only" : "Showing everything"}
-          </Button>
+          <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as StatusFilter)}>
+            <SelectTrigger className="w-[260px] h-9">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {FILTER_ORDER.map((k) => (
+                <SelectItem key={k} value={k}>
+                  <span className="flex items-center gap-2">
+                    {FILTER_LABELS[k]}
+                    <span className="text-xs text-muted-foreground tabular-nums">({counts[k]})</span>
+                  </span>
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <Link to="/tools/purchase-vs-shipment" className="ml-auto">
             <Button variant="ghost" size="sm">Purchase vs Shipment report →</Button>
           </Link>
@@ -386,7 +442,11 @@ export default function UnshippedPurchases() {
           </div>
         ) : rows.length === 0 ? (
           <Card className="p-8 text-center text-muted-foreground">
-            {onlyGaps ? "Nothing unaccounted for. Every purchase matches a shipment." : "No purchases recorded."}
+            {statusFilter === "gaps"
+              ? "Nothing unaccounted for. Every purchase matches a shipment."
+              : statusFilter === "all"
+                ? "No purchases recorded."
+                : `No purchases matching "${FILTER_LABELS[statusFilter]}".`}
           </Card>
         ) : (
           <div className="overflow-x-auto border rounded-lg">
