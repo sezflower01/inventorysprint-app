@@ -204,14 +204,16 @@ const _purchasesCache: {
   listings: ListingRow[];
   shipItems: ShipItem[];
   stock: Map<string, number>;
+  known: Set<string>;
   sold: Map<string, number>;
-} = { userId: null, loadedAt: null, listings: [], shipItems: [], stock: new Map(), sold: new Map() };
+} = { userId: null, loadedAt: null, listings: [], shipItems: [], stock: new Map(), known: new Set(), sold: new Map() };
 
 export default function UnshippedPurchases() {
   const { user } = useAuth();
   const [listings, setListings] = useState<ListingRow[]>([]);
   const [shipItems, setShipItems] = useState<ShipItem[]>([]);
   const [stockByAsin, setStockByAsin] = useState<Map<string, number>>(new Map());
+  const [knownAsins, setKnownAsins] = useState<Set<string>>(new Set());
   const [soldByAsin, setSoldByAsin] = useState<Map<string, number>>(new Map());
   const [loading, setLoading] = useState(true);
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
@@ -235,6 +237,7 @@ export default function UnshippedPurchases() {
       setListings(_purchasesCache.listings);
       setShipItems(_purchasesCache.shipItems);
       setStockByAsin(_purchasesCache.stock);
+      setKnownAsins(_purchasesCache.known);
       setSoldByAsin(_purchasesCache.sold);
       setLoadedAt(_purchasesCache.loadedAt);
       setLoading(false);
@@ -253,8 +256,14 @@ export default function UnshippedPurchases() {
         supabase.rpc("sold_units_by_asin"),
       ]);
       const stock = new Map<string, number>();
+      const known = new Set<string>();
       for (const r of inv as any[]) {
         if (!r.asin) continue;
+        // Presence is tracked separately from quantity. An inventory row at 0
+        // still proves Amazon has HELD this ASIN -- rows exist only for stock
+        // Amazon has actually seen -- and that is the whole difference between
+        // sold out and never arrived.
+        known.add(r.asin);
         stock.set(r.asin, (stock.get(r.asin) ?? 0)
           + (Number(r.available) || 0) + (Number(r.reserved) || 0) + (Number(r.inbound) || 0));
       }
@@ -274,11 +283,13 @@ export default function UnshippedPurchases() {
       _purchasesCache.listings = l as ListingRow[];
       _purchasesCache.shipItems = s as ShipItem[];
       _purchasesCache.stock = stock;
+      _purchasesCache.known = known;
       _purchasesCache.sold = soldMap;
 
       setListings(l as ListingRow[]);
       setShipItems(s as ShipItem[]);
       setStockByAsin(stock);
+      setKnownAsins(known);
       setSoldByAsin(soldMap);
       setLoadedAt(now);
       setLoading(false);
@@ -382,7 +393,13 @@ export default function UnshippedPurchases() {
       const missing = Math.max(0, r.purchased - located);
       r.moneyAtRisk = r.unitCost != null ? missing * r.unitCost : null;
 
-      if (located === 0) {
+      // The floor under this classification: never claim an ASIN never reached
+      // Amazon while Amazon holds an inventory row for it, even at zero. Without
+      // this a fully sold-out ASIN reads as never delivered the moment sales
+      // data is unavailable -- exactly what happened on B0G8811NCN before the
+      // sold_units_by_asin RPC was deployed, on a page that tells you to go ask
+      // a supplier for money.
+      if (located === 0 && !knownAsins.has(r.asin)) {
         r.kind = "never_shipped";
       } else if (missing > 0) {
         r.kind = "short_shipped";
@@ -410,7 +427,7 @@ export default function UnshippedPurchases() {
     // Deliberately NOT dependent on the filters. Computing the full set once
     // means the dropdown can show a count per status, and the summary cards
     // stay put while you filter.
-  }, [listings, shipItems, stockByAsin, soldByAsin]);
+  }, [listings, shipItems, stockByAsin, knownAsins, soldByAsin]);
 
   // Years present in the data, newest first, so the dropdown never offers a
   // year with nothing behind it.
