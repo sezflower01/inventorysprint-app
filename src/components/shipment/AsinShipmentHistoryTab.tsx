@@ -36,7 +36,17 @@ interface Props {
   shipments: AsinHistoryShipment[];
 }
 
-const HISTORICAL_STATUSES = new Set(["continued", "synced", "completed"]);
+// "archived" belongs here. Archiving is a filing action -- archiveShipment
+// only flips the status and stamps archivedAt, keeping every item -- and
+// ShipmentBuilder already groups it with synced/completed as a terminal state
+// (normalizeAcceptedShipmentState). Leaving it out meant a shipment that had
+// genuinely gone to Amazon vanished from "shipment history" the moment it was
+// tidied away, which is indistinguishable from the record being deleted.
+// Measured 2026-08-28: 63 continued, 12 archived, 13 draft.
+//
+// "draft" stays out on purpose: a draft was never shipped, so it is not
+// history.
+const HISTORICAL_STATUSES = new Set(["continued", "synced", "completed", "archived"]);
 
 const fmtMoney = (n: number) =>
   `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -176,6 +186,7 @@ export default function AsinShipmentHistoryTab({ shipments }: Props) {
               <TableHeader>
                 <TableRow>
                   <TableHead>Shipment Name</TableHead>
+                  <TableHead>Status</TableHead>
                   <TableHead>Date</TableHead>
                   <TableHead>Image</TableHead>
                   <TableHead>Title</TableHead>
@@ -192,6 +203,12 @@ export default function AsinShipmentHistoryTab({ shipments }: Props) {
                   return (
                     <TableRow key={`${shipment.id}-${item.sku || item.asin}`}>
                       <TableCell className="font-medium">{shipment.shipmentName || "Untitled"}</TableCell>
+                      {/* Now that archived rows appear here, the status has to be
+                          visible -- otherwise an archived shipment is
+                          indistinguishable from a live one. */}
+                      <TableCell>
+                        <Badge variant="secondary" className="text-[10px] capitalize">{shipment.status}</Badge>
+                      </TableCell>
                       <TableCell>{date ? new Date(date).toLocaleDateString() : "—"}</TableCell>
                       <TableCell>
                         {item.imageUrl ? (
