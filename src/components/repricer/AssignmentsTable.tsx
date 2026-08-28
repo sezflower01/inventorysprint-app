@@ -247,8 +247,14 @@ type SortDir = "asc" | "desc";
 // to 520px, which was the wrong half of the problem: the menu is glanced at
 // while choosing, the closed trigger is read constantly while scanning the
 // table. The trigger carries the width; the menu keeps its default.
+// The Viewport is a SEPARATE element inside Content and carries its own
+// `bg-popover` (src/components/ui/select.tsx). A background set on Content
+// alone is painted straight over by it -- which with text-white produced a
+// white-on-white, genuinely invisible menu. So the viewport has to be
+// targeted too. data-radix-select-viewport is set by @radix-ui/react-select
+// itself (verified present in its dist), not something we add.
 const RULE_MENU_CLASS =
-  "bg-shipment-surface border-white/20 text-white";
+  "bg-shipment-surface border-white/20 text-white [&_[data-radix-select-viewport]]:bg-shipment-surface";
 const RULE_ITEM_CLASS =
   "text-white focus:bg-shipment-row-hover focus:text-white data-[state=checked]:bg-shipment-row-hover";
 
