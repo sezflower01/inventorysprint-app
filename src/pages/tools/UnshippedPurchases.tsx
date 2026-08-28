@@ -140,6 +140,11 @@ const KIND_META: Record<GapKind, { label: string; cls: string; blurb: string }> 
 
 type StatusFilter = "gaps" | "all" | GapKind;
 
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
 const FILTER_LABELS: Record<StatusFilter, string> = {
   gaps: "Discrepancies",
   all: "All purchases",
@@ -182,6 +187,13 @@ export default function UnshippedPurchases() {
   // "gaps" (everything except fully shipped) is the default because that is
   // the working set -- the page exists to be worked through, not browsed.
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("gaps");
+  // Period filter on the PURCHASE date. The page's headline caveat is that a
+  // purchase older than the FBA shipment sync coverage looks unshipped when it
+  // merely predates the data — narrowing to a recent year is the direct way to
+  // exclude that false signal, so this is a correctness tool, not just
+  // convenience.
+  const [yearFilter, setYearFilter] = useState<string>("all");
+  const [monthFilter, setMonthFilter] = useState<string>("all");
 
   useEffect(() => {
     if (!user) return;
@@ -309,20 +321,53 @@ export default function UnshippedPurchases() {
     // stay put while you filter.
   }, [listings, shipItems, inventoryAsins]);
 
+  // Years present in the data, newest first, so the dropdown never offers a
+  // year with nothing behind it.
+  const years = useMemo(() => {
+    const set = new Set<number>();
+    for (const r of allRows) {
+      const d = parseDate(r.purchaseDate);
+      if (d) set.add(d.getFullYear());
+    }
+    return Array.from(set).sort((a, b) => b - a);
+  }, [allRows]);
+
+  // Applied BEFORE counts and totals, so both describe the period on screen.
+  // A count of "Discrepancies (12)" that silently included other years would
+  // not match the table under it.
+  const periodRows = useMemo(() => {
+    if (yearFilter === "all" && monthFilter === "all") return allRows;
+    return allRows.filter((r) => {
+      const d = parseDate(r.purchaseDate);
+      // No purchase date means the period cannot be established. Excluded
+      // rather than assumed into the selected period — this page is used to
+      // decide whether to chase a supplier for money.
+      if (!d) return false;
+      if (yearFilter !== "all" && d.getFullYear() !== Number(yearFilter)) return false;
+      if (monthFilter !== "all" && d.getMonth() !== Number(monthFilter)) return false;
+      return true;
+    });
+  }, [allRows, yearFilter, monthFilter]);
+
+  const undatedCount = useMemo(
+    () => allRows.filter((r) => !parseDate(r.purchaseDate)).length,
+    [allRows],
+  );
+
   const counts = useMemo(() => {
     const c: Record<StatusFilter, number> = {
-      gaps: 0, all: allRows.length,
+      gaps: 0, all: periodRows.length,
       never_shipped: 0, short_shipped: 0, not_received: 0, accounted: 0,
     };
-    for (const r of allRows) {
+    for (const r of periodRows) {
       c[r.kind]++;
       if (r.kind !== "accounted") c.gaps++;
     }
     return c;
-  }, [allRows]);
+  }, [periodRows]);
 
   const rows = useMemo(() => {
-    let list = allRows;
+    let list = periodRows;
     if (statusFilter === "gaps") list = list.filter((r) => r.kind !== "accounted");
     else if (statusFilter !== "all") list = list.filter((r) => r.kind === statusFilter);
 
@@ -336,7 +381,7 @@ export default function UnshippedPurchases() {
       );
     }
     return list;
-  }, [allRows, statusFilter, query]);
+  }, [periodRows, statusFilter, query]);
 
   // From allRows, never the filtered set: these cards are the headline
   // exposure for the whole account. Recomputing them per filter would make
@@ -344,14 +389,14 @@ export default function UnshippedPurchases() {
   // the problem shrinking rather than the view narrowing.
   const totals = useMemo(() => {
     let money = 0, units = 0, unpriced = 0, neverShipped = 0;
-    for (const r of allRows) {
+    for (const r of periodRows) {
       if (r.kind === "accounted") continue;
       units += Math.max(0, r.purchased - r.shipped);
       if (r.moneyAtRisk != null) money += r.moneyAtRisk; else unpriced++;
       if (r.kind === "never_shipped") neverShipped++;
     }
-    return { money, units, unpriced, neverShipped, lines: allRows.filter((r) => r.kind !== "accounted").length };
-  }, [allRows]);
+    return { money, units, unpriced, neverShipped, lines: periodRows.filter((r) => r.kind !== "accounted").length };
+  }, [periodRows]);
 
   const money = (n: number | null) =>
     n == null ? "—" : `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -403,6 +448,26 @@ export default function UnshippedPurchases() {
               className="pl-8 w-[280px] h-9"
             />
           </div>
+          <Select value={yearFilter} onValueChange={setYearFilter}>
+            <SelectTrigger className="w-[130px] h-9"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All years</SelectItem>
+              {years.map((y) => (
+                <SelectItem key={y} value={String(y)}>{y}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select value={monthFilter} onValueChange={setMonthFilter}>
+            <SelectTrigger className="w-[150px] h-9"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All months</SelectItem>
+              {MONTHS.map((m, i) => (
+                <SelectItem key={m} value={String(i)}>{m}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
           <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v as StatusFilter)}>
             <SelectTrigger className="w-[260px] h-9">
               <SelectValue />
@@ -422,6 +487,14 @@ export default function UnshippedPurchases() {
             <Button variant="ghost" size="sm">Purchase vs Shipment report →</Button>
           </Link>
         </div>
+
+        {(yearFilter !== "all" || monthFilter !== "all") && undatedCount > 0 && (
+          <Card className="p-3 mb-3 text-xs text-muted-foreground">
+            {undatedCount} purchase{undatedCount === 1 ? " has" : "s have"} no recorded date and
+            {" "}{undatedCount === 1 ? "is" : "are"} hidden while a period is selected. Switch the
+            year back to <strong>All years</strong> to see {undatedCount === 1 ? "it" : "them"}.
+          </Card>
+        )}
 
         <Card className="p-3 mb-4 border-amber-500/30 bg-amber-500/5">
           <div className="flex gap-2 text-xs text-muted-foreground">
