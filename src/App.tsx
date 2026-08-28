@@ -201,6 +201,7 @@ const InventoryWriteoff = lazyWithRetry(() => import("./pages/tools/InventoryWri
 
 const ShipmentBuilder = lazyWithRetry(() => import("./pages/tools/ShipmentBuilder"));
 const PurchaseVsShipmentReport = lazyWithRetry(() => import("./pages/tools/PurchaseVsShipmentReport"));
+const UnshippedPurchases = lazyWithRetry(() => import("./pages/tools/UnshippedPurchases"));
 const ShipmentTracking = lazyWithRetry(() => import("./pages/tools/ShipmentTracking"));
 const ShipmentAccounting = lazyWithRetry(() => import("./pages/tools/ShipmentAccounting"));
 const Repricer = lazyWithRetry(() => import("./pages/tools/Repricer"));
@@ -351,6 +352,7 @@ function App() {
                   <Route path="/tools/research-leads" element={<ProtectedRoute><ResearchLeads /></ProtectedRoute>} />
                   <Route path="/tools/shipment-builder" element={<ProtectedRoute><ModuleGuard module="fba_builder" redirectTo="/tools" redirectToast="Access restricted: FBA Shipment Builder."><ShipmentBuilder /></ModuleGuard></ProtectedRoute>} />
                   <Route path="/tools/purchase-vs-shipment" element={<ProtectedRoute><PurchaseVsShipmentReport /></ProtectedRoute>} />
+                  <Route path="/tools/unshipped-purchases" element={<ProtectedRoute><UnshippedPurchases /></ProtectedRoute>} />
                   <Route path="/tools/shipment-tracking" element={<ProtectedRoute><ShipmentTracking /></ProtectedRoute>} />
                   <Route path="/tools/shipment-accounting" element={<ProtectedRoute><ShipmentAccounting /></ProtectedRoute>} />
                   <Route path="/tools/repricer" element={<ProtectedRoute><Repricer /></ProtectedRoute>} />
