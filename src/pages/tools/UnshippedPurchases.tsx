@@ -403,7 +403,17 @@ export default function UnshippedPurchases() {
         r.kind = "never_shipped";
       } else if (missing > 0) {
         r.kind = "short_shipped";
-      } else if (r.shipped > 0 && r.received < r.shipped) {
+      // quantity_received is only believable when nothing contradicts it.
+      //
+      // Found 2026-08-28 on B0GKZK1NYH: 5 shipped, 0 received -- and 11 SOLD.
+      // Amazon obviously received them; the received figure was simply never
+      // synced on those old shipments. The page was reporting "Amazon didn't
+      // receive" and offering a claim link, which would have meant filing
+      // claims contradicted by the seller's own sales data.
+      //
+      // A unit that sold or is in stock reached Amazon, full stop. Only claim a
+      // shortfall when the evidence does not already account for the shipment.
+      } else if (r.shipped > 0 && r.received < r.shipped && (r.sold + r.onHand) < r.shipped) {
         r.kind = "not_received";
       } else {
         r.kind = "accounted";
@@ -775,7 +785,7 @@ export default function UnshippedPurchases() {
                               here it marks the rows with money actually recoverable,
                               and opens the same dialog, which lists the specific
                               shipments and links each to Seller Central. */}
-                          {r.shipped > r.received && (
+                          {r.shipped > r.received && (r.sold + r.onHand) < r.shipped && (
                             <Button
                               variant="ghost"
                               size="sm"

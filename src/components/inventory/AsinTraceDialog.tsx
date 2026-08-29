@@ -37,6 +37,7 @@ type Discrepancy = {
   name: string | null;
   status: string | null;
   receivedDate: string | null;
+  shipDate: string | null;
   shipped: number;
   received: number;
 };
@@ -52,6 +53,7 @@ type Trace = {
   hasInventoryRow: boolean;
   sales: MarketRow[];
   discrepancies: Discrepancy[];
+  receivedContradicted: boolean;
 };
 
 // Days Amazon allows a shipment discrepancy to be claimed after the shipment
@@ -132,12 +134,19 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
       const shortfalls = (sRows as any[]).filter(
         (r) => r.shipment_id && (Number(r.quantity_shipped) || 0) > (Number(r.quantity_received) || 0),
       );
+      // Whether the received figures can be trusted at all for this ASIN.
+      // If more units sold than Amazon supposedly received, the received data
+      // is wrong rather than the units being missing -- so the shortfalls are
+      // shown as unverified rather than as claims. Filing against these would
+      // be contradicted by the seller's own order history.
+      const totalShipped = (sRows as any[]).reduce((n, r) => n + (Number(r.quantity_shipped) || 0), 0);
+      const totalReceived = (sRows as any[]).reduce((n, r) => n + (Number(r.quantity_received) || 0), 0);
       let discrepancies: Discrepancy[] = [];
       if (shortfalls.length > 0) {
         const ids = Array.from(new Set(shortfalls.map((r) => r.shipment_id)));
         const { data: shipMeta } = await supabase
           .from("fba_shipments")
-          .select("shipment_id, shipment_name, shipment_status, received_date")
+          .select("shipment_id, shipment_name, shipment_status, received_date, ship_date, last_updated_date")
           .eq("user_id", user.id)
           .in("shipment_id", ids);
         const metaById = new Map((shipMeta ?? []).map((m: any) => [m.shipment_id, m]));
@@ -148,6 +157,13 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
             name: m?.shipment_name ?? null,
             status: m?.shipment_status ?? null,
             receivedDate: m?.received_date ?? null,
+            // ship_date and last_updated_date as fallbacks. An old shipment can
+            // be CLOSED with no received_date, and the row would otherwise show
+            // no date at all -- leaving the table's Age column (which measures
+            // the PURCHASE, not the shipment) to be read as the shipment age.
+            // Reported 2026-08-28: a row showed 169d while its shipments were
+            // dated 22 April, ~128 days.
+            shipDate: m?.ship_date ?? m?.last_updated_date ?? null,
             shipped: Number(r.quantity_shipped) || 0,
             received: Number(r.quantity_received) || 0,
           };
@@ -185,6 +201,13 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
         hasInventoryRow: iRows.length > 0,
         sales: Array.from(byMarket.values()).sort((a, b) => b.units - a.units),
         discrepancies,
+        // soldTotal is computed from byMarket above; recompute inline so this
+        // does not depend on render-time state.
+        receivedContradicted:
+          totalShipped > 0 &&
+          (Array.from(byMarket.values()).reduce((n, m) => n + m.units, 0)
+            + (iRows as any[]).reduce((n, r) => n + (Number(r.available) || 0) + (Number(r.reserved) || 0), 0))
+          >= totalReceived + (totalShipped - totalReceived),
       });
       setLoading(false);
     })();
@@ -283,11 +306,24 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
             {trace.discrepancies.length > 0 && (
               <div className="rounded-md border border-orange-500/40 bg-orange-500/10 p-3">
                 <div className="text-xs uppercase tracking-wide text-orange-700 dark:text-orange-400 font-semibold mb-1.5">
-                  Shipment shortfalls — reimbursement claims
+                  {trace.receivedContradicted
+                    ? "Shipment records — received counts look stale"
+                    : "Shipment shortfalls — reimbursement claims"}
                 </div>
                 <div className="text-xs text-muted-foreground mb-2">
-                  Amazon checked in fewer units than were sent. Each link opens that
-                  shipment's contents page in Seller Central, where the claim is filed.
+                  {trace.receivedContradicted ? (
+                    <>
+                      <strong className="text-foreground">Do not file these as claims.</strong>{" "}
+                      More units have sold or are in stock than Amazon is recorded as having
+                      received, so the received figures below are stale rather than the units
+                      being missing. Listed only so you can check the shipments yourself.
+                    </>
+                  ) : (
+                    <>
+                      Amazon checked in fewer units than were sent. Each link opens that
+                      shipment&apos;s contents page in Seller Central, where the claim is filed.
+                    </>
+                  )}
                 </div>
                 <table className="w-full text-sm">
                   <tbody>
@@ -305,6 +341,9 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
                           </a>
                           <span className="block text-[10px] text-muted-foreground font-mono">
                             {d.shipmentId}{d.status ? ` · ${d.status}` : ""}
+                            {(d.receivedDate || d.shipDate) && (
+                              <> · {fmtDate(d.receivedDate || d.shipDate)}</>
+                            )}
                           </span>
                         </td>
                         <td className="py-1.5 text-right text-xs text-muted-foreground whitespace-nowrap">
@@ -317,7 +356,7 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
                             // our data to when the shipment closed. Where it is
                             // absent nothing is claimed either way -- a guessed
                             // deadline is worse than none.
-                            const age = daysSince(d.receivedDate);
+                            const age = daysSince(d.receivedDate ?? d.shipDate);
                             if (age == null) {
                               return (
                                 <span className="block text-[10px] font-normal text-muted-foreground">
