@@ -70,6 +70,29 @@ type Trace = {
 const CLAIM_WINDOW_DAYS = 90;
 const CLAIM_WARN_DAYS = 21;
 
+/**
+ * Collapse an Amazon placement split back into the plan it came from.
+ *
+ * Amazon's placement service routinely splits one plan across several
+ * fulfilment centres, naming them identically bar a suffix:
+ *
+ *   FBA STA (04/22/2026 00:06)-FWA4
+ *   FBA STA (04/22/2026 00:06)-GYR2   ... and so on
+ *
+ * Listed flat, one shortfall becomes five near-identical "-1" lines and reads
+ * as duplicated data -- it was reported as exactly that on 2026-08-28. The
+ * split is real and each part keeps its own shipment id and Seller Central
+ * page, so the parts are preserved; only the presentation is grouped.
+ *
+ * Falls back to the shipment id when there is no name, so an unnamed shipment
+ * simply becomes its own group rather than being lumped in with others.
+ */
+function planKey(name: string | null, shipmentId: string): string {
+  if (!name) return shipmentId;
+  const m = name.match(/^(.*)-[A-Z0-9]{3,5}$/);
+  return m ? m[1] : name;
+}
+
 const daysSince = (v: string | null): number | null => {
   if (!v) return null;
   const d = /^\d{4}-\d{2}-\d{2}$/.test(v) ? new Date(`${v}T00:00:00`) : new Date(v);
@@ -327,24 +350,76 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
                 </div>
                 <table className="w-full text-sm">
                   <tbody>
-                    {trace.discrepancies.map((d) => (
-                      <tr key={d.shipmentId} className="border-b border-orange-500/20 last:border-0">
+                    {Object.values(
+                      trace.discrepancies.reduce((acc, d) => {
+                        const k = planKey(d.name, d.shipmentId);
+                        (acc[k] ??= { key: k, parts: [] as Discrepancy[] }).parts.push(d);
+                        return acc;
+                      }, {} as Record<string, { key: string; parts: Discrepancy[] }>),
+                    )
+                      .sort((a, b) =>
+                        b.parts.reduce((n, d) => n + d.shipped - d.received, 0) -
+                        a.parts.reduce((n, d) => n + d.shipped - d.received, 0))
+                      .map((group) => {
+                        const first = group.parts[0];
+                        const shipped = group.parts.reduce((n, d) => n + d.shipped, 0);
+                        const received = group.parts.reduce((n, d) => n + d.received, 0);
+                        const d: Discrepancy = {
+                          ...first,
+                          name: group.key,
+                          shipped,
+                          received,
+                        };
+                        const split = group.parts.length > 1 ? group.parts : null;
+                        return { d, split, key: group.key };
+                      })
+                      .map(({ d, split, key }) => (
+                      <tr key={key} className="border-b border-orange-500/20 last:border-0">
                         <td className="py-1.5">
-                          <a
-                            href={`https://sellercentral.amazon.com/fba/inbound-shipment/summary/${d.shipmentId}/contents`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-primary hover:underline inline-flex items-center gap-1"
-                          >
-                            {d.name || d.shipmentId}
-                            <ExternalLink className="h-3 w-3" />
-                          </a>
-                          <span className="block text-[10px] text-muted-foreground font-mono">
-                            {d.shipmentId}{d.status ? ` · ${d.status}` : ""}
-                            {(d.receivedDate || d.shipDate) && (
-                              <> · {fmtDate(d.receivedDate || d.shipDate)}</>
-                            )}
-                          </span>
+                          {split ? (
+                            // A split plan has no single Seller Central page --
+                            // each destination is reconciled separately -- so
+                            // every part keeps its own link.
+                            <>
+                              <span className="font-medium">{d.name}</span>
+                              <span className="block text-[10px] text-muted-foreground">
+                                split across {split.length} fulfilment centres
+                                {(d.receivedDate || d.shipDate) && <> · {fmtDate(d.receivedDate || d.shipDate)}</>}
+                              </span>
+                              <span className="mt-1 flex flex-wrap gap-1">
+                                {split.map((part) => (
+                                  <a
+                                    key={part.shipmentId}
+                                    href={`https://sellercentral.amazon.com/fba/inbound-shipment/summary/${part.shipmentId}/contents`}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-[10px] font-mono rounded border border-orange-500/40 px-1 py-0.5 text-primary hover:underline"
+                                    title={`${part.shipmentId} — ${part.shipped} sent / ${part.received} received`}
+                                  >
+                                    {(part.name || "").match(/-([A-Z0-9]{3,5})$/)?.[1] ?? part.shipmentId}
+                                  </a>
+                                ))}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <a
+                                href={`https://sellercentral.amazon.com/fba/inbound-shipment/summary/${d.shipmentId}/contents`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="text-primary hover:underline inline-flex items-center gap-1"
+                              >
+                                {d.name || d.shipmentId}
+                                <ExternalLink className="h-3 w-3" />
+                              </a>
+                              <span className="block text-[10px] text-muted-foreground font-mono">
+                                {d.shipmentId}{d.status ? ` · ${d.status}` : ""}
+                                {(d.receivedDate || d.shipDate) && (
+                                  <> · {fmtDate(d.receivedDate || d.shipDate)}</>
+                                )}
+                              </span>
+                            </>
+                          )}
                         </td>
                         <td className="py-1.5 text-right text-xs text-muted-foreground whitespace-nowrap">
                           {d.shipped} sent / {d.received} received
@@ -382,7 +457,7 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
                           })()}
                         </td>
                       </tr>
-                    ))}
+                      ))}
                   </tbody>
                 </table>
                 <div className="text-[10px] text-muted-foreground mt-2">
