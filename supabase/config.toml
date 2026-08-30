@@ -498,5 +498,8 @@ verify_jwt = false
 [functions.backfill-order-gaps]
 verify_jwt = false
 
+[functions.backfill-asin-brands]
+verify_jwt = false
+
 [functions.broadcast-app-reload]
 verify_jwt = false
