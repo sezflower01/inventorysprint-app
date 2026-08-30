@@ -49,6 +49,20 @@ const corsHeaders = {
 // One invocation's worth. 200 ASINs at the fetcher's 4-way concurrency is well
 // inside the function timeout with room to spare, and clears 4,262 in ~22 runs.
 const BATCH_SIZE = 200;
+
+// Which table to fill in. Parameterised rather than cloned into a second
+// function: the lookup, the dedupe, the miss-stamping and the product_catalog
+// caching are identical, and two copies would drift the moment one is fixed.
+//
+// `inventory` was done on 2026-08-30. `seller_watch_new_listings` follows
+// because "not one of my brands" is about to drive DELETION, and today 6,161
+// of 8,181 detections have no brand at all -- deleting on that would destroy
+// rows whose brand was merely never looked up.
+const TARGETS = {
+  inventory: { table: 'inventory', writesManufacturer: true },
+  listings:  { table: 'seller_watch_new_listings', writesManufacturer: false },
+} as const;
+type TargetKey = keyof typeof TARGETS;
 const MAX_BATCH = 500;
 
 Deno.serve(async (req) => {
@@ -66,6 +80,8 @@ Deno.serve(async (req) => {
 
     const body = await req.json().catch(() => ({}));
     const dryRun = body?.dryRun === true;
+    const targetKey: TargetKey = body?.target === 'listings' ? 'listings' : 'inventory';
+    const target = TARGETS[targetKey];
     const limit = Math.min(
       Math.max(Number(body?.limit) || BATCH_SIZE, 1),
       MAX_BATCH,
@@ -79,7 +95,7 @@ Deno.serve(async (req) => {
     // Distinct ASINs, not rows: the same ASIN often has several SKUs, and
     // asking Amazon once per SKU would multiply the work for one answer.
     const { data: rows, error } = await supabase
-      .from("inventory")
+      .from(target.table)
       .select("asin")
       .is("brand_checked_at", null)
       .not("asin", "is", null)
@@ -88,16 +104,16 @@ Deno.serve(async (req) => {
 
     const asins = Array.from(new Set((rows ?? []).map((r: any) => r.asin).filter(Boolean))).slice(0, limit);
     if (asins.length === 0) {
-      return json({ done: true, message: "No inventory rows awaiting a brand lookup." });
+      return json({ done: true, target: targetKey, message: `No ${target.table} rows awaiting a brand lookup.` });
     }
 
     const { count: remainingBefore } = await supabase
-      .from("inventory")
+      .from(target.table)
       .select("asin", { count: "exact", head: true })
       .is("brand_checked_at", null);
 
     if (dryRun) {
-      return json({ dryRun: true, wouldLookUp: asins.length, sample: asins.slice(0, 10), rowsRemaining: remainingBefore ?? null });
+      return json({ dryRun: true, target: targetKey, wouldLookUp: asins.length, sample: asins.slice(0, 10), rowsRemaining: remainingBefore ?? null });
     }
 
     const details = await fetchAmazonDetailsBatch(asins);
@@ -113,9 +129,15 @@ Deno.serve(async (req) => {
 
       // Written per ASIN, so every SKU sharing it gets the same answer and a
       // partial run still leaves everything it touched marked as done.
+      // seller_watch_new_listings has no manufacturer column, so the patch is
+      // built per target rather than sending a field the table lacks -- which
+      // PostgREST rejects for the whole batch, not just that column.
+      const patch: Record<string, unknown> = { brand, brand_checked_at: now };
+      if (target.writesManufacturer) patch.manufacturer = manufacturer;
+
       const { error: upErr } = await supabase
-        .from("inventory")
-        .update({ brand, manufacturer, brand_checked_at: now })
+        .from(target.table)
+        .update(patch)
         .eq("asin", asin)
         .is("brand_checked_at", null);
       if (upErr) {
@@ -137,11 +159,12 @@ Deno.serve(async (req) => {
     }
 
     const { count: remainingAfter } = await supabase
-      .from("inventory")
+      .from(target.table)
       .select("asin", { count: "exact", head: true })
       .is("brand_checked_at", null);
 
     return json({
+      target: targetKey,
       askedAmazon: asins.length,
       asinsMarked: checked,
       brandsFound: withBrand,
