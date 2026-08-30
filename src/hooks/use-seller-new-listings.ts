@@ -60,7 +60,8 @@ const SELECT_COLS =
   // the offer counts are deliberately NOT selected -- the columns still exist
   // (dropping them is a separate, destructive migration) but nothing reads
   // them now that search is manual.
-  "amazon_price_cents, new_price_cents, fba_offer_count";
+  "amazon_price_cents, new_price_cents, fba_offer_count, " +
+  "is_my_brand, my_brand_units, my_brand_asins";
 
 /** Sourcer sends 20 per call; check-product-eligibility is built for batches. */
 const ELIGIBILITY_BATCH = 20;
@@ -161,12 +162,14 @@ export function useSellerNewListings() {
           .from("seller_new_listings_branded")
           .select(SELECT_COLS)
           .in("source_status", ["candidates_found", "sourced", "no_candidates"]))
+          .order(myBrandsOnly ? "my_brand_units" : "detected_at", { ascending: false, nullsFirst: false })
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
         brandFilter(supabase
           .from("seller_new_listings_branded")
           .select(SELECT_COLS)
           .in("source_status", ["unsourced", "sourcing"]))
+          .order(myBrandsOnly ? "my_brand_units" : "detected_at", { ascending: false, nullsFirst: false })
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
         // Listing rows carry seller_id but not the seller's NAME -- that lives

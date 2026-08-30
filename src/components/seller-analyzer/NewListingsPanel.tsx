@@ -323,6 +323,42 @@ export default function NewListingsPanel() {
         </div>
 
         <Tabs value={tab} onValueChange={changeTab}>
+          {/*
+            OUTSIDE TabsList. Placed inside it first and it was clipped --
+            TabsList is an inline-flex strip sized for triggers, not arbitrary
+            controls, so the button rendered but could not be seen.
+
+            Governs BOTH tabs and every count, matched in the database (see
+            seller_new_listings_branded) rather than by shipping 1,484 brand
+            names to PostgREST as a filter.
+
+            ⚠️ A match is NOT automatically a good lead. Publishers and studios
+            dominate the matches -- Simon & Schuster, WARNER BROS, UNIVERSAL --
+            because selling one book once records its publisher as a "brand".
+            Of 151 matches on 2026-08-30, only the first handful (Milwaukee 154
+            units, Scholastic 13, Nintendo 7) were brands actually stocked. So
+            matched rows carry their held-unit count and sort by it: the filter
+            narrows the field, the number tells you which end to work from.
+          */}
+          <div className="mb-3 flex items-center gap-2">
+            <Button
+              type="button"
+              variant={myBrandsOnly ? "default" : "outline"}
+              size="sm"
+              className="h-8"
+              onClick={() => setMyBrandsOnly(!myBrandsOnly)}
+              title="Show only listings whose brand you already carry"
+            >
+              {myBrandsOnly ? "My brands only" : "All brands"}
+            </Button>
+            {myBrandsOnly && (
+              <span className="text-xs text-muted-foreground">
+                Sorted by how much of that brand you hold. A publisher or studio
+                matching at 0 units is rarely a real lead.
+              </span>
+            )}
+          </div>
+
           <TabsList className="mb-3">
             {/*
               Badges show SERVER-SIDE totals, never `done.length` / `pending.length`.
@@ -336,21 +372,6 @@ export default function NewListingsPanel() {
               is the one place it is the honest number, because a purge deletes
               disqualified rows too.
             */}
-            {/* Governs BOTH tabs and every count, matched in the database --
-                see seller_new_listings_branded. Matches any brand ever carried,
-                including the 1,279 currently at zero units: a brand bought once
-                and sold through is a known quantity, and restocking those is
-                the point. */}
-            <Button
-              type="button"
-              variant={myBrandsOnly ? "default" : "outline"}
-              size="sm"
-              className="mr-2 h-8"
-              onClick={() => setMyBrandsOnly(!myBrandsOnly)}
-              title="Show only listings in brands you already carry"
-            >
-              {myBrandsOnly ? "My brands only" : "All brands"}
-            </Button>
             <TabsTrigger value="done" className="gap-2">
               Done
               {doneTotal > 0 && <Badge variant="secondary">{doneTotal.toLocaleString()}</Badge>}
@@ -599,6 +620,18 @@ export default function NewListingsPanel() {
                           ASIN is worth nothing however good the source is --
                           so it sits beside the title, not below the fold. */}
                       <EligibilityBadge status={eligibility[listing.asin]} />
+                      {/* Only when the filter is on, and only when the brand is
+                          actually stocked -- a "0 units" badge on every
+                          publisher match would be noise dressed as signal. */}
+                      {myBrandsOnly && (listing as any).my_brand_units > 0 && (
+                        <Badge
+                          variant="secondary"
+                          className="text-[10px]"
+                          title={`You hold ${(listing as any).my_brand_units} unit(s) of ${listing.brand} across ${(listing as any).my_brand_asins} ASIN(s)`}
+                        >
+                          {listing.brand} · {(listing as any).my_brand_units}u
+                        </Badge>
+                      )}
                     </div>
                     <div className="text-xs text-muted-foreground">
                       <a
