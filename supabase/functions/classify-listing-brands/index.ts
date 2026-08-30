@@ -89,20 +89,29 @@ Deno.serve(async (req) => {
 
       // One brand list per user, fetched once rather than per row.
       const userIds = Array.from(new Set(rows.map((r: any) => r.user_id).filter(Boolean)));
-      const brandsByUser = new Map<string, Set<string>>();
+      // Two structures per user: exact names, and the subset opted in to
+      // prefix matching. Prefix is deliberately NOT the default -- on this
+      // catalogue it would have POP catching POPCORN and CAT / WB / 2K / Ford
+      // colliding with unrelated brands. It is per-brand because "Milwaukee"
+      // wants it and "POP" must not.
+      const brandsByUser = new Map<string, { exact: Set<string>; prefixes: string[] }>();
       for (const uid of userIds) {
         const { data: ub } = await supabase
           .from("user_brands")
-          .select("brand, status")
+          .select("brand, status, match_mode")
           .eq("user_id", uid);
-        brandsByUser.set(uid, new Set(
-          (ub ?? [])
-            // Ignored brands are excluded HERE, which lands the listing in
-            // not_mine rather than removing it -- visible, not silent.
-            .filter((b: any) => (b.status ?? "") !== "ignore")
+        // Ignored brands are dropped HERE, which lands the listing in not_mine
+        // rather than removing it -- visible, not silent.
+        const live = (ub ?? []).filter((b: any) => (b.status ?? "") !== "ignore");
+        brandsByUser.set(uid, {
+          exact: new Set(live.map((b: any) => String(b.brand ?? "").trim().toLowerCase()).filter(Boolean)),
+          prefixes: live
+            .filter((b: any) => b.match_mode === "prefix")
             .map((b: any) => String(b.brand ?? "").trim().toLowerCase())
-            .filter(Boolean),
-        ));
+            // A one- or two-character prefix would match most of the
+            // catalogue; refuse it here rather than trusting every row.
+            .filter((v: string) => v.length >= 3),
+        });
       }
 
       const now = new Date().toISOString();
@@ -114,7 +123,12 @@ Deno.serve(async (req) => {
         if (!brand) {
           state = "unknown";
           unknown++;
-        } else if (brandsByUser.get(r.user_id)?.has(brand.trim().toLowerCase())) {
+        } else if ((() => {
+          const set = brandsByUser.get(r.user_id);
+          if (!set) return false;
+          const b = brand.trim().toLowerCase();
+          return set.exact.has(b) || set.prefixes.some((p) => b.startsWith(p));
+        })()) {
           state = "matched";
           matched++;
         } else {
