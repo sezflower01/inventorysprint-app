@@ -92,7 +92,19 @@ GRANT EXECUTE ON FUNCTION public.refresh_user_brands() TO authenticated;
 
 -- Prefix matches are evaluated in the classifier, not here, but the view still
 -- needs to agree with it or the filter and the state column would disagree.
-CREATE OR REPLACE VIEW public.seller_new_listings_branded
+--
+-- DROP then CREATE, not CREATE OR REPLACE. The view selects l.*, which Postgres
+-- expands and FREEZES at creation time. Since this view was first built,
+-- seller_watch_new_listings gained brand_checked_at, brand_match_state and
+-- brand_notified_at, so the expansion is wider and is_my_brand no longer lands
+-- in the same position -- and REPLACE may only append columns, never reorder or
+-- rename them. It fails with 42P16 "cannot change name of view column".
+--
+-- Dropping a view destroys no data. Nothing depends on this one but the app,
+-- which reads it and will simply see it reappear in the same transaction.
+DROP VIEW IF EXISTS public.seller_new_listings_branded;
+
+CREATE VIEW public.seller_new_listings_branded
 WITH (security_invoker = true) AS
 SELECT
   l.*,

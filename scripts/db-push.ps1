@@ -40,10 +40,11 @@ Write-Host ''
 if ($LASTEXITCODE -eq 0) {
   Write-Host 'All migrations applied.' -ForegroundColor Green
 } else {
-  Write-Host 'Push stopped. If it stopped on' -NoNewline
-  Write-Host ' 20260827120002 ' -ForegroundColor Yellow -NoNewline
-  Write-Host 'that is BY DESIGN --'
-  Write-Host 'it refuses to run until a broadcast has actually been observed.'
-  Write-Host 'Toggle a padlock on the Repricer (unlock code 1365), then run this again.'
+  Write-Host 'Push stopped. Read the migration name in the error above --' -ForegroundColor Yellow
+  Write-Host 'the failure is in that file, not necessarily the last one listed.'
+  Write-Host ''
+  Write-Host 'Known intentional stop: 20260827120002 refuses to run until a'
+  Write-Host 'broadcast has been observed. Toggle a padlock on the Repricer'
+  Write-Host '(unlock code 1365), then run this again.'
 }
 Write-Host ''
