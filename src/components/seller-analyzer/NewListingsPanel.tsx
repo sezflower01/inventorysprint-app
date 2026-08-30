@@ -353,8 +353,9 @@ export default function NewListingsPanel() {
             </Button>
             {myBrandsOnly && (
               <span className="text-xs text-muted-foreground">
-                Sorted by how much of that brand you hold. A publisher or studio
-                matching at 0 units is rarely a real lead.
+                Sorted by how many ASINs of that brand you have carried. Zero
+                stock is fine — a brand you sold through is still a brand you
+                know. One ASIN usually means a publisher matched by accident.
               </span>
             )}
           </div>
@@ -620,16 +621,22 @@ export default function NewListingsPanel() {
                           ASIN is worth nothing however good the source is --
                           so it sits beside the title, not below the fold. */}
                       <EligibilityBadge status={eligibility[listing.asin]} />
-                      {/* Only when the filter is on, and only when the brand is
-                          actually stocked -- a "0 units" badge on every
-                          publisher match would be noise dressed as signal. */}
-                      {myBrandsOnly && (listing as any).my_brand_units > 0 && (
+                      {/* Shows ASINs carried, not units held, and shows even at
+                          zero stock. A brand at 0 units is frequently one sold
+                          through and worth restocking -- not a weak lead. What
+                          separates a real brand from a publisher that appeared
+                          once is BREADTH: Crabtree & Evelyn is 36 ASINs at 0
+                          units; Simon & Schuster is one book. */}
+                      {myBrandsOnly && (listing as any).my_brand_asins > 0 && (
                         <Badge
                           variant="secondary"
                           className="text-[10px]"
-                          title={`You hold ${(listing as any).my_brand_units} unit(s) of ${listing.brand} across ${(listing as any).my_brand_asins} ASIN(s)`}
+                          title={`You have carried ${(listing as any).my_brand_asins} ASIN(s) of ${listing.brand}; ${(listing as any).my_brand_units} unit(s) in stock now`}
                         >
-                          {listing.brand} · {(listing as any).my_brand_units}u
+                          {(listing as any).my_brand_asins} ASIN{(listing as any).my_brand_asins === 1 ? "" : "s"}
+                          {(listing as any).my_brand_units > 0
+                            ? ` · ${(listing as any).my_brand_units}u`
+                            : " · none in stock"}
                         </Badge>
                       )}
                     </div>

@@ -162,14 +162,14 @@ export function useSellerNewListings() {
           .from("seller_new_listings_branded")
           .select(SELECT_COLS)
           .in("source_status", ["candidates_found", "sourced", "no_candidates"]))
-          .order(myBrandsOnly ? "my_brand_units" : "detected_at", { ascending: false, nullsFirst: false })
+          .order(myBrandsOnly ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
         brandFilter(supabase
           .from("seller_new_listings_branded")
           .select(SELECT_COLS)
           .in("source_status", ["unsourced", "sourcing"]))
-          .order(myBrandsOnly ? "my_brand_units" : "detected_at", { ascending: false, nullsFirst: false })
+          .order(myBrandsOnly ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
         // Listing rows carry seller_id but not the seller's NAME -- that lives
