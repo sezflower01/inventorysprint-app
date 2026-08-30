@@ -27,6 +27,7 @@ import NotifyEmailField from "@/components/seller-analyzer/NotifyEmailField";
 import SourceRetailersPanel from "@/components/seller-analyzer/SourceRetailersPanel";
 import ExcludedDomainsPanel from "@/components/seller-analyzer/ExcludedDomainsPanel";
 import QualificationExclusionsPanel from "@/components/seller-analyzer/QualificationExclusionsPanel";
+import WatchedBrandsPanel from "@/components/seller-analyzer/WatchedBrandsPanel";
 import BulkAddPanel from "@/components/seller-analyzer/BulkAddPanel";
 import { Helmet } from "react-helmet-async";
 
@@ -413,6 +414,8 @@ export default function SellerAnalyzer() {
             />
 
             <ExcludedDomainsPanel />
+
+            <WatchedBrandsPanel />
 
             <QualificationExclusionsPanel />
 
