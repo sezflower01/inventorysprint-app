@@ -340,8 +340,20 @@ export default function NewListingsPanel() {
               Done
               {doneTotal > 0 && <Badge variant="secondary">{doneTotal.toLocaleString()}</Badge>}
             </TabsTrigger>
+            {/*
+              "To review", not "Searching".
+              Automated Find Source was deleted on 2026-08-19 (commit ee359a3):
+              Google CSE returned 403 on every call and SerpAPI's quota ran out,
+              so rather than buy search capacity for a judgement reviewed by hand
+              anyway, the worker and its cron were removed from the repo and from
+              production.
+              Nothing has moved a row out of this tab since. Calling it
+              "Searching" promised work in progress that cannot happen -- reported
+              2026-08-30 as 5,624 rows apparently stuck for over a week. The rows
+              are a manual backlog and the count being static is correct.
+            */}
             <TabsTrigger value="searching" className="gap-2">
-              Searching
+              To review
               {pendingQualifiedTotal > 0 && (
                 <Badge variant="secondary">{pendingQualifiedTotal.toLocaleString()}</Badge>
               )}
@@ -492,7 +504,7 @@ export default function NewListingsPanel() {
                           <AlertDialogDescription>
                             This includes listings with source candidates and any you marked as
                             sourced — their saved sources go too. Permanent, and they will not be
-                            re-detected. Queued listings on the Searching tab are not affected.
+                            re-detected. Listings on the To review tab are not affected.
                           </AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>
