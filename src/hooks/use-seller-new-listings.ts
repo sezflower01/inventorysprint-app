@@ -85,6 +85,16 @@ const ELIGIBILITY_BATCH = 20;
 // quietly missing.
 const REVIEW_WINDOW_DAYS = 30;
 
+// Sourcing filter: only listings whose brand the user already carries.
+//
+// Matched in the database (see seller_new_listings_branded) rather than by
+// pulling the brand list into the browser -- 1,484 brands as an `.in(...)`
+// would be ~20KB of URL, past what proxies reliably accept, and would fail by
+// truncating rather than erroring.
+//
+// Matches ALL brands ever carried, not just ones in stock: 1,279 of the 1,484
+// sit at zero units and those are exactly the ones worth restocking.
+
 const PAGE_SIZE = 200;
 
 /**
@@ -120,6 +130,7 @@ export function useSellerNewListings() {
    */
   const [pendingQualifiedTotal, setPendingQualifiedTotal] = useState(0);
   const [pendingOlderTotal, setPendingOlderTotal] = useState(0);
+  const [myBrandsOnly, setMyBrandsOnly] = useState(false);
   const [loading, setLoading] = useState(false);
   const [eligibility, setEligibility] = useState<Record<string, EligibilityStatus>>({});
   /** `${seller_id}|${marketplace}` -> seller_name, for listings to show their origin. */
@@ -129,6 +140,10 @@ export function useSellerNewListings() {
     setLoading(true);
     try {
       const reviewCutoff = new Date(Date.now() - REVIEW_WINDOW_DAYS * 86_400_000).toISOString();
+      // Applied to the LISTS and to every COUNT. A badge that ignored the
+      // filter would report a queue the tab does not show.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const brandFilter = (q: any) => (myBrandsOnly ? q.eq("is_my_brand", true) : q);
       const [
         { data: doneRows, error },
         { data: pendingRows },
@@ -142,16 +157,16 @@ export function useSellerNewListings() {
         // A single combined query ordered by detected_at is exactly what buried
         // completed research: 281 detections in a day pushed the 78 finished
         // rows past a shared 50-row window.
-        supabase
-          .from("seller_watch_new_listings")
+        brandFilter(supabase
+          .from("seller_new_listings_branded")
           .select(SELECT_COLS)
-          .in("source_status", ["candidates_found", "sourced", "no_candidates"])
+          .in("source_status", ["candidates_found", "sourced", "no_candidates"]))
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
-        supabase
-          .from("seller_watch_new_listings")
+        brandFilter(supabase
+          .from("seller_new_listings_branded")
           .select(SELECT_COLS)
-          .in("source_status", ["unsourced", "sourcing"])
+          .in("source_status", ["unsourced", "sourcing"]))
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
         // Listing rows carry seller_id but not the seller's NAME -- that lives
@@ -164,30 +179,30 @@ export function useSellerNewListings() {
         // Counted, not fetched. Bulk delete can only ever act on the 50 rows
         // on screen, so the UI has to be able to say "50 of 213" rather than
         // implying a Select-all reached everything.
-        supabase
-          .from("seller_watch_new_listings")
+        brandFilter(supabase
+          .from("seller_new_listings_branded")
           .select("id", { count: "exact", head: true })
-          .in("source_status", ["candidates_found", "sourced", "no_candidates"]),
-        supabase
-          .from("seller_watch_new_listings")
+          .in("source_status", ["candidates_found", "sourced", "no_candidates"])),
+        brandFilter(supabase
+          .from("seller_new_listings_branded")
           .select("id", { count: "exact", head: true })
-          .in("source_status", ["unsourced", "sourcing"]),
+          .in("source_status", ["unsourced", "sourcing"])),
         // Counted server-side rather than derived from `pending`, which is one
         // PAGE_SIZE window. Deriving it was the bug: the badge read the page
         // length and so sat at exactly 200 from the moment the queue passed 200,
         // reporting a nearly-empty queue while the table held 8,717 rows.
-        supabase
-          .from("seller_watch_new_listings")
+        brandFilter(supabase
+          .from("seller_new_listings_branded")
           .select("id", { count: "exact", head: true })
           .in("source_status", ["unsourced", "sourcing"])
-          .eq("qualified", true)
+          .eq("qualified", true))
           .gte("detected_at", reviewCutoff),
         // Everything older, counted so it can be reported rather than vanish.
-        supabase
-          .from("seller_watch_new_listings")
+        brandFilter(supabase
+          .from("seller_new_listings_branded")
           .select("id", { count: "exact", head: true })
           .in("source_status", ["unsourced", "sourcing"])
-          .eq("qualified", true)
+          .eq("qualified", true))
           .lt("detected_at", reviewCutoff),
       ]);
       if (error) throw error;
@@ -209,7 +224,7 @@ export function useSellerNewListings() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [myBrandsOnly]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -319,7 +334,7 @@ export function useSellerNewListings() {
     let removed = 0;
     for (let i = 0; i < ids.length; i += CHUNK) {
       const slice = ids.slice(i, i + CHUNK);
-      const { error } = await supabase.from("seller_watch_new_listings").delete().in("id", slice);
+      const { error } = await supabase.from("seller_new_listings_branded").delete().in("id", slice);
       if (error) {
         // Say what actually landed -- a partial delete reported as total
         // failure sends the user back to re-select rows that are already gone.
@@ -350,7 +365,7 @@ export function useSellerNewListings() {
   const deleteByStatus = useCallback(async (statuses: NewListing["source_status"][]) => {
     if (!statuses.length) return 0;
     const { count, error } = await supabase
-      .from("seller_watch_new_listings")
+      .from("seller_new_listings_branded")
       .delete({ count: "exact" })
       .in("source_status", statuses);
     if (error) throw new Error(error.message);
@@ -361,6 +376,7 @@ export function useSellerNewListings() {
   return {
     done, pending, doneTotal, pendingTotal, pendingQualifiedTotal, loading,
     pendingOlderTotal, reviewWindowDays: REVIEW_WINDOW_DAYS,
+    myBrandsOnly, setMyBrandsOnly,
     eligibility, sellerNames, deleteListings,
     deleteByStatus, refresh,
   };

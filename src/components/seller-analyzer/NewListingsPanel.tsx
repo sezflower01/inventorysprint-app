@@ -243,7 +243,7 @@ function DeleteMatchingExcludedWords({ onDone }: { onDone: () => void }) {
 }
 
 export default function NewListingsPanel() {
-  const { done, pending, doneTotal, pendingTotal, pendingQualifiedTotal, pendingOlderTotal, reviewWindowDays, loading, eligibility, sellerNames, deleteListings, deleteByStatus, refresh } = useSellerNewListings();
+  const { done, pending, doneTotal, pendingTotal, pendingQualifiedTotal, pendingOlderTotal, reviewWindowDays, myBrandsOnly, setMyBrandsOnly, loading, eligibility, sellerNames, deleteListings, deleteByStatus, refresh } = useSellerNewListings();
   const [tab, setTab] = useState("done");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [removing, setRemoving] = useState(false);
@@ -336,6 +336,21 @@ export default function NewListingsPanel() {
               is the one place it is the honest number, because a purge deletes
               disqualified rows too.
             */}
+            {/* Governs BOTH tabs and every count, matched in the database --
+                see seller_new_listings_branded. Matches any brand ever carried,
+                including the 1,279 currently at zero units: a brand bought once
+                and sold through is a known quantity, and restocking those is
+                the point. */}
+            <Button
+              type="button"
+              variant={myBrandsOnly ? "default" : "outline"}
+              size="sm"
+              className="mr-2 h-8"
+              onClick={() => setMyBrandsOnly(!myBrandsOnly)}
+              title="Show only listings in brands you already carry"
+            >
+              {myBrandsOnly ? "My brands only" : "All brands"}
+            </Button>
             <TabsTrigger value="done" className="gap-2">
               Done
               {doneTotal > 0 && <Badge variant="secondary">{doneTotal.toLocaleString()}</Badge>}
