@@ -243,7 +243,7 @@ function DeleteMatchingExcludedWords({ onDone }: { onDone: () => void }) {
 }
 
 export default function NewListingsPanel() {
-  const { done, pending, doneTotal, pendingTotal, pendingQualifiedTotal, loading, eligibility, sellerNames, deleteListings, deleteByStatus, refresh } = useSellerNewListings();
+  const { done, pending, doneTotal, pendingTotal, pendingQualifiedTotal, pendingOlderTotal, reviewWindowDays, loading, eligibility, sellerNames, deleteListings, deleteByStatus, refresh } = useSellerNewListings();
   const [tab, setTab] = useState("done");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [removing, setRemoving] = useState(false);
@@ -354,6 +354,7 @@ export default function NewListingsPanel() {
             */}
             <TabsTrigger value="searching" className="gap-2">
               To review
+              <span className="sr-only">last {reviewWindowDays} days</span>
               {pendingQualifiedTotal > 0 && (
                 <Badge variant="secondary">{pendingQualifiedTotal.toLocaleString()}</Badge>
               )}
@@ -522,6 +523,19 @@ export default function NewListingsPanel() {
                   <p className="text-xs text-muted-foreground">
                     Showing the {rows.length} most recent of {total.toLocaleString()}. Remove these
                     to reveal older ones, or use the bulk clear above.
+                  </p>
+                )}
+
+                {/* The badge counts the last N days only, so anything older has
+                    to be stated -- a bounded number that quietly drops rows is
+                    just a different kind of dishonest. */}
+                {!isDone && pendingOlderTotal > 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    The count above covers the last {reviewWindowDays} days.{" "}
+                    <strong>{pendingOlderTotal.toLocaleString()}</strong> older detection
+                    {pendingOlderTotal === 1 ? " is" : "s are"} still stored and can be cleared
+                    with the bulk action above. Nothing moves out of this tab on its own —
+                    automated source search was removed on 19 Aug 2026.
                   </p>
                 )}
 

@@ -73,6 +73,18 @@ const ELIGIBILITY_BATCH = 20;
  * already scopes by user -- so this is a UI choice, raised to make a backlog
  * browsable.
  */
+// How far back the review tab looks.
+//
+// Automated Find Source was deleted on 2026-08-19, so nothing moves rows out of
+// this tab any more -- it only ever grows. Counting every row ever detected made
+// the badge read 5,624 and climbing, which looks like a queue falling further
+// behind rather than a list of recent detections worth a glance.
+//
+// Older rows are NOT deleted or hidden from the database; they are counted
+// separately and reported, so the number is bounded without anything going
+// quietly missing.
+const REVIEW_WINDOW_DAYS = 30;
+
 const PAGE_SIZE = 200;
 
 /**
@@ -107,6 +119,7 @@ export function useSellerNewListings() {
    * disqualified ones included.
    */
   const [pendingQualifiedTotal, setPendingQualifiedTotal] = useState(0);
+  const [pendingOlderTotal, setPendingOlderTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [eligibility, setEligibility] = useState<Record<string, EligibilityStatus>>({});
   /** `${seller_id}|${marketplace}` -> seller_name, for listings to show their origin. */
@@ -115,6 +128,7 @@ export function useSellerNewListings() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
+      const reviewCutoff = new Date(Date.now() - REVIEW_WINDOW_DAYS * 86_400_000).toISOString();
       const [
         { data: doneRows, error },
         { data: pendingRows },
@@ -122,6 +136,7 @@ export function useSellerNewListings() {
         { count: doneCount },
         { count: pendingCount },
         { count: pendingQualifiedCount },
+        { count: pendingOlderCount },
       ] = await Promise.all([
         // DONE and SEARCHING are fetched separately with their own limits.
         // A single combined query ordered by detected_at is exactly what buried
@@ -165,7 +180,15 @@ export function useSellerNewListings() {
           .from("seller_watch_new_listings")
           .select("id", { count: "exact", head: true })
           .in("source_status", ["unsourced", "sourcing"])
-          .eq("qualified", true),
+          .eq("qualified", true)
+          .gte("detected_at", reviewCutoff),
+        // Everything older, counted so it can be reported rather than vanish.
+        supabase
+          .from("seller_watch_new_listings")
+          .select("id", { count: "exact", head: true })
+          .in("source_status", ["unsourced", "sourcing"])
+          .eq("qualified", true)
+          .lt("detected_at", reviewCutoff),
       ]);
       if (error) throw error;
       setDone((doneRows as unknown as NewListing[]) || []);
@@ -173,6 +196,7 @@ export function useSellerNewListings() {
       setDoneTotal(doneCount ?? 0);
       setPendingTotal(pendingCount ?? 0);
       setPendingQualifiedTotal(pendingQualifiedCount ?? 0);
+      setPendingOlderTotal(pendingOlderCount ?? 0);
 
       const names: Record<string, string> = {};
       type WatchNameRow = { seller_id: string; marketplace: string; seller_name: string | null };
@@ -336,6 +360,7 @@ export function useSellerNewListings() {
 
   return {
     done, pending, doneTotal, pendingTotal, pendingQualifiedTotal, loading,
+    pendingOlderTotal, reviewWindowDays: REVIEW_WINDOW_DAYS,
     eligibility, sellerNames, deleteListings,
     deleteByStatus, refresh,
   };
