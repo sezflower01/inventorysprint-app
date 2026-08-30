@@ -208,6 +208,24 @@ const _purchasesCache: {
   sold: Map<string, number>;
 } = { userId: null, loadedAt: null, listings: [], shipItems: [], stock: new Map(), known: new Set(), sold: new Map() };
 
+// What you were LOOKING AT, kept separately from the data cache above.
+//
+// Caching the rows stopped the reload but not the disorientation: filters reset
+// to their defaults and the page jumped to the top, so returning still meant
+// finding your place again. On a page worked through row by row that is most of
+// the cost of leaving it.
+//
+// Same idea as _assignmentsFilterCache in AssignmentsTable. Module scope for the
+// same reason as the data cache -- React Router unmounts the route, so component
+// state cannot survive it.
+const _purchasesViewCache = {
+  query: "",
+  statusFilter: "gaps" as StatusFilter,
+  yearFilter: "all",
+  monthFilter: "all",
+  scrollY: 0,
+};
+
 export default function UnshippedPurchases() {
   const { user } = useAuth();
   const [listings, setListings] = useState<ListingRow[]>([]);
@@ -217,17 +235,17 @@ export default function UnshippedPurchases() {
   const [soldByAsin, setSoldByAsin] = useState<Map<string, number>>(new Map());
   const [loading, setLoading] = useState(true);
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(_purchasesViewCache.query);
   // "gaps" (everything except fully shipped) is the default because that is
   // the working set -- the page exists to be worked through, not browsed.
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("gaps");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>(_purchasesViewCache.statusFilter);
   // Period filter on the PURCHASE date. The page's headline caveat is that a
   // purchase older than the FBA shipment sync coverage looks unshipped when it
   // merely predates the data — narrowing to a recent year is the direct way to
   // exclude that false signal, so this is a correctness tool, not just
   // convenience.
-  const [yearFilter, setYearFilter] = useState<string>("all");
-  const [monthFilter, setMonthFilter] = useState<string>("all");
+  const [yearFilter, setYearFilter] = useState<string>(_purchasesViewCache.yearFilter);
+  const [monthFilter, setMonthFilter] = useState<string>(_purchasesViewCache.monthFilter);
   const [traceAsin, setTraceAsin] = useState<{ asin: string; title: string } | null>(null);
 
   const loadData = useCallback(async (force: boolean) => {
@@ -295,6 +313,31 @@ export default function UnshippedPurchases() {
       setLoading(false);
     })();
   }, [user]);
+
+  // Mirror the current view into the cache so the next mount restores it.
+  useEffect(() => {
+    _purchasesViewCache.query = query;
+    _purchasesViewCache.statusFilter = statusFilter;
+    _purchasesViewCache.yearFilter = yearFilter;
+    _purchasesViewCache.monthFilter = monthFilter;
+  }, [query, statusFilter, yearFilter, monthFilter]);
+
+  // Scroll is recorded continuously rather than on unmount: a route change can
+  // reset scroll before a cleanup runs, so reading it there gets 0.
+  useEffect(() => {
+    const onScroll = () => { _purchasesViewCache.scrollY = window.scrollY; };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  // Restore position once rows exist -- scrolling before they render would land
+  // on a short page and be clamped to the top.
+  useEffect(() => {
+    if (loading || _purchasesViewCache.scrollY <= 0) return;
+    const y = _purchasesViewCache.scrollY;
+    const id = requestAnimationFrame(() => window.scrollTo(0, y));
+    return () => cancelAnimationFrame(id);
+  }, [loading]);
 
   // Mount only. Reads the cache when there is one, so returning to the page is
   // instant and nothing moves while you are reading it.
