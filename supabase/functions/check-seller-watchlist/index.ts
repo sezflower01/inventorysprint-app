@@ -256,7 +256,40 @@ Deno.serve(async (req) => {
   // Early exits inside the lock cannot return a Response -- withCronLock wants
   // a work result -- so the status rides alongside the body.
   let outcomeStatus = 200;
-  const lock = await withCronLock(admin, 'check-seller-watchlist', 300, async () => {
+  // A watchdog that frees the lock even if the run below never returns.
+  //
+  // Wrapping the five outbound fetches in a 20s timeout was not enough: a run
+  // acquired at 11:37 was still holding at 11:40:39, well past its 90s
+  // RUN_BUDGET_MS. So the stall is not in those calls -- it is in one of the
+  // many supabase-js awaits (admin.from / admin.rpc), which carry their own
+  // fetch and no timeout. On a database with documented PostgREST pool
+  // exhaustion, a DB call that never answers is entirely plausible.
+  //
+  // Rather than guess which await hangs, this bounds the CONSEQUENCE. The
+  // lock is released unconditionally shortly after the run budget expires, so
+  // a hung run can no longer block its successors. Every run then gets its
+  // chance at the queue instead of alternating between hang and skip, which is
+  // what left the job with no completed run since 2026-08-22.
+  //
+  // Releasing early is safe: withCronLock releases again in its finally, and
+  // release_cron_lock on an already-free lock is a no-op. The hung isolate is
+  // eventually reaped by the platform.
+  //
+  // This does NOT fix the hang. It stops one hang costing ten days.
+  const watchdog = setTimeout(() => {
+    void (async () => {
+      try {
+        await admin.rpc('release_cron_lock', { p_job_name: 'check-seller-watchlist' });
+        console.warn('[seller-watch] watchdog released the lock — run exceeded its budget');
+      } catch (e) {
+        console.warn('[seller-watch] watchdog release failed:', e);
+      }
+    })();
+  }, RUN_BUDGET_MS + 15_000);
+
+  // TTL 240s, not 300. The cron fires every 300s, so an equal TTL means a run
+  // that overruns by a second still blocks the next one outright.
+  const lock = await withCronLock(admin, 'check-seller-watchlist', 240, async () => {
 
     // Plan mode: report the queue order WITHOUT calling Keepa or mutating
     // anything. This is how fair rotation is verified against real data --
@@ -913,6 +946,7 @@ Deno.serve(async (req) => {
       },
     };
   });
+  clearTimeout(watchdog);
 
   if (lock.skipped) {
     return jsonResponse({ ok: true, skipped_locked: true, reason: 'a previous run is still in flight' });
