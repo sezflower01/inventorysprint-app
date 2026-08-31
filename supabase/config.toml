@@ -504,5 +504,8 @@ verify_jwt = false
 [functions.classify-listing-brands]
 verify_jwt = false
 
+[functions.sync-order-status-updates]
+verify_jwt = false
+
 [functions.broadcast-app-reload]
 verify_jwt = false
