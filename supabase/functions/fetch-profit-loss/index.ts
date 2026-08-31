@@ -871,6 +871,38 @@ function processShipmentEventToCache(event: any, userId: string): CacheEntry[] {
       }
     }
 
+    // Marketplace facilitator tax. Amazon does NOT deliver this in
+    // ItemChargeList -- it arrives in its own ItemTaxWithheldList, so the
+    // MarketplaceFacilitatorTax-* cases in the switch above have never once
+    // matched. Confirmed 2026-08-31: the column read $0.00 for all of 2026
+    // while InventoryLab reported $51,308.12 of tax Amazon remitted on the
+    // seller's behalf.
+    //
+    // This is the same failure as fbm_shipping_label_fee earlier the same day:
+    // a handler exists, looks correct, and is pointed at a list Amazon never
+    // populates. sync-sales-orders already reads ItemTaxWithheldList and even
+    // documents it as "Marketplace facilitator tax reversals"; only this
+    // parser, the one that feeds the P&L, was missing it.
+    //
+    // Informational only -- it never touches Net Profit. But "did Amazon remit
+    // my sales tax or do I owe it" is exactly the question a tax filing turns
+    // on, and $0.00 is the wrong answer to it.
+    for (const withheld of item.ItemTaxWithheldList || []) {
+      // Canonical shape is nested: TaxWithheldComponent.TaxesWithheld[] holds
+      // ChargeType/ChargeAmount. Some payloads flatten to TaxWithheldAmount, so
+      // accept both rather than depending on which one this account gets.
+      const components = withheld?.TaxesWithheld || (withheld?.TaxWithheldAmount ? [withheld] : []);
+      for (const c of components) {
+        const money = c?.ChargeAmount || c?.TaxWithheldAmount || c?.Amount;
+        const currency = money?.CurrencyCode || 'USD';
+        const amount = Math.abs(convertToUSD(parseFloat(money?.CurrencyAmount || 0), currency));
+        if (amount === 0) continue;
+        // Stored as a positive magnitude, matching sales_tax_collected. The P&L
+        // renders it negative (OTHER_ROWS carries negative: true).
+        entry.marketplace_facilitator_tax += amount;
+      }
+    }
+
     // Process item fees
     for (const fee of item.ItemFeeList || []) {
       const currency = fee.FeeAmount?.CurrencyCode || 'USD';
@@ -988,6 +1020,20 @@ function processRefundEventToCache(event: any, userId: string): CacheEntry[] {
           }
       }
       void rawCharge;
+    }
+
+    // Facilitator tax reversed back when a customer refunds. Same list, same
+    // reason it was missing -- and without it the refund side of the tax
+    // picture is as blank as the charge side was.
+    for (const withheld of item.ItemTaxWithheldList || []) {
+      const components = withheld?.TaxesWithheld || (withheld?.TaxWithheldAmount ? [withheld] : []);
+      for (const c of components) {
+        const money = c?.ChargeAmount || c?.TaxWithheldAmount || c?.Amount;
+        const currency = money?.CurrencyCode || 'USD';
+        const amount = Math.abs(convertToUSD(parseFloat(money?.CurrencyAmount || 0), currency));
+        if (amount === 0) continue;
+        entry.marketplace_facilitator_tax_refunds += amount;
+      }
     }
 
     // Process fee adjustments as a signed Amazon ledger.
