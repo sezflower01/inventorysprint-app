@@ -65,6 +65,35 @@ const CANDIDATE_BATCH = 60;
 
 // Leave room inside the cron's 120s timeout to finish the current seller and
 // write its state, rather than being killed mid-update.
+// Every outbound call goes through this, and none did before.
+//
+// The function budgets itself 90s (RUN_BUDGET_MS) and checks that deadline
+// between sellers -- but a bare fetch() has no timeout, so if Keepa or Amazon
+// accepts the connection and never answers, the await never resolves and the
+// deadline check is never reached again. The run hangs until the platform
+// kills it, holding its 300s cron lock throughout and blocking every
+// subsequent run.
+//
+// That is what happened. check-seller-watchlist last COMPLETED on 2026-08-22;
+// for ten days afterwards every run either hung or was skipped as locked while
+// pg_cron recorded success. No seller was checked and no new listing detected
+// in that whole period -- and nothing surfaced it, because a hung run writes
+// no failure row.
+//
+// 20s per call: well above a healthy Keepa response, far below the run budget,
+// so one slow endpoint costs a single seller rather than the entire run.
+const FETCH_TIMEOUT_MS = 20_000;
+
+async function fetchT(url: string | URL, init?: RequestInit): Promise<Response> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await globalThis.fetch(url, { ...(init ?? {}), signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 const RUN_BUDGET_MS = 90_000;
 
 // How long to wait for a token slot before ending the run. A 10-token call
@@ -370,7 +399,7 @@ Deno.serve(async (req) => {
       let currentSellerName: string | null = null;
       try {
         const url = `https://api.keepa.com/seller?key=${KEEPA_KEY}&domain=${domainId}&seller=${encodeURIComponent(sellerId)}&storefront=1`;
-        const res = await fetch(url);
+        const res = await fetchT(url);
         if (res.ok) {
           const json = await res.json().catch(() => ({}));
           await reportKeepaTokensLeft(admin, json?.tokensLeft, json?.refillRate);
@@ -474,7 +503,7 @@ Deno.serve(async (req) => {
         if (detailSlot.ok) {
           try {
             const url = `https://api.keepa.com/product?key=${KEEPA_KEY}&domain=${domainId}&asin=${keepaStillNeeded.join(',')}`;
-            const res = await fetch(url);
+            const res = await fetchT(url);
             if (res.ok) {
               const json = await res.json().catch(() => ({}));
               await reportKeepaTokensLeft(admin, json?.tokensLeft, json?.refillRate);
@@ -707,7 +736,7 @@ Deno.serve(async (req) => {
             if (priceSlot.ok) {
               try {
                 const purl = `https://api.keepa.com/product?key=${KEEPA_KEY}&domain=${domainId}&asin=${needPrice.join(',')}&stats=1&offers=20`;
-                const pres = await fetch(purl);
+                const pres = await fetchT(purl);
                 if (pres.ok) {
                   const pjson = await pres.json().catch(() => ({}));
                   await reportKeepaTokensLeft(admin, pjson?.tokensLeft, pjson?.refillRate);
@@ -782,7 +811,7 @@ Deno.serve(async (req) => {
                 if (!cents) continue;
                 try {
                   await waitForApiToken(admin, 'fees_api');
-                  const fres = await fetch(
+                  const fres = await fetchT(
                     `https://${spHost}/products/fees/v0/items/${row.asin}/feesEstimate`,
                     {
                       method: 'POST',
@@ -829,7 +858,7 @@ Deno.serve(async (req) => {
           if (insertErr) console.error(`[check-seller-watchlist] new-listing insert failed for watch ${w.id}`, insertErr.message);
 
           try {
-            const emailRes = await fetch(`${SUPABASE_URL}/functions/v1/send-email`, {
+            const emailRes = await fetchT(`${SUPABASE_URL}/functions/v1/send-email`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${serviceRoleKey}` },
               body: JSON.stringify({
