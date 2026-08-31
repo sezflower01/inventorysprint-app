@@ -1482,6 +1482,14 @@ export default function ProfitLoss() {
         writeoff: number;
         opExpenses: number;
         opByCategory: Record<string, number>;
+        /**
+         * FBM Buy Shipping label cost. The one Amazon charge NOT carried on
+         * plRow, because it comes from sales_orders rather than
+         * financial_events_cache -- Amazon does not deliver it as a financial
+         * event. It therefore cannot live in EXPENSE_ROWS and has to be summed
+         * explicitly here, exactly as cogs and opExpenses are.
+         */
+        fbmLabel: number;
       };
       const perMonth: Record<string, MonthData> = {};
 
@@ -1635,7 +1643,7 @@ export default function ProfitLoss() {
 
       // Helper: fetch one month's summary + COGS + disposition + writeoff
       const fetchMonth = async (mo: typeof months[number]): Promise<MonthData> => {
-        const result: MonthData = { summary: null, plRow: null, cogs: 0, cogsAdjustment: 0, disposition: 0, writeoff: 0, opExpenses: 0, opByCategory: {} };
+        const result: MonthData = { summary: null, plRow: null, cogs: 0, cogsAdjustment: 0, disposition: 0, writeoff: 0, opExpenses: 0, opByCategory: {}, fbmLabel: 0 };
 
         // 1) Summary via cached fetch-profit-loss (no force refresh)
         try {
@@ -1727,6 +1735,22 @@ export default function ProfitLoss() {
         return;
       }
 
+      // Same RPC the screen uses, so the two cannot disagree on this line.
+      // Not fatal if it fails -- unlike the breakdown above, one missing expense
+      // row is worth a warning, not an aborted export.
+      const fbmLabelByMonth: number[] = Array(12).fill(0);
+      try {
+        const { data: fbmData, error: fbmErr } = await (supabase as any)
+          .rpc('get_monthly_fbm_label_cost', { p_year: exportYear, p_marketplace: mpParam });
+        if (fbmErr) throw fbmErr;
+        for (const r of (fbmData || []) as Array<{ month_num: number; label_cost: number }>) {
+          const idx = Number(r.month_num) - 1;
+          if (idx >= 0 && idx < 12) fbmLabelByMonth[idx] = Number(r.label_cost) || 0;
+        }
+      } catch (e) {
+        console.warn('[Export] get_monthly_fbm_label_cost failed', e);
+      }
+
       // Sequential with 800ms spacing to respect inter-edge-function rate limits
       for (let i = 0; i < months.length; i++) {
         const mo = months[i];
@@ -1738,6 +1762,7 @@ export default function ProfitLoss() {
         // on-screen P&L renders -- not from the fetch-profit-loss summary, which
         // does not expose shipping_chargeback or restocking_fee at all.
         md.plRow = plRowsByMonth[mo.month] ?? null;
+        md.fbmLabel = fbmLabelByMonth[mo.month] ?? 0;
         perMonth[mo.key] = md;
         if (i < months.length - 1) await new Promise(r => setTimeout(r, 800));
       }
@@ -1880,7 +1905,7 @@ export default function ProfitLoss() {
 
       // Build rows: each metric is a row, each month is a column
       const headerRow = ['Category', ...months.map(m => m.label), 'TOTAL'];
-      const EMPTY_MD: MonthData = { summary: null, plRow: null, cogs: 0, cogsAdjustment: 0, disposition: 0, writeoff: 0, opExpenses: 0, opByCategory: {} };
+      const EMPTY_MD: MonthData = { summary: null, plRow: null, cogs: 0, cogsAdjustment: 0, disposition: 0, writeoff: 0, opExpenses: 0, opByCategory: {}, fbmLabel: 0 };
       const get = (key: string, sel: (d: MonthData) => number) => {
         const vals = months.map(m => sel(perMonth[m.key] || EMPTY_MD));
         const total = vals.reduce((a, b) => a + b, 0);
@@ -1997,8 +2022,12 @@ export default function ProfitLoss() {
           + sumRows(d.plRow, expenseDefs)
           - (d.cogs + d.cogsAdjustment)
           - (d.disposition + d.writeoff)
-          - d.opExpenses;
+          - d.opExpenses
+          // Screen subtracts this too (MonthlyPLBreakdown's monthTotals.net).
+          // Omitting it here would recreate the web/Excel drift on day one.
+          - d.fbmLabel;
       };
+      rows.push(get('FBM Shipping Labels', (d: MonthData) => -d.fbmLabel));
       rows.push(get('NET PROFIT/LOSS', netProfitSel));
 
       // Restated on its own at the foot of the sheet, so the figure can be read

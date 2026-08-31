@@ -29,6 +29,17 @@
  * ⚠️ Adding a category to the source data is NOT enough to get it into the P&L.
  * It must be added to INCOME_ROWS or EXPENSE_ROWS below, or it is silently
  * dropped from both reports — which is the exact bug this file was written for.
+ *
+ * ⚠️ AND the row list is only HALF the path. The category must also appear in
+ * get_monthly_pl_breakdown / get_pl_live_summary, or a RowDef pointing at it
+ * reads undefined and renders 0.00 in every month — indistinguishable from a
+ * genuine zero. fbm_shipping_label_fee was written to financial_events_cache
+ * from 2026-05-26 and reached neither RPC until 2026-08-31, so a real cost
+ * (~$1,178 across 2026) was never subtracted from Net Profit. It surfaced only
+ * by reconciling against InventoryLab, which had the line and we did not.
+ *
+ * So: source column → RPC RETURNS TABLE → RPC aggregate → RowDef here. Four
+ * steps, and skipping any one of them fails silently.
  */
 
 /** One month of get_monthly_pl_breakdown. */
@@ -74,6 +85,7 @@ export interface PlMonthRow {
   shipping_chargeback: number;
   shipping_chargeback_refund: number;
   restocking_fee: number;
+  fbm_shipping_label_fee: number;
 }
 
 export interface RowDef {
@@ -139,6 +151,20 @@ export const EXPENSE_ROWS: RowDef[] = [
   // Amazon-purchased shipping label billed back to the seller. Comes from both
   // FBM Buy Shipping AND FBA Remote Fulfillment (e.g. US FBA shipped to CA/MX).
   { label: "Shipping Chargebacks (FBM Buy Shipping / FBA Remote Fulfillment)", key: "shipping_chargeback", negative: true },
+  // NO ROW for fbm_shipping_label_fee, deliberately. 20260831140000 wired the
+  // column through both RPCs, and applying it reported 0.00 for the whole of
+  // 2026 -- financial_events_cache has never held a single non-zero value.
+  // Amazon does not deliver this seller's FBM label costs as financial events.
+  //
+  // The money is real and it is tracked: sales_orders.shipping_label_fee, filled
+  // by sync-fbm-label-cost / poll-fbm-label-costs, and rendered in Live Sales.
+  // It has simply never reached the P&L, which reads financial_events_cache for
+  // fees. InventoryLab reports the same money as "MFN Shipping Label Cost"
+  // ($1,148.26 for 2026), which is how the gap was found.
+  //
+  // A RowDef here would render 0.00 in every month -- indistinguishable from a
+  // genuine zero, and a stronger false claim than showing nothing at all. The
+  // real fix reads sales_orders the way COGS already does, via its own RPC.
   // ── Reclassified from Income (customer refunds and promotions) ────────
   { label: "Refunds", key: "refunds", negative: true },
   { label: "Shipping Credit Refunds", key: "shipping_credit_refunds", negative: true },

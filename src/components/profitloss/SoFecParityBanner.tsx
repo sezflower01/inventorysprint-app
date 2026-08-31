@@ -150,6 +150,24 @@ export default function SoFecParityBanner({ userId, startDate, endDate }: Props)
     setVerifiedClearRange(null);
   }, [startDate, endDate]);
 
+  // How far back check_sync_parity is allowed to look. Was a hard-coded 60,
+  // which silently capped the banner at the last two months no matter which
+  // period the P&L was showing: with all of 2026 selected it still scanned only
+  // 60 days, so 39 of the 44 real gap days were invisible and the banner
+  // reported healthy. Measured 2026-08-31 -- 1,327 orders present in Financial
+  // Events and absent from sales_orders, worst in January, none of them
+  // reachable from this component.
+  const SCAN_MAX_DAYS = 400;
+
+  // The REPAIR window stays narrow even though the SCAN is wide, and the two
+  // must not be confused. Gaps span January to August; handing that whole range
+  // to sync-sales-orders would be a 225-day Orders API sweep in one request,
+  // which is exactly the shape that times out with nothing written.
+  // backfill-order-gaps caps itself at 14 days per run for this reason
+  // (MAX_RANGE_DAYS) and it is the right precedent: repair the oldest window,
+  // report what is left, let the user click again.
+  const REPAIR_MAX_DAYS = 14;
+
   const fetchGaps = useCallback(async () => {
     if (!userId || !startDate || !endDate) return;
     setLoading(true);
@@ -158,7 +176,7 @@ export default function SoFecParityBanner({ userId, startDate, endDate }: Props)
       const today = new Date();
       const daysFromStart = Math.max(
         1,
-        Math.min(60, Math.ceil((today.getTime() - start.getTime()) / 86400000) + 1)
+        Math.min(SCAN_MAX_DAYS, Math.ceil((today.getTime() - start.getTime()) / 86400000) + 1)
       );
 
       const { data, error } = await supabase.rpc("check_sync_parity", {
@@ -306,7 +324,12 @@ export default function SoFecParityBanner({ userId, startDate, endDate }: Props)
         repairStart = dates[0];
         const repairEndDate = new Date(dates[dates.length - 1]);
         repairEndDate.setDate(repairEndDate.getDate() + 1);
-        repairEnd = repairEndDate.toISOString().slice(0, 10);
+        // Never ask for more than REPAIR_MAX_DAYS in one call, however wide the
+        // gaps are spread. Oldest first, because the oldest data is the closest
+        // to ageing out of Amazon's retention.
+        const capDate = new Date(repairStart);
+        capDate.setDate(capDate.getDate() + REPAIR_MAX_DAYS);
+        repairEnd = (capDate < repairEndDate ? capDate : repairEndDate).toISOString().slice(0, 10);
       } else {
         repairStart = startDate;
         repairEnd = endDate;
@@ -354,7 +377,7 @@ export default function SoFecParityBanner({ userId, startDate, endDate }: Props)
       setProgressMsg("Re-running parity check…");
       const { data: postGaps } = await supabase.rpc("check_sync_parity", {
         p_user_id: userId,
-        p_days: 60,
+        p_days: SCAN_MAX_DAYS,
       });
       const stillMissing = ((postGaps as ParityRow[] | null) ?? []).filter(
         (g) =>

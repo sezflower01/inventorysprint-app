@@ -11,7 +11,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Loader2, RefreshCw, AlertTriangle, Database, Search, Copy, Download } from "lucide-react";
+import { Loader2, RefreshCw, AlertTriangle, Database, Search, Copy, Download, Store } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
@@ -212,6 +212,11 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
   // reached the on-screen Net Profit, while the Excel export did include them.
   // That was one of the three components of the $2,499.72 gap between them.
   const [writeoffMonthly, setWriteoffMonthly] = useState<number[]>(() => Array(12).fill(0));
+  // FBM Buy Shipping label cost. Comes from sales_orders, NOT
+  // financial_events_cache -- Amazon does not deliver it as a financial event,
+  // which is why it never appeared in the P&L despite being collected since
+  // 2026-06-01. See 20260831160000.
+  const [fbmLabelMonthly, setFbmLabelMonthly] = useState<number[]>(() => Array(12).fill(0));
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -233,6 +238,28 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
   useEffect(() => {
     try { localStorage.setItem('pl_il_style_view', ilStyleView ? '1' : '0'); } catch {}
   }, [ilStyleView]);
+
+  // -- Amazon-only view ---------------------------------------------------
+  // Hides COGS, Operating Expenses and Inventory Loss, leaving only what
+  // Amazon actually pays and charges.
+  //
+  // WHY IT EARNS A TOGGLE. Everything that survives comes straight from
+  // financial_events_cache, so this view cannot be moved by manual
+  // bookkeeping. That matters: reconciling 2026 against InventoryLab on
+  // 2026-08-31 produced a $34,136 disagreement, and $17,657 of it was
+  // hand-entered COGS and operating expenses -- subscriptions alone differed
+  // by $11,319, and IL was simply missing July and August rent. None of that
+  // can reach the rows left standing here, which is the whole point.
+  //
+  // Net becomes Income + Amazon Expenses: what Amazon net-deposits before a
+  // single unit of inventory is paid for.
+  const [amazonOnly, setAmazonOnly] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem('pl_amazon_only') === '1';
+  });
+  useEffect(() => {
+    try { localStorage.setItem('pl_amazon_only', amazonOnly ? '1' : '0'); } catch {}
+  }, [amazonOnly]);
 
   const RECLASSIFIED_REFUND_KEYS = useMemo(
     () => new Set<keyof MonthRow>([
@@ -312,7 +339,7 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
       const yearEndIso = `${year}-12-31`;
       const yearEndExclusiveIso = `${year + 1}-01-01`;
 
-      const [rpcRes, expRes, cogsRes, cogsAdjustmentsRes, dispoRes, writeoffRes] = await Promise.all([
+      const [rpcRes, expRes, cogsRes, cogsAdjustmentsRes, dispoRes, writeoffRes, fbmLabelRes] = await Promise.all([
         (supabase as any).rpc("get_monthly_pl_breakdown", { p_year: year, p_marketplace: mpParam }),
         user
           ? supabase
@@ -348,6 +375,7 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
               .gte("writeoff_date", yearStartIso)
               .lte("writeoff_date", yearEndIso)
           : Promise.resolve({ data: [], error: null }),
+        (supabase as any).rpc("get_monthly_fbm_label_cost", { p_year: year, p_marketplace: mpParam }),
       ]);
 
       if (rpcRes.error) throw rpcRes.error;
@@ -380,6 +408,19 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
         if (c > 0) writeoffBuckets[d.getMonth()] += c;
       }
       setWriteoffMonthly(writeoffBuckets);
+
+      // Not fatal: a stale deployment without the RPC should still render the
+      // rest of the P&L rather than blanking the page over one row.
+      const fbmBuckets: number[] = Array(12).fill(0);
+      if ((fbmLabelRes as any)?.error) {
+        console.warn("[P&L] get_monthly_fbm_label_cost unavailable:", (fbmLabelRes as any).error?.message);
+      } else {
+        for (const r of ((fbmLabelRes as any)?.data || []) as Array<any>) {
+          const m = Number(r?.month_num);
+          if (m >= 1 && m <= 12) fbmBuckets[m - 1] = Number(r?.label_cost) || 0;
+        }
+      }
+      setFbmLabelMonthly(fbmBuckets);
 
       const filled: MonthRow[] = Array.from({ length: 12 }, (_, i) => {
         const found = (rpcRes.data as MonthRow[] | null)?.find((r) => r.month_num === i + 1);
@@ -988,11 +1029,19 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
     const expenses = sum(effectiveExpenseRows);
     const other = sum(OTHER_ROWS);
     // Net = Income + Amazon expenses (negative) − COGS − operating expenses − disposition loss
-    const net = income.map(
-      (v, i) => v + expenses[i] - totalCogsMonthly[i] - opExpensesMonthTotals[i] - (inventoryLossMonthly[i] || 0)
+    //
+    // In the Amazon-only view those last three terms are not RENDERED, so they
+    // must not be subtracted either -- a total that disagrees with the visible
+    // rows is worse than no total at all.
+    // fbmLabelMonthly is subtracted in BOTH views: it is money Amazon charged,
+    // so it belongs in "net from Amazon" just as much as in Net Profit.
+    const net = income.map((v, i) =>
+      amazonOnly
+        ? v + expenses[i] - (fbmLabelMonthly[i] || 0)
+        : v + expenses[i] - totalCogsMonthly[i] - opExpensesMonthTotals[i] - (inventoryLossMonthly[i] || 0) - (fbmLabelMonthly[i] || 0)
     );
     return { income, expenses, other, net };
-  }, [rows, signedRows, opExpensesMonthTotals, totalCogsMonthly, inventoryLossMonthly, effectiveIncomeRows, effectiveExpenseRows]);
+  }, [rows, signedRows, opExpensesMonthTotals, totalCogsMonthly, inventoryLossMonthly, effectiveIncomeRows, effectiveExpenseRows, amazonOnly, fbmLabelMonthly]);
 
   const dispoGrandTotal = useMemo(() => dispoMonthly.reduce((a, b) => a + b, 0), [dispoMonthly]);
   const inventoryLossGrandTotal = useMemo(
@@ -1010,6 +1059,28 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
       net: sum(monthTotals.net),
     };
   }, [monthTotals]);
+
+  const fbmLabelGrandTotal = useMemo(
+    () => fbmLabelMonthly.reduce((a, b) => a + b, 0),
+    [fbmLabelMonthly],
+  );
+
+  // Amazon's cut as a share of gross sales. The headline ratio of the
+  // Amazon-only view, and the only figure here comparable across months
+  // regardless of volume -- 2026 ran 38.3%-41.3% with no month out of line,
+  // so a month that breaks that band is signal rather than seasonality.
+  const feeRate = useMemo(() => {
+    if (!rows || !monthTotals || !grand) return null;
+    const monthly = Array.from({ length: 12 }, (_, m) => {
+      const s = Number(rows[m]?.sales ?? 0);
+      return s > 0.005 ? (Math.abs(monthTotals.expenses[m]) / s) * 100 : null;
+    });
+    const totalSales = rows.reduce((a, r) => a + Number(r?.sales ?? 0), 0);
+    return {
+      monthly,
+      grand: totalSales > 0.005 ? (Math.abs(grand.expenses) / totalSales) * 100 : null,
+    };
+  }, [rows, monthTotals, grand]);
 
   if (loading) {
     return (
@@ -1147,9 +1218,21 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
             <CardTitle className="text-base">Monthly P&L Breakdown — {year}</CardTitle>
             <p className="text-xs text-muted-foreground mt-1">
               Settlement-based view. All marketplaces aggregated in USD. Source: financial_events_cache.
+              {amazonOnly && " Amazon only — COGS, operating expenses and inventory loss are hidden, so nothing below is hand-entered."}
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant={amazonOnly ? "default" : "outline"}
+              onClick={() => setAmazonOnly(!amazonOnly)}
+              title={amazonOnly
+                ? "Showing only what Amazon pays and charges. Click to bring back COGS, operating expenses and inventory loss."
+                : "Show only what Amazon pays and charges -- hides COGS, operating expenses and inventory loss, all of which are hand-entered."}
+            >
+              <Store className="w-3 h-3 mr-1" />
+              {amazonOnly ? "Amazon only — on" : "Amazon only"}
+            </Button>
             <Button
               size="sm"
               variant="outline"
@@ -1220,7 +1303,8 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
             </thead>
             <tbody>
               {/* ─── COGS Coverage banner — PROMOTED to top so users see P&L completeness first ─── */}
-              {cogsCoverage && (
+              {/* Hidden in the Amazon-only view: it reports on COGS, which is not shown there. */}
+              {!amazonOnly && cogsCoverage && (
                 <tr>
                   <td
                     colSpan={14}
@@ -1265,6 +1349,39 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
               {renderSection("Income", effectiveIncomeRows, monthTotals.income, grand.income)}
               {renderSection("Amazon Expenses", effectiveExpenseRows, monthTotals.expenses, grand.expenses)}
 
+              {/* FBM Shipping Labels — its own section because it is the one
+                  Amazon charge sourced from sales_orders rather than
+                  financial_events_cache, and folding it into the block above
+                  would imply it shares that provenance. Shown in the
+                  Amazon-only view too: Amazon charged it. */}
+              {fbmLabelGrandTotal > 0.005 && (
+                <>
+                  <tr className="bg-muted/60">
+                    <td className="px-3 py-2 font-bold text-foreground sticky left-0 bg-muted/60 z-10" colSpan={14}>
+                      FBM Shipping Labels
+                    </td>
+                  </tr>
+                  <tr className="hover:bg-muted/30 border-b border-border/40" title="Amazon Buy Shipping label cost on merchant-fulfilled orders. Source: sales_orders.shipping_label_fee, filled by poll-fbm-label-costs.">
+                    <td className="px-3 py-1.5 sticky left-0 bg-background hover:bg-muted/30 z-10 text-foreground">
+                      Buy Shipping Label Cost
+                    </td>
+                    <td className="px-3 py-1.5 text-right tabular-nums text-destructive">
+                      {fmt(-fbmLabelGrandTotal, fbmLabelGrandTotal > 0.005)}
+                    </td>
+                    {fbmLabelMonthly.map((v, i) => (
+                      <td key={i} className="px-3 py-1.5 text-right tabular-nums text-destructive">
+                        {fmt(-v, v > 0.005)}
+                      </td>
+                    ))}
+                  </tr>
+                </>
+              )}
+
+              {/* COGS, Operating Expenses and Inventory Loss — the three sections that are
+                  NOT sourced from Amazon. Every figure in them is hand-entered, so they are
+                  hidden wholesale in the Amazon-only view rather than zeroed: a zero would
+                  read as "no COGS", which is a different and false claim. */}
+              {!amazonOnly && (<>
               {/* Cost of Goods Sold — from sales_orders.unit_cost (with created_listings fallback) */}
               <tr className="bg-muted/60">
                 <td className="px-3 py-2 font-bold text-foreground sticky left-0 bg-muted/60 z-10" colSpan={14}>
@@ -1431,6 +1548,7 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
                   </td>
                 </tr>
               )}
+              </>)}
 
               {/* ═══════════════ NET PROFIT/LOSS — prominent, large, easy to scan ═══════════════ */}
               <tr className="border-t-4 border-primary">
@@ -1438,9 +1556,11 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
               </tr>
               <tr className={`${grand.net >= 0 ? "bg-green-50 dark:bg-green-950/40" : "bg-red-50 dark:bg-red-950/40"} border-y-2 border-primary`}>
                 <td className={`px-3 py-4 font-extrabold text-base sticky left-0 z-10 ${grand.net >= 0 ? "bg-green-50 dark:bg-green-950/40 text-foreground" : "bg-red-50 dark:bg-red-950/40 text-foreground"}`}>
-                  NET PROFIT/LOSS
+                  {amazonOnly ? "NET FROM AMAZON" : "NET PROFIT/LOSS"}
                   <div className="text-[10px] font-normal text-muted-foreground mt-0.5">
-                    Income − Amazon Expenses − COGS − Operating Expenses − Inventory Loss
+                    {amazonOnly
+                      ? "Income − Amazon Expenses. What Amazon net-deposits, before COGS and overhead. This is NOT profit."
+                      : "Income − Amazon Expenses − COGS − Operating Expenses − Inventory Loss"}
                   </div>
                 </td>
                 <td className={`px-3 py-4 text-right font-extrabold tabular-nums text-lg ${grand.net < 0 ? "text-destructive" : "text-green-700 dark:text-green-400"}`}>
@@ -1452,6 +1572,27 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
                   </td>
                 ))}
               </tr>
+
+              {/* Amazon's take as a share of gross sales. Only meaningful in the
+                  Amazon-only view, where the rows above are the whole picture. */}
+              {amazonOnly && feeRate && (
+                <tr className="border-b-2 border-border bg-muted/30">
+                  <td className="px-3 py-2 font-semibold text-foreground sticky left-0 bg-muted/30 z-10">
+                    Amazon's take
+                    <div className="text-[10px] font-normal text-muted-foreground mt-0.5">
+                      Amazon Expenses as % of gross Sales
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-right font-bold tabular-nums text-foreground">
+                    {feeRate.grand === null ? "—" : `${feeRate.grand.toFixed(1)}%`}
+                  </td>
+                  {feeRate.monthly.map((v, i) => (
+                    <td key={i} className="px-3 py-2 text-right tabular-nums text-muted-foreground">
+                      {v === null ? "—" : `${v.toFixed(1)}%`}
+                    </td>
+                  ))}
+                </tr>
+              )}
 
               {/* ═══════════════ Informational sections — BELOW Net Profit, NEVER in profit math ═══════════════ */}
               {mode === 'reconciled' && (

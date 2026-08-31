@@ -1,12 +1,36 @@
 // Auto-poller for FBM shipping label costs.
 // Runs every 30 minutes via cron. For each FBM sales_orders row that:
-//   - is younger than 7 days
+//   - is younger than `windowDays` days (default 7)
 //   - has no shipping_label_fee yet (or zero)
 //   - source is not 'manual'
 //   - last polled > 25 min ago (or never)
 //   - poll_attempts < 60
 // it calls the same lookup chain: Merchant Fulfillment -> Finances-by-order -> Finances-range.
 // First hit wins; tags source as 'buy_shipping_rate' or 'amazon_finances'.
+//
+// ── WHY THE WINDOW IS A PARAMETER (2026-08-31) ────────────────────────────
+//
+// It was a hard-coded 7 days, and that contradicted the lookup chain above.
+// Merchant Fulfillment answers within minutes, but Finances-by-order arrives
+// "hours-to-days later" and the range scan later still -- so an order that had
+// not resolved inside 7 days was abandoned before its own fallbacks could
+// deliver. Measured against InventoryLab over 2026: 54 orders carry a label
+// fee totalling $425.20 where InventoryLab reports $1,148.26, and the May-Aug
+// period alone -- while the poller WAS running -- came to 75% coverage. The
+// missing quarter is the window closing early.
+//
+// It also made the whole pre-May-2026 history unreachable: 22 MFN orders
+// across Feb-Apr have no label cost and no way to acquire one, because the
+// only query that finds candidates refuses to look further back than a week.
+//
+// Default stays 7, so the 30-minute cron is completely unchanged. A caller
+// that wants history passes windowDays explicitly. Capped at 400: beyond that
+// Amazon has nothing left to return and the run is just quota burnt.
+//
+// NOT a fix for the seller's whole gap. January had ZERO MFN orders against
+// InventoryLab's $113.72, so that line is measuring something other than
+// per-order FBM labels and no backfill will reproduce it. Widening the window
+// recovers what is genuinely ours and nothing more.
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -21,7 +45,8 @@ const corsHeaders = {
 const MAX_ORDERS_PER_RUN = 200;
 const POLL_COOLDOWN_MIN = 25;
 const MAX_ATTEMPTS = 60;
-const WINDOW_DAYS = 7;
+const WINDOW_DAYS = 7;          // default; override per-call with windowDays
+const MAX_WINDOW_DAYS = 400;
 const INTER_ORDER_DELAY_MS = 900;
 
 const MARKETPLACE_IDS: Record<string, string> = {
@@ -265,7 +290,14 @@ serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const targetOrderId = typeof body?.order_id === "string" ? body.order_id.trim() : "";
-    const sinceDate = new Date(Date.now() - WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    // Clamped rather than trusted: a bad value here means a full-table scan of
+    // sales_orders and a run that spends SP-API quota on orders Amazon can no
+    // longer answer for.
+    const windowDays = Math.min(
+      Math.max(Number(body?.windowDays) || WINDOW_DAYS, 1),
+      MAX_WINDOW_DAYS,
+    );
+    const sinceDate = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     const cooldownTs = new Date(Date.now() - POLL_COOLDOWN_MIN * 60 * 1000).toISOString();
 
     // Fetch candidates. We OR last_polled IS NULL OR last_polled < cooldownTs.
@@ -290,6 +322,43 @@ serve(async (req) => {
     const { data: candidates, error: qErr } = await candidateQuery;
 
     if (qErr) throw qErr;
+
+    // ── Diagnostic ladder (debug:true only) ─────────────────────────────
+    //
+    // On 2026-08-31 this query returned 0 candidates while the identical
+    // filters written as SQL returned 23. Three hypotheses were wrong in a
+    // row -- NULL poll_attempts (the column is NOT NULL DEFAULT 0), gateway
+    // auth (verify_jwt is false), and the date window (an order_id-targeted
+    // call, which skips the window entirely, also returned 0). Each cost a
+    // round trip.
+    //
+    // So stop guessing: rebuild the filter one clause at a time and count.
+    // Whichever step falls to 0 is the bug, and -1 means that step raised a
+    // PostgREST error rather than returning rows -- which an .or() chain can
+    // do silently when it is malformed.
+    let debugLadder: Record<string, number | null> | undefined;
+    if (body?.debug === true) {
+      const cnt = async (build: (q: any) => any): Promise<number | null> => {
+        const { count, error } = await build(
+          supabase.from("sales_orders").select("id", { count: "exact", head: true }),
+        );
+        return error ? -1 : (count ?? null);
+      };
+      const mfn = (q: any) => q.eq("fulfillment_channel", "MFN");
+      const since = (q: any) => mfn(q).gte("order_date", sinceDate);
+      const feeOr = (q: any) => since(q).or("shipping_label_fee.is.null,shipping_label_fee.eq.0");
+      const srcOr = (q: any) => feeOr(q).or("shipping_label_fee_source.is.null,shipping_label_fee_source.neq.manual");
+      const attempts = (q: any) => srcOr(q).lt("shipping_label_fee_poll_attempts", MAX_ATTEMPTS);
+      debugLadder = {
+        a_mfn: await cnt(mfn),
+        b_plus_since: await cnt(since),
+        c_plus_fee_or: await cnt(feeOr),
+        d_plus_source_or: await cnt(srcOr),
+        e_plus_attempts: await cnt(attempts),
+        f_plus_cooldown_or: await cnt((q: any) =>
+          attempts(q).or(`shipping_label_fee_last_polled_at.is.null,shipping_label_fee_last_polled_at.lt.${cooldownTs}`)),
+      };
+    }
 
     // Cache tokens per user/marketplace
     const tokenCache = new Map<string, string | null>();
@@ -432,7 +501,13 @@ serve(async (req) => {
       await new Promise((r) => setTimeout(r, INTER_ORDER_DELAY_MS));
     }
 
-    const summary = { processed, resolved, errors, ms: Date.now() - startedAt, ...(targetOrderId ? { traces } : {}) };
+    const summary = {
+      processed, resolved, errors, ms: Date.now() - startedAt,
+      ...(targetOrderId ? { traces } : {}),
+      ...(debugLadder
+        ? { debug: { windowDays, sinceDate, cooldownTs, targetOrderId: targetOrderId || null, candidates: candidates?.length ?? 0, ladder: debugLadder } }
+        : {}),
+    };
     console.log(`[poll-fbm-label-costs] done`, summary);
     return new Response(JSON.stringify({ success: true, ...summary }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
