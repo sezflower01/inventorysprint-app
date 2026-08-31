@@ -584,17 +584,12 @@ export default function SoFecParityBanner({ userId, startDate, endDate }: Props)
               </span>
             </div>
             <Button
-              variant="outline"
-              size="sm"
+              size="lg"
               onClick={triggerRepair}
               disabled={repairing}
-              className="h-7 text-[11px] border-green-500/40"
+              className="bg-green-600 hover:bg-green-700 text-white font-semibold text-base px-6 py-5 shadow-md"
             >
-              {repairing ? (
-                <RefreshCw className="h-3 w-3 mr-1.5 animate-spin" />
-              ) : (
-                <RefreshCw className="h-3 w-3 mr-1.5" />
-              )}
+              <RefreshCw className={`h-5 w-5 mr-2 ${repairing ? "animate-spin" : ""}`} />
               {repairing ? "Checking…" : "Run backfill check"}
             </Button>
           </div>
@@ -689,16 +684,15 @@ export default function SoFecParityBanner({ userId, startDate, endDate }: Props)
 
         <div className="flex items-center gap-2 pt-1 flex-wrap">
           <Button
-            variant="outline"
-            size="sm"
+            size="lg"
             onClick={triggerRepair}
             disabled={repairing}
-            className="border-yellow-500/50"
+            className="bg-green-600 hover:bg-green-700 text-white font-semibold text-base px-6 py-5 shadow-md"
           >
             {repairing ? (
-              <RefreshCw className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+              <RefreshCw className="h-5 w-5 mr-2 animate-spin" />
             ) : (
-              <CheckCircle2 className="h-3.5 w-3.5 mr-1.5" />
+              <CheckCircle2 className="h-5 w-5 mr-2" />
             )}
             {repairing ? "Backfilling…" : "Backfill missing orders now"}
           </Button>
