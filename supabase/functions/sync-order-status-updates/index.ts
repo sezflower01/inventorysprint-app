@@ -78,7 +78,8 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      const endpoint = getSpApiEndpoint(auth.marketplace_id);
+      const rawEndpoint = getSpApiEndpoint(auth.marketplace_id);
+      const base = rawEndpoint.startsWith("http") ? rawEndpoint.replace(/\/+$/, "") : `https://${rawEndpoint}`;
       const after = new Date(Date.now() - lookbackHours * 3600_000).toISOString();
       const before = new Date(Date.now() - SAFETY_LAG_MINUTES * 60_000).toISOString();
 
@@ -86,7 +87,7 @@ Deno.serve(async (req) => {
       let pages = 0, seen = 0, updated = 0, unchanged = 0, notFound = 0;
 
       do {
-        const url = new URL(`https://${endpoint}/orders/v0/orders`);
+        const url = new URL(`${base}/orders/v0/orders`);
         if (nextToken) {
           url.searchParams.set("NextToken", nextToken);
         } else {
