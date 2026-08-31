@@ -339,7 +339,7 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
       const yearEndIso = `${year}-12-31`;
       const yearEndExclusiveIso = `${year + 1}-01-01`;
 
-      const [rpcRes, expRes, cogsRes, cogsAdjustmentsRes, dispoRes, writeoffRes, fbmLabelRes] = await Promise.all([
+      const [rpcRes, expRes, cogsRes, cogsAdjustmentsRes, dispoRes, writeoffRes, fbmLabelRes, facTaxRes] = await Promise.all([
         (supabase as any).rpc("get_monthly_pl_breakdown", { p_year: year, p_marketplace: mpParam }),
         user
           ? supabase
@@ -376,6 +376,7 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
               .lte("writeoff_date", yearEndIso)
           : Promise.resolve({ data: [], error: null }),
         (supabase as any).rpc("get_monthly_fbm_label_cost", { p_year: year, p_marketplace: mpParam }),
+        (supabase as any).rpc("get_monthly_facilitator_tax", { p_year: year, p_marketplace: mpParam }),
       ]);
 
       if (rpcRes.error) throw rpcRes.error;
@@ -448,6 +449,24 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
           } as MonthRow)
         );
       });
+      // Marketplace facilitator tax comes from settlement reports, not from
+      // financial_events_cache -- Amazon never populates it in Financial Events
+      // for this account, so the RPC's own columns are always 0.00 and are
+      // overwritten here rather than rendered. See 20260831180000.
+      //
+      // Merged into the row objects so OTHER_ROWS keeps rendering these two
+      // lines unchanged: the source moves, the P&L does not have to know.
+      if ((facTaxRes as any)?.error) {
+        console.warn("[P&L] get_monthly_facilitator_tax unavailable:", (facTaxRes as any).error?.message);
+      } else {
+        for (const r of ((facTaxRes as any)?.data || []) as Array<any>) {
+          const idx = Number(r?.month_num) - 1;
+          if (idx < 0 || idx > 11 || !filled[idx]) continue;
+          filled[idx].marketplace_facilitator_tax = Number(r?.facilitator_tax) || 0;
+          filled[idx].marketplace_facilitator_tax_refunds = Number(r?.facilitator_tax_refunds) || 0;
+        }
+      }
+
       setRows(filled);
       setExpenses((expRes.data ?? []) as ExpenseRow[]);
 
