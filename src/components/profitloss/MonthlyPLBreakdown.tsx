@@ -217,6 +217,14 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
   // which is why it never appeared in the P&L despite being collected since
   // 2026-06-01. See 20260831160000.
   const [fbmLabelMonthly, setFbmLabelMonthly] = useState<number[]>(() => Array(12).fill(0));
+  // Settlement freshness. Marketplace facilitator tax is sourced ONLY from
+  // settlement_line_items, and Amazon drops settlement documents after 90 days
+  // (RETENTION_DAYS in sync-settlement-reports). If the weekly sync stops, the
+  // tax figure silently stops growing and the months lost are unrecoverable --
+  // which is exactly how January and most of February 2026 disappeared,
+  // ~$12,200 of remitted tax that now has to be carried as a manual
+  // adjustment. This surfaces the staleness while it is still fixable.
+  const [settlementNewest, setSettlementNewest] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -339,7 +347,7 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
       const yearEndIso = `${year}-12-31`;
       const yearEndExclusiveIso = `${year + 1}-01-01`;
 
-      const [rpcRes, expRes, cogsRes, cogsAdjustmentsRes, dispoRes, writeoffRes, fbmLabelRes, facTaxRes] = await Promise.all([
+      const [rpcRes, expRes, cogsRes, cogsAdjustmentsRes, dispoRes, writeoffRes, fbmLabelRes, facTaxRes, settleRes] = await Promise.all([
         (supabase as any).rpc("get_monthly_pl_breakdown", { p_year: year, p_marketplace: mpParam }),
         user
           ? supabase
@@ -377,6 +385,14 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
           : Promise.resolve({ data: [], error: null }),
         (supabase as any).rpc("get_monthly_fbm_label_cost", { p_year: year, p_marketplace: mpParam }),
         (supabase as any).rpc("get_monthly_facilitator_tax", { p_year: year, p_marketplace: mpParam }),
+        user
+          ? supabase
+              .from("settlement_line_items")
+              .select("posted_date")
+              .eq("user_id", user.id)
+              .order("posted_date", { ascending: false })
+              .limit(1)
+          : Promise.resolve({ data: [], error: null }),
       ]);
 
       if (rpcRes.error) throw rpcRes.error;
@@ -466,6 +482,9 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
           filled[idx].marketplace_facilitator_tax_refunds = Number(r?.facilitator_tax_refunds) || 0;
         }
       }
+
+      const newestSettlement = ((settleRes as any)?.data || [])[0]?.posted_date ?? null;
+      setSettlementNewest(newestSettlement ? String(newestSettlement).slice(0, 10) : null);
 
       setRows(filled);
       setExpenses((expRes.data ?? []) as ExpenseRow[]);
@@ -1084,6 +1103,15 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
     [fbmLabelMonthly],
   );
 
+  // Amazon retains settlement documents for 90 days. Weekly syncing leaves
+  // ~12 consecutive failures of headroom, so 30 days behind is a warning and
+  // 60 is close to losing data outright.
+  const settlementHealth = useMemo(() => {
+    if (!settlementNewest) return null;
+    const days = Math.floor((Date.now() - new Date(`${settlementNewest}T00:00:00Z`).getTime()) / 86400000);
+    return { newest: settlementNewest, days, stale: days > 30, critical: days > 60 };
+  }, [settlementNewest]);
+
   // Amazon's cut as a share of gross sales. The headline ratio of the
   // Amazon-only view, and the only figure here comparable across months
   // regardless of volume -- 2026 ran 38.3%-41.3% with no month out of line,
@@ -1622,6 +1650,29 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
                     OTHER_ROWS,
                     monthTotals.other,
                     grand.other,
+                  )}
+
+                  {/* Where the tax figures come from, and whether that source is
+                      still being fed. A stale settlement sync does not show up as
+                      an error anywhere -- the tax number simply stops growing. */}
+                  {settlementHealth && (
+                    <tr>
+                      <td colSpan={14} className="px-3 py-2 text-[11px] border-b border-border/40">
+                        <span className={
+                          settlementHealth.critical
+                            ? "text-destructive font-medium"
+                            : settlementHealth.stale
+                              ? "text-amber-600 dark:text-amber-500 font-medium"
+                              : "text-muted-foreground"
+                        }>
+                          {settlementHealth.critical
+                            ? `⚠ Settlement sync is ${settlementHealth.days} days behind (newest ${settlementHealth.newest}). Amazon deletes settlement documents after 90 days — facilitator tax for the missing period will become unrecoverable.`
+                            : settlementHealth.stale
+                              ? `Settlement sync is ${settlementHealth.days} days behind (newest ${settlementHealth.newest}). Facilitator tax comes only from settlements; Amazon drops them after 90 days.`
+                              : `Marketplace Facilitator Tax is sourced from settlement reports (newest ${settlementHealth.newest}, ${settlementHealth.days}d ago). Months before your settlement archive begins are shown from manual adjustments, not Amazon data.`}
+                        </span>
+                      </td>
+                    </tr>
                   )}
 
                   {/* Memo / Informational Items — already counted elsewhere */}

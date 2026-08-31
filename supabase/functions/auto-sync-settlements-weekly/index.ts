@@ -3,9 +3,34 @@
 // sync-settlement-reports for the last 75 days. This guarantees we always
 // pull every settlement report well within Amazon's 90-day retention window,
 // so a year never falls into the "permanently lost" hole that 2025 did.
+//
+// ── WHY THIS IS NOW OBSERVED (2026-08-31) ────────────────────────────────
+//
+// The comment above says a year never falls into the permanently-lost hole.
+// One did anyway. settlement_line_items starts 2026-02-25, so January and
+// most of February 2026 are gone: about $12,200 of marketplace facilitator
+// tax Amazon really did remit, which no source can now evidence, because
+// Amazon drops the documents after 90 days.
+//
+// The 75-day lookback was never the problem -- it is comfortably inside the
+// window and a weekly cadence allows roughly twelve consecutive failures
+// before anything is lost. The problem is that this job recorded NOTHING.
+// No cron lock, no cron_run_history row, no signal of any kind. It could
+// fail every week for three months and the only evidence would be data
+// quietly ceasing to exist.
+//
+// That is not hypothetical in this codebase: the same day this was written,
+// poll-fbm-label-costs was found structurally unable to do its job, and four
+// cron jobs are dead pending Supabase support. Silent cron failure is the
+// house pattern, and it is the most likely explanation for the missing month.
+//
+// withCronLock gives both halves: no overlapping runs, and a row in
+// cron_run_history every time -- which the Business Health page now reads to
+// flag staleness long before the 90-day cliff.
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { withCronLock } from "../_shared/cron-lock.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -42,6 +67,11 @@ serve(async (req) => {
 
     const userIds = Array.from(new Set((users || []).map((u: any) => u.user_id))).filter(Boolean);
     console.log(`[auto-sync-settlements-weekly] ${userIds.length} users · range ${fromDate} → ${today}`);
+
+    // 30 minutes: one user takes a few minutes of SP-API work plus a 5s pace
+    // between users, so the TTL has to outlast a full pass without being so
+    // long that a crashed run blocks the next week's.
+    const lock = await withCronLock(supabase, 'auto-sync-settlements-weekly', 1800, async () => {
 
     const results: any[] = [];
     for (const userId of userIds) {
@@ -81,13 +111,27 @@ serve(async (req) => {
     }
 
     const ok = results.filter(r => r.status === 200).length;
-    return new Response(JSON.stringify({
-      ok: true,
-      window: { fromDate, toDate: today, lookbackDays: LOOKBACK_DAYS },
-      usersProcessed: userIds.length,
-      usersSucceeded: ok,
-      results,
-    }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+    // items_processed is USERS SUCCEEDED, not users attempted. A run where
+    // every user errored must not report itself as having processed them --
+    // that is precisely the shape of success-looking failure this change
+    // exists to eliminate.
+    return {
+      items_processed: ok,
+      detail: {
+        window: { fromDate, toDate: today, lookbackDays: LOOKBACK_DAYS },
+        usersProcessed: userIds.length,
+        usersSucceeded: ok,
+        usersFailed: userIds.length - ok,
+        results,
+      },
+    };
+
+    });
+
+    return new Response(JSON.stringify({ ok: true, ...lock }), {
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
   } catch (err: any) {
     console.error('auto-sync-settlements-weekly fatal:', err);
     return new Response(JSON.stringify({ error: err.message }), {
