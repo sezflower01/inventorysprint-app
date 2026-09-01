@@ -100,6 +100,9 @@ const RUN_BUDGET_MS = 90_000;
 // needs ~2 minutes of refill, which is longer than a run should idle -- past
 // this, stopping and letting the next run pick up is cheaper than blocking.
 const MAX_SLOT_WAIT_SECONDS = 25;
+// Above this, a watch has lost its baseline rather than seen new listings.
+// 500 is far beyond any plausible interval burst and far below a storefront.
+const MAX_NEW_PER_WATCH = 500;
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -401,6 +404,7 @@ Deno.serve(async (req) => {
     let checked = 0;
     let alertsFired = 0;
     let processedSellers = 0;
+  let lostBaselines = 0;
     // Counted separately from `checked` because a first check is the one that
     // produces NO listings by design. Without this number, a night that
     // correctly seeded 200 baselines is indistinguishable in the record from a
@@ -477,6 +481,27 @@ Deno.serve(async (req) => {
         if (priorList === null || priorList === undefined) continue; // first check -- seeds below, no diff
         const priorSet = new Set(priorList);
         const newAsins = currentAsins.filter((a) => !priorSet.has(a));
+
+        // A diff this size is a LOST BASELINE, not a listing burst.
+        //
+        // Measured 2026-09-01: one seller produced 71,925 "new" ASINs -- an
+        // entire storefront. An empty known_asin_list ([] rather than NULL)
+        // passes the first-check guard above, and then every current ASIN
+        // looks new. Downstream, the eligibility read alone spent 83 seconds
+        // on that list and the platform killed the isolate on CPU before the
+        // run could write a completion row -- which is why this job was
+        // INVISIBLE rather than merely broken for ten days.
+        //
+        // Skipping is safe and self-healing: Pass 2 sets
+        // known_asin_list = currentAsins for every watch regardless, so the
+        // baseline is rewritten and the next run diffs correctly. Emitting
+        // 71,925 false "new listings" would be far worse than emitting none.
+        if (newAsins.length > MAX_NEW_PER_WATCH) {
+          console.warn(`[seller-watch] ${sellerId} watch ${w.id}: ${newAsins.length} new ASINs exceeds ${MAX_NEW_PER_WATCH} -- treating as lost baseline, re-seeding without alerts`);
+          lostBaselines++;
+          continue;
+        }
+
         if (newAsins.length > 0) {
           perWatchNew.set(w.id, newAsins);
           for (const a of newAsins) unionNewAsins.add(a);
@@ -929,6 +954,7 @@ Deno.serve(async (req) => {
       checked,
       alertsFired,
       processedSellers,
+      lostBaselines,
       queuedSellers: orderedPairs.length,
       seeded,
       totalActive: totalActive ?? 0,
@@ -941,7 +967,7 @@ Deno.serve(async (req) => {
     return {
       items_processed: checked,
       detail: {
-        checked, seeded, alertsFired, processedSellers,
+        checked, seeded, alertsFired, processedSellers, lostBaselines,
         queuedSellers: orderedPairs.length, stoppedReason,
       },
     };
