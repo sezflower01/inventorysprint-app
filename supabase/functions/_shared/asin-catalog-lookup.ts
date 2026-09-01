@@ -24,6 +24,32 @@
 // Costs zero Keepa tokens: every source here is a table this app already
 // fills from its own earlier Keepa calls.
 
+
+// ── WHY EVERY .in() HERE IS CHUNKED (2026-09-01) ──────────────────────────
+//
+// supabase-js expands .in('asin', [...]) straight into the query STRING:
+// asin=in.(A,B,C,...). Each ASIN costs ~13 characters once the separating
+// comma is percent-encoded, so a few hundred ASINs builds a URL of tens of
+// thousands of characters and Deno rejects it outright with
+// `TypeError: Invalid URL` -- not an HTTP error, a throw before any request
+// leaves the isolate.
+//
+// This killed check-seller-watchlist for ten days. The cascade is the
+// instructive part: the read failed, so the caller saw an EMPTY cache, so it
+// asked check-product-eligibility to resolve EVERY ASIN, which returned 504,
+// which burned the CPU budget until the platform killed the isolate mid-run --
+// leaving no cron_run_history row at all, which is why the job looked simply
+// absent rather than broken. Three symptoms, one unbounded URL.
+//
+// 150 per request keeps the query string near 2 KB with room to spare.
+const IN_CHUNK = 150;
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+  return out;
+}
+
 export interface CatalogDetails {
   title: string | null;
   image: string | null;
@@ -56,25 +82,30 @@ export async function lookupAsinDetails(
   for (const table of CATALOG_SOURCES) {
     if (!outstanding.length) break;
 
-    const { data, error } = await supabase
-      .from(table)
-      .select('asin, title, image_url')
-      .in('asin', outstanding);
+    let tableFailed = false;
+    for (const batch of chunk(outstanding, IN_CHUNK)) {
+      const { data, error } = await supabase
+        .from(table)
+        .select('asin, title, image_url')
+        .in('asin', batch);
 
-    if (error) {
-      // A missing or renamed table must not break the caller's main job --
-      // an absent image is cosmetic, a failed seller check is not.
-      console.warn(`[asin-catalog-lookup] ${table} unavailable:`, error.message);
-      continue;
-    }
+      if (error) {
+        // A missing or renamed table must not break the caller's main job --
+        // an absent image is cosmetic, a failed seller check is not.
+        console.warn(`[asin-catalog-lookup] ${table} unavailable:`, error.message);
+        tableFailed = true;
+        break;
+      }
 
-    for (const row of data || []) {
-      if (!row?.asin) continue;
-      const prev = found.get(row.asin);
-      const title = prev?.title ?? (row.title || null);
-      const image = prev?.image ?? (row.image_url || null);
-      found.set(row.asin, { title, image });
+      for (const row of data || []) {
+        if (!row?.asin) continue;
+        const prev = found.get(row.asin);
+        const title = prev?.title ?? (row.title || null);
+        const image = prev?.image ?? (row.image_url || null);
+        found.set(row.asin, { title, image });
+      }
     }
+    if (tableFailed) continue;
 
     // Only keep looking for ASINs still missing an IMAGE -- that is the field
     // this exists to fill. An ASIN with a title but no image stays in the
