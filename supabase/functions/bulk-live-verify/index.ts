@@ -500,7 +500,29 @@ Deno.serve(async (req) => {
       // hundreds of phantom SKUs into the repricer and into COGS resolution.
       try {
         const liveSkus = Object.keys(liveInventoryMap);
-        const knownSkus = new Set(rows.map((r: any) => r.sku));
+
+        // EVERY inventory SKU for this user, not just the rows this run verified.
+        // fetchInventoryRowsToVerify applies effectiveLimit, so building the known
+        // set from `rows` would mark every SKU outside that window as unknown and
+        // insert a DUPLICATE for any that also had a created_listings entry.
+        const knownSkus = new Set<string>();
+        {
+          let from = 0;
+          const PAGE = 1000;
+          for (;;) {
+            const { data, error } = await supabase
+              .from('inventory')
+              .select('sku')
+              .eq('user_id', userId)
+              .range(from, from + PAGE - 1);
+            // Abort rather than continue with a partial known-set: a short read
+            // here would make real inventory look orphaned and duplicate it.
+            if (error) throw new Error(`known-sku scan failed: ${error.message}`);
+            for (const r of data || []) if (r?.sku) knownSkus.add(r.sku);
+            if ((data?.length || 0) < PAGE) break;
+            from += PAGE;
+          }
+        }
         const unknownLiveSkus = liveSkus.filter((sku) => !knownSkus.has(sku));
 
         if (unknownLiveSkus.length > 0) {
