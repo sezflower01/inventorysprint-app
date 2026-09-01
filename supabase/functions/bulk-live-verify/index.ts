@@ -321,6 +321,8 @@ Deno.serve(async (req) => {
     console.log(`[BULK-VERIFY] Got ${Object.keys(liveInventoryMap).length} SKUs from SP-API`);
 
     const results: VerifyResult[] = [];
+    let promotedCount = 0;      // orphaned created_listings promoted into inventory
+    let orphanCandidates = 0;   // live SKUs Amazon returned that we had no row for
     const updateBatch: { id: string; asin: string; available: number; reserved: number; inbound: number; listing_status: string; prev_available: number; prev_reserved: number }[] = [];
     const protectBatch: string[] = []; // IDs of unchanged items to tag as live_api for protection
 
@@ -468,6 +470,103 @@ Deno.serve(async (req) => {
       }
 
       console.log(`[BULK-VERIFY] All ${updateBatch.length} corrections applied`);
+
+      // ── PROMOTE ORPHANED created_listings ──────────────────────────────
+      //
+      // A listing can exist in created_listings and never reach inventory,
+      // and until now nothing ever noticed. Measured 2026-09-01: 594 such
+      // rows, spanning 2025-11-30 to that same day -- ten months of steady
+      // accumulation. They render on the Synced Inventory page (which merges
+      // created_listings in for display) showing 0/0/0 and a blank Last
+      // Synced, indistinguishable from genuinely out-of-stock inventory. No
+      // sync, no refresh queue, no repricer.
+      //
+      // WHY THIS FUNCTION IS THE RIGHT PLACE. sync-inventory-report uses the
+      // REPORT (GET_FBA_MYI_ALL_INVENTORY_DATA), which omits SKUs with no
+      // stock -- so a live listing awaiting its first shipment can never
+      // appear through it. This function uses the SUMMARIES API
+      // (/fba/inventory/v1/summaries), which returns every FBA SKU including
+      // zero-quantity ones. It already holds the answer; it simply never
+      // acted on SKUs it had no row for.
+      //
+      // WHY AMAZON DECIDES, NOT US. created_listings has no status column and
+      // its `units` field is what the user typed when planning the listing,
+      // not what Amazon holds -- 586 of the 594 orphans have units > 0 while
+      // having no FBA presence at all. So a planned-but-never-shipped listing
+      // is indistinguishable from a live one in our data. Presence in the
+      // summaries response is the only trustworthy signal, and it is used
+      // here as the sole criterion: in the response means real, absent means
+      // leave alone. Promoting all 594 on `units > 0` would have poured
+      // hundreds of phantom SKUs into the repricer and into COGS resolution.
+      try {
+        const liveSkus = Object.keys(liveInventoryMap);
+        const knownSkus = new Set(rows.map((r: any) => r.sku));
+        const unknownLiveSkus = liveSkus.filter((sku) => !knownSkus.has(sku));
+
+        if (unknownLiveSkus.length > 0) {
+          console.log(`[BULK-VERIFY] ${unknownLiveSkus.length} live SKU(s) have no inventory row — checking created_listings`);
+
+          // Chunked: an unbounded .in() becomes a query string long enough for
+          // Deno to reject the URL outright. Cost a 10-day outage in
+          // check-seller-watchlist on 2026-09-01; not repeating it here.
+          const CHUNK = 150;
+          const orphanRows: any[] = [];
+          for (let i = 0; i < unknownLiveSkus.length; i += CHUNK) {
+            const batch = unknownLiveSkus.slice(i, i + CHUNK);
+            const { data, error } = await supabase
+              .from('created_listings')
+              .select('asin, sku, title, image_url, price, cost, fnsku')
+              .eq('user_id', userId)
+              .in('sku', batch);
+            if (error) {
+              console.warn('[BULK-VERIFY] created_listings lookup failed:', error.message);
+              break;
+            }
+            if (data) orphanRows.push(...data);
+          }
+
+          const nowIso2 = new Date().toISOString();
+          let promoted = 0;
+          for (const cl of orphanRows) {
+            const live = liveInventoryMap[cl.sku];
+            if (!live) continue;
+            const { error: insErr } = await supabase.from('inventory').insert({
+              user_id: userId,
+              asin: cl.asin,
+              sku: cl.sku,
+              fnsku: cl.fnsku ?? null,
+              title: cl.title ?? null,
+              image_url: cl.image_url ?? null,
+              price: cl.price ?? null,
+              cost: cl.cost ?? null,
+              available: live.available,
+              reserved: live.reserved,
+              inbound: live.inbound,
+              // NOT 'created_listing': that source is excluded from
+              // enqueue_full_inventory_refresh by design, which would leave
+              // the row just as invisible as before. Amazon confirmed this
+              // SKU, so it is ordinary synced inventory.
+              source: 'live_api',
+              listing_status: 'ACTIVE',
+              last_inventory_sync_at: nowIso2,
+              last_summaries_at: nowIso2,
+            });
+            if (insErr) {
+              // Most likely a unique-constraint race with another sync. Not
+              // fatal, and not worth aborting the rest of the promotion.
+              console.warn(`[BULK-VERIFY] promote ${cl.sku} failed: ${insErr.message}`);
+              continue;
+            }
+            promoted++;
+          }
+          console.log(`[BULK-VERIFY] Promoted ${promoted} orphaned listing(s) into inventory`);
+          promotedCount = promoted;
+          orphanCandidates = unknownLiveSkus.length;
+        }
+      } catch (promoteErr: any) {
+        // Never let promotion failure lose the verification work above.
+        console.warn('[BULK-VERIFY] orphan promotion failed:', promoteErr?.message);
+      }
     }
 
     // Protect unchanged items: tag as live_api so sync-inventory-report won't overwrite
