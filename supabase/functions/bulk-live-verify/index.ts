@@ -614,15 +614,34 @@ Deno.serve(async (req) => {
         // FNSKU here, so a dead listing can be promoted. It renders as 0/0/0
         // and clean-ghost-listings already removes inventory rows Amazon no
         // longer recognises.
-        const { data: fnskuOrphans, error: fnskuErr } = await supabase
-          .from('created_listings')
-          .select('asin, sku, title, image_url, price, cost, fnsku')
-          .eq('user_id', userId)
-          .not('fnsku', 'is', null);
+        // PAGINATED. Supabase caps an unranged select at 1,000 rows, and this
+        // account has 2,212 listings carrying an FNSKU -- the first attempt
+        // silently read only the first page and promoted nothing, because the
+        // twelve that mattered sat beyond it. A cap that returns a short list
+        // instead of an error is the same shape of bug as the unbounded .in()
+        // that took check-seller-watchlist down for ten days.
+        const fnskuOrphans: any[] = [];
+        let fnskuErr: any = null;
+        {
+          let from = 0;
+          const PAGE = 1000;
+          for (;;) {
+            const { data, error } = await supabase
+              .from('created_listings')
+              .select('asin, sku, title, image_url, price, cost, fnsku')
+              .eq('user_id', userId)
+              .not('fnsku', 'is', null)
+              .range(from, from + PAGE - 1);
+            if (error) { fnskuErr = error; break; }
+            if (data) fnskuOrphans.push(...data);
+            if ((data?.length || 0) < PAGE) break;
+            from += PAGE;
+          }
+        }
 
         if (fnskuErr) {
           console.warn('[BULK-VERIFY] fnsku orphan lookup failed:', fnskuErr.message);
-        } else if (fnskuOrphans?.length) {
+        } else if (fnskuOrphans.length) {
           const nowIso3 = new Date().toISOString();
           let awaitingPromoted = 0;
           for (const cl of fnskuOrphans) {
