@@ -323,6 +323,7 @@ Deno.serve(async (req) => {
     const results: VerifyResult[] = [];
     let promotedCount = 0;      // orphaned created_listings promoted into inventory
     let orphanCandidates = 0;   // live SKUs Amazon returned that we had no row for
+    let promotedAwaitingReceipt = 0; // FBA-registered listings with no inventory record yet
     const updateBatch: { id: string; asin: string; available: number; reserved: number; inbound: number; listing_status: string; prev_available: number; prev_reserved: number }[] = [];
     const protectBatch: string[] = []; // IDs of unchanged items to tag as live_api for protection
 
@@ -585,6 +586,77 @@ Deno.serve(async (req) => {
           promotedCount = promoted;
           orphanCandidates = unknownLiveSkus.length;
         }
+
+        // ── FBA-REGISTERED BUT NEVER RECEIVED ───────────────────────────
+        //
+        // The pass above can only promote SKUs the Summaries API returned,
+        // and Summaries reports INVENTORY. A listing enrolled in FBA that has
+        // never had a shipment received has no inventory record at all, so
+        // neither the report nor the summaries can ever see it. It stays
+        // invisible for exactly as long as it sits unstocked -- which is
+        // precisely the window in which the seller most needs to see it.
+        //
+        // Measured 2026-09-01: 12 such listings holding $4,966.75 of planned
+        // inventory, one of them the ASIN that started this investigation.
+        //
+        // THE FNSKU IS AMAZON'S OWN CONFIRMATION. Amazon assigns one only
+        // when it enrols a SKU in FBA, so holding one is proof the listing is
+        // real. No getListingsItem call is needed to establish what we were
+        // already told. (The other 574 orphans have no FNSKU, were never
+        // enrolled, and are correctly left alone -- promoting on `units > 0`
+        // would have swept all of them in.)
+        //
+        // Quantities are zero because they genuinely are zero. The row exists
+        // so the listing is visible, queued for refresh, and picked up the
+        // moment stock arrives.
+        //
+        // Risk accepted: a SKU enrolled and later deleted still carries an
+        // FNSKU here, so a dead listing can be promoted. It renders as 0/0/0
+        // and clean-ghost-listings already removes inventory rows Amazon no
+        // longer recognises.
+        const { data: fnskuOrphans, error: fnskuErr } = await supabase
+          .from('created_listings')
+          .select('asin, sku, title, image_url, price, cost, fnsku')
+          .eq('user_id', userId)
+          .not('fnsku', 'is', null);
+
+        if (fnskuErr) {
+          console.warn('[BULK-VERIFY] fnsku orphan lookup failed:', fnskuErr.message);
+        } else if (fnskuOrphans?.length) {
+          const nowIso3 = new Date().toISOString();
+          let awaitingPromoted = 0;
+          for (const cl of fnskuOrphans) {
+            if (knownSkus.has(cl.sku)) continue;          // already tracked
+            if (liveInventoryMap[cl.sku]) continue;       // handled by the pass above
+            const { error: insErr } = await supabase.from('inventory').insert({
+              user_id: userId,
+              asin: cl.asin,
+              sku: cl.sku,
+              fnsku: cl.fnsku,
+              title: cl.title ?? null,
+              image_url: cl.image_url ?? null,
+              price: cl.price ?? null,
+              cost: cl.cost ?? null,
+              available: 0,
+              reserved: 0,
+              inbound: 0,
+              source: 'live_api',
+              listing_status: 'ACTIVE',
+              last_inventory_sync_at: nowIso3,
+              last_summaries_at: nowIso3,
+            });
+            if (insErr) {
+              console.warn(`[BULK-VERIFY] promote-awaiting ${cl.sku} failed: ${insErr.message}`);
+              continue;
+            }
+            knownSkus.add(cl.sku);
+            awaitingPromoted++;
+          }
+          if (awaitingPromoted > 0) {
+            console.log(`[BULK-VERIFY] Promoted ${awaitingPromoted} FBA-registered listing(s) awaiting first receipt`);
+          }
+          promotedAwaitingReceipt = awaitingPromoted;
+        }
       } catch (promoteErr: any) {
         // Never let promotion failure lose the verification work above.
         console.warn('[BULK-VERIFY] orphan promotion failed:', promoteErr?.message);
@@ -616,6 +688,13 @@ Deno.serve(async (req) => {
       unchanged: results.filter(r => r.action === 'unchanged').length,
       not_found: results.filter(r => r.action === 'not_found').length,
       errors: results.filter(r => r.action === 'error').length,
+      // Orphan promotion, reported rather than left to be inferred from the
+      // database afterwards. The first run of this feature returned a summary
+      // with no sign of whether it had promoted anything, which made the one
+      // question it exists to answer unanswerable from its own output.
+      orphan_candidates: orphanCandidates,  // live SKUs Amazon returned with no inventory row
+      promoted: promotedCount,              // of those, how many matched created_listings and were inserted
+      promoted_awaiting_receipt: promotedAwaitingReceipt, // FBA-enrolled, no inventory record yet
     };
 
     console.log(`[BULK-VERIFY] Complete: ${JSON.stringify(summary)} dry_run=${dryRun}`);
