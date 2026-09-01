@@ -472,6 +472,16 @@ Deno.serve(async (req) => {
 
       console.log(`[BULK-VERIFY] All ${updateBatch.length} corrections applied`);
 
+    }
+
+    // Promotion runs on EVERY non-dry run, not only when corrections were
+    // applied. It was originally nested inside
+    // `if (updateBatch.length > 0 && !dryRun)` — so the first execution
+    // promoted 8 rows (12 corrections that run) and every execution after
+    // it promoted nothing, because a steady-state catalogue needs no
+    // corrections and the whole block was skipped. Finding orphans has
+    // nothing to do with whether existing rows drifted.
+    if (!dryRun) {
       // ── PROMOTE ORPHANED created_listings ──────────────────────────────
       //
       // A listing can exist in created_listings and never reach inventory,
