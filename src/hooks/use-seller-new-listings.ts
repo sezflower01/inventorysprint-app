@@ -249,6 +249,18 @@ export function useSellerNewListings() {
           .lt("detected_at", reviewCutoff),
       ]);
       if (error) throw error;
+      // ERRORS WERE BEING DISCARDED. Only the done query error was ever
+      // destructured. If the reviewable query failed, pendingRows came back
+      // undefined, the list rendered empty, and the tab read "Nothing to review
+      // right now" -- indistinguishable from genuinely having no work. On
+      // 2026-09-02 that made an empty tab impossible to tell apart from a
+      // broken query and cost several rounds of guessing at causes the browser
+      // could have named immediately.
+      //
+      // Thrown rather than logged: a list silently showing nothing is worse
+      // than one reporting it could not load.
+      if (pendingError) throw pendingError;
+      if (excludedError) throw excludedError;
       setDone((doneRows as unknown as NewListing[]) || []);
       setPending((pendingRows as unknown as NewListing[]) || []);
       setExcluded((excludedRows as unknown as NewListing[]) || []);
