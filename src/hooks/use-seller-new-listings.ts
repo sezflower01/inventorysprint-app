@@ -96,7 +96,18 @@ const REVIEW_WINDOW_DAYS = 30;
 // Matches ALL brands ever carried, not just ones in stock: 1,279 of the 1,484
 // sit at zero units and those are exactly the ones worth restocking.
 
-const PAGE_SIZE = 200;
+// Raised 200 -> 1000 on 2026-09-02, at the seller's request, to show all 1,246
+// brand-matched listings in one view rather than the newest 200 of them.
+//
+// Safe at this size for the same reason the 50 -> 200 raise was: the database
+// does not care -- (user_id, detected_at DESC) is indexed and RLS already
+// scopes by user -- so this is purely a UI choice.
+//
+// MAX_ELIGIBILITY_ASINS is deliberately NOT raised with it. That cap governs
+// check-product-eligibility invocations, which are real work per call, and it
+// was the one thing that scaled 1:1 with page size. Rows past it render without
+// an eligibility badge rather than a guessed one.
+const PAGE_SIZE = 1000;
 
 /**
  * Ceiling on ASINs auto-checked for eligibility per load.
