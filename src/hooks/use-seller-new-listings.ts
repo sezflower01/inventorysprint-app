@@ -165,8 +165,8 @@ export function useSellerNewListings() {
       const brandFilter = (q: any) => (myBrandsOnly ? q.eq("is_my_brand", true) : q);
       const [
         { data: doneRows, error },
-        { data: pendingRows },
-        { data: excludedRows },
+        { data: pendingRows, error: pendingError },
+        { data: excludedRows, error: excludedError },
         { count: excludedCount },
         { data: watchRows },
         { count: doneCount },
@@ -218,10 +218,10 @@ export function useSellerNewListings() {
           .order(myBrandsOnly ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
-        brandFilter(supabase
-          .from("seller_new_listings_branded")
+        supabase
+          .from("seller_watch_new_listings")
           .select("id", { count: "exact", head: true })
-          .in("source_status", ["unsourced", "sourcing"]))
+          .in("source_status", ["unsourced", "sourcing"])
           .eq("brand_match_state", "unknown"),
         // Listing rows carry seller_id but not the seller's NAME -- that lives
         // on the watch. Fetched here so a listing can say who it came from,
@@ -233,30 +233,46 @@ export function useSellerNewListings() {
         // Counted, not fetched. Bulk delete can only ever act on the 50 rows
         // on screen, so the UI has to be able to say "50 of 213" rather than
         // implying a Select-all reached everything.
-        brandFilter(supabase
-          .from("seller_new_listings_branded")
+        // ── COUNTS READ THE BASE TABLE ───────────────────────────────────
+        //
+        // seller_new_listings_branded adds is_my_brand through a LATERAL over
+        // user_brands. On a LIMITed list query that lateral runs once per
+        // returned row -- 1,000 times, ~80ms, fine. On an unbounded COUNT it
+        // runs once per TABLE row: 41,683 rows x ~1,485 user_brands each is
+        // roughly 62 million filter operations, which timed out and returned
+        // HTTP 500. Confirmed 2026-09-02 from the browser console, and visible
+        // in EXPLAIN as "Rows Removed by Filter: 1485" inside the lateral.
+        //
+        // Counts need no brand columns, so they read seller_watch_new_listings
+        // directly. brandFilter is NOT applied for the same reason -- it
+        // filters on is_my_brand, which only the view has. When myBrandsOnly is
+        // on these counts are therefore unfiltered totals; that is a known and
+        // deliberate imprecision in a badge, traded against a query that fails
+        // outright.
+        supabase
+          .from("seller_watch_new_listings")
           .select("id", { count: "exact", head: true })
-          .in("source_status", ["candidates_found", "sourced", "no_candidates"])),
-        brandFilter(supabase
-          .from("seller_new_listings_branded")
+          .in("source_status", ["candidates_found", "sourced", "no_candidates"]),
+        supabase
+          .from("seller_watch_new_listings")
           .select("id", { count: "exact", head: true })
-          .in("source_status", ["unsourced", "sourcing"])),
+          .in("source_status", ["unsourced", "sourcing"]),
         // Counted server-side rather than derived from `pending`, which is one
         // PAGE_SIZE window. Deriving it was the bug: the badge read the page
         // length and so sat at exactly 200 from the moment the queue passed 200,
         // reporting a nearly-empty queue while the table held 8,717 rows.
-        brandFilter(supabase
-          .from("seller_new_listings_branded")
+        supabase
+          .from("seller_watch_new_listings")
           .select("id", { count: "exact", head: true })
           .in("source_status", ["unsourced", "sourcing"])
-          .eq("qualified", true))
+          .eq("brand_match_state", "matched")
           .gte("detected_at", reviewCutoff),
         // Everything older, counted so it can be reported rather than vanish.
-        brandFilter(supabase
-          .from("seller_new_listings_branded")
+        supabase
+          .from("seller_watch_new_listings")
           .select("id", { count: "exact", head: true })
           .in("source_status", ["unsourced", "sourcing"])
-          .eq("qualified", true))
+          .eq("brand_match_state", "matched")
           .lt("detected_at", reviewCutoff),
       ]);
       if (error) throw error;
