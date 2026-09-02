@@ -588,19 +588,18 @@ export default function NewListingsPanel() {
                         <p>The filter above is live and will apply as soon as listings arrive.</p>
                       </>
                     ) : (
-                      {/* Both messages described a source-search worker that
-                          was deleted on 2026-08-19 (20260819220000 — Google CSE
-                          returned 403 on every call, SerpAPI's quota ran out,
-                          and automating a judgement the seller was reviewing by
-                          hand anyway was not worth paying for). Search is a
-                          manual link per listing now.
-
-                          The old "every detected listing has been searched" was
-                          the worse of the two: it asserted work had been done
-                          that nothing performs. On 2026-09-02, with 1,243
-                          brand-matched listings sitting unsourced, it read as
-                          "all clear" and cost a long investigation into a
-                          pipeline that had been removed on purpose. */}
+                      // Both messages described a source-search worker deleted
+                      // on 2026-08-19 (20260819220000 — Google CSE returned 403
+                      // on every call, SerpAPI's quota ran out, and automating a
+                      // judgement the seller reviewed by hand anyway was not
+                      // worth paying for). Search is a manual per-listing link.
+                      //
+                      // The old "every detected listing has been searched" was
+                      // the worse of the two: it asserted work had been done
+                      // that nothing performs. On 2026-09-02, with 1,243
+                      // brand-matched listings sitting unsourced, it read as
+                      // all-clear and cost a long investigation into a pipeline
+                      // removed on purpose.
                       <p>
                         {key === "done"
                           ? "Nothing here yet. Automated source search was removed in August 2026 — use the Search link on a listing, and ones you source appear here."
