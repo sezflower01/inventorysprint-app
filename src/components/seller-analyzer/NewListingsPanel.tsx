@@ -243,7 +243,7 @@ function DeleteMatchingExcludedWords({ onDone }: { onDone: () => void }) {
 }
 
 export default function NewListingsPanel() {
-  const { done, pending, doneTotal, pendingTotal, pendingQualifiedTotal, pendingOlderTotal, reviewWindowDays, myBrandsOnly, setMyBrandsOnly, loading, eligibility, sellerNames, deleteListings, deleteByStatus, refresh } = useSellerNewListings();
+  const { done, pending, excluded, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, pendingOlderTotal, reviewWindowDays, myBrandsOnly, setMyBrandsOnly, loading, eligibility, sellerNames, deleteListings, deleteByStatus, refresh } = useSellerNewListings();
   const [tab, setTab] = useState("done");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [removing, setRemoving] = useState(false);
@@ -412,8 +412,14 @@ export default function NewListingsPanel() {
             // Separated rather than hidden: "why is this listing not being
             // searched" is a real question, and disqualified_reason has been
             // stored on every row all along without ever being shown.
-            const blocked = isDone ? [] : rows.filter((l) => l.qualified === false);
-            let shown = isDone ? rows : rows.filter((l) => l.qualified !== false);
+            // Both groups now arrive as their own server query, so neither can
+            // starve the other. Filtering one page by `qualified` was the bug:
+            // ~96% of detections are disqualified, so a 50-row window ordered by
+            // recency routinely held nothing reviewable and the tab read
+            // "Nothing to review right now" while 844 qualified listings sat
+            // deeper in the table.
+            const blocked = isDone ? [] : excluded;
+            let shown = rows;
 
             const ids = rows.map((l) => l.id);
             const allSelected = ids.length > 0 && ids.every((id) => selected.has(id));
@@ -765,8 +771,16 @@ export default function NewListingsPanel() {
                         className="flex w-full items-center justify-between gap-2 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground hover:bg-muted/50"
                       >
                         <span>
-                          {blocked.length.toLocaleString()} not searchable — these will never be
-                          searched
+                          {/* Was "not searchable -- these will never be searched",
+                              written when an auto-source worker existed. It was
+                              deleted on 2026-08-19, so nothing is searched
+                              automatically and the old wording described a
+                              distinction that no longer exists. What these rows
+                              actually are is EXCLUDED BY YOUR OWN RULES -- and
+                              on 2026-09-02 that was hiding 394 listings for
+                              brands the seller already sells. */}
+                          {(excludedTotal || blocked.length).toLocaleString()} excluded by your rules
+                          {" "}— open to review and decide
                         </span>
                         <ChevronDown className="h-3.5 w-3.5 shrink-0" />
                       </button>

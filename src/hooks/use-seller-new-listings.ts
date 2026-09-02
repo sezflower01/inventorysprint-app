@@ -116,6 +116,13 @@ const MAX_ELIGIBILITY_ASINS = 60;
 export function useSellerNewListings() {
   const [done, setDone] = useState<NewListing[]>([]);
   const [pending, setPending] = useState<NewListing[]>([]);
+  // Listings that matched a rule and were set aside. Fetched as its OWN query
+  // rather than filtered out of `pending` on the client: ~96% of detections are
+  // disqualified, so a 50-row window ordered by recency routinely contained no
+  // reviewable rows at all and the tab read "Nothing to review right now" while
+  // 844 qualified listings sat deeper in the table.
+  const [excluded, setExcluded] = useState<NewListing[]>([]);
+  const [excludedTotal, setExcludedTotal] = useState(0);
   /** Total finished rows, which exceeds `done.length` whenever PAGE_SIZE bites. */
   const [doneTotal, setDoneTotal] = useState(0);
   /** Total queued rows, which exceeds `pending.length` whenever PAGE_SIZE bites. */
@@ -148,6 +155,8 @@ export function useSellerNewListings() {
       const [
         { data: doneRows, error },
         { data: pendingRows },
+        { data: excludedRows },
+        { count: excludedCount },
         { data: watchRows },
         { count: doneCount },
         { count: pendingCount },
@@ -165,13 +174,35 @@ export function useSellerNewListings() {
           .order(myBrandsOnly ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
+        // Reviewable only. `qualified` may be null on rows predating the
+        // column, and null has never meant "excluded" -- the client filter was
+        // `!== false` for exactly that reason, so it is preserved here.
         brandFilter(supabase
           .from("seller_new_listings_branded")
           .select(SELECT_COLS)
           .in("source_status", ["unsourced", "sourcing"]))
+          .or("qualified.is.null,qualified.eq.true")
           .order(myBrandsOnly ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
+        // Excluded, as its own page. These are shown WITH their reason so the
+        // seller decides case by case: a category rule written to protect a
+        // search budget should not silently hide a listing for a brand they
+        // already sell. 394 of 1,238 brand-matched listings were being dropped
+        // this way on 2026-09-02.
+        brandFilter(supabase
+          .from("seller_new_listings_branded")
+          .select(SELECT_COLS)
+          .in("source_status", ["unsourced", "sourcing"]))
+          .eq("qualified", false)
+          .order(myBrandsOnly ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
+          .order("detected_at", { ascending: false })
+          .limit(PAGE_SIZE),
+        brandFilter(supabase
+          .from("seller_new_listings_branded")
+          .select("id", { count: "exact", head: true })
+          .in("source_status", ["unsourced", "sourcing"]))
+          .eq("qualified", false),
         // Listing rows carry seller_id but not the seller's NAME -- that lives
         // on the watch. Fetched here so a listing can say who it came from,
         // which is the first thing you need in order to judge it.
@@ -211,6 +242,8 @@ export function useSellerNewListings() {
       if (error) throw error;
       setDone((doneRows as unknown as NewListing[]) || []);
       setPending((pendingRows as unknown as NewListing[]) || []);
+      setExcluded((excludedRows as unknown as NewListing[]) || []);
+      setExcludedTotal(excludedCount ?? 0);
       setDoneTotal(doneCount ?? 0);
       setPendingTotal(pendingCount ?? 0);
       setPendingQualifiedTotal(pendingQualifiedCount ?? 0);
@@ -377,7 +410,7 @@ export function useSellerNewListings() {
   }, [refresh]);
 
   return {
-    done, pending, doneTotal, pendingTotal, pendingQualifiedTotal, loading,
+    done, pending, excluded, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, loading,
     pendingOlderTotal, reviewWindowDays: REVIEW_WINDOW_DAYS,
     myBrandsOnly, setMyBrandsOnly,
     eligibility, sellerNames, deleteListings,
