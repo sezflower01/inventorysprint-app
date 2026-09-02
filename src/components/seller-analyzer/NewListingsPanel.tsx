@@ -586,7 +586,20 @@ export default function NewListingsPanel() {
 
                 {rows.length === 0 && (
                   <div className="py-8 text-center text-xs text-muted-foreground space-y-1">
-                    {isEmpty ? (
+                    {/* LOADING IS ITS OWN STATE, checked first.
+                        Without this branch an in-flight fetch fell through to
+                        the messages below, because `rows` is empty while
+                        loading and `isEmpty` is false (it requires !loading).
+                        So every tab switch asserted "Nothing to review right
+                        now" for the duration of the request, then replaced it
+                        with the real list — telling the user there was no work
+                        at the exact moment it was still being fetched. */}
+                    {loading ? (
+                      <div className="flex items-center justify-center gap-2 py-2">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span>Loading listings…</span>
+                      </div>
+                    ) : isEmpty ? (
                       <>
                         <p className="font-medium text-foreground">No listings yet — seeding in progress</p>
                         <p>
