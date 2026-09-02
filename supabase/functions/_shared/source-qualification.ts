@@ -153,91 +153,46 @@ function folded(raw: ReadonlySet<string>): ReadonlySet<string> {
 }
 
 export function qualifyListing(input: QualificationInput): QualificationResult {
-  // Checked FIRST and unconditionally. A restricted ASIN cannot be sold at
-  // any price, so no other property can redeem it -- and reporting
-  // "restricted" rather than a downstream reason like excluded_group tells the user
-  // the actionable fact.
+  // ── ONE RULE, PLUS ONE HARD BLOCK (2026-09-02) ────────────────────────────
+  //
+  // This function used to apply seven: restricted, needs_approval_excluded,
+  // excluded_group, excluded_brand, excluded_title, rank_over_500000 and
+  // no_upc. All but the first are now removed at the seller's explicit
+  // instruction, and the reason is worth recording because the rules were
+  // sound when they were written.
+  //
+  // They existed to decide WHAT DESERVED AN API CALL. The auto-source worker
+  // spent a CSE query, up to three Gemini verdicts, three vision compares and
+  // a scrape per listing, so refusing 96% of detections up front was the
+  // difference between a viable feature and an unaffordable one.
+  //
+  // That worker was deleted on 2026-08-19 (20260819220000) when Google CSE
+  // began returning 403 on every call. The rules survived it and were
+  // repurposed to decide what deserves the SELLER'S ATTENTION -- which is not
+  // the same judgement, and nobody chose it deliberately.
+  //
+  // Measured 2026-09-02: 394 of 1,238 brand-matched listings were being hidden
+  // this way -- 117 apparel, 58 book, 57 beauty, 49 shoes -- for brands the
+  // seller already stocks. A category rule meant to save a search was
+  // suppressing exactly the listings the brand filter existed to surface.
+  //
+  // The filter is now brand matching alone, applied downstream by
+  // classify-listing-brands. Everything reaching this function qualifies.
+  //
+  // ── WHY 'restricted' STAYS ───────────────────────────────────────────────
+  //
+  // Every other rule was a preference. This one is Amazon stating the item
+  // CANNOT BE SOLD by this seller. Surfacing those as ordinary results would
+  // invite work on listings that can never be actioned, so it is kept
+  // deliberately and by explicit decision, not by omission.
   if (input.eligibility === 'restricted') {
     return { qualified: false, reason: 'restricted' };
   }
 
-  // Gated items stay searchable by default: they are often worth sourcing
-  // before deciding whether to apply for approval. Opt-out only.
-  if (input.eligibility === 'approval_required' && input.allowNeedsApproval === false) {
-    return { qualified: false, reason: 'needs_approval_excluded' };
-  }
-
-  // Anything else -- 'approved', or no verdict yet -- falls through. Absence
-  // of a verdict must never disqualify: most freshly detected ASINs have not
-  // been checked, and treating unknown as restricted would silently empty the
-  // queue. Same principle as the rank ceiling only applying when a rank exists.
-
-  const group = (input.productGroup || '').trim().toLowerCase();
-  const groups = folded(input.excludedGroups ?? EXCLUDED_PRODUCT_GROUPS);
-  if (group && groups.has(group)) {
-    return { qualified: false, reason: `excluded_group:${group}` };
-  }
-
-  // EXACT match, never substring. Measured against live SP-API data on
-  // 2026-08-17: "Publisher Unknown" is a real publisher, so `contains
-  // "unknown"` would reject it. The same reasoning keeps 'Universal' and 'OEM'
-  // out of the defaults entirely -- Universal Studios and Universal Music are
-  // real brands, and OEM is a legitimate label on automotive parts.
-  //
-  // A MISSING brand is not a generic brand and never disqualifies. Of 20
-  // listings stored with brand NULL, SP-API returned a real brand for all 20 --
-  // the nulls were a lookup-coverage artefact, not a property of the product.
-  // Same principle as the rank ceiling only applying when a rank exists.
-  const brand = (input.brand || '').trim().toLowerCase();
-  // folded(): the stored list is whatever the user typed. See the note above.
-  const brands = folded(input.excludedBrands ?? EXCLUDED_BRANDS);
-  if (brand && brands.has(brand)) {
-    return { qualified: false, reason: `excluded_brand:${brand}` };
-  }
-
-  // WORD BOUNDARY, not exact and not naive substring -- see title-exclusions.ts
-  // for the measurement behind that. Sits next to the brand rule because both
-  // express the same thing: what the seller has decided against, as opposed to
-  // what Amazon forbids (handled by `eligibility` at the top).
-  //
-  // Ordering note: this used to sit deliberately ahead of a no_upc check so the
-  // stored reason named the user's own rule rather than a technicality. That
-  // check is gone (see below); the ordering is kept because the user's rules
-  // should always be the reported reason when several could apply.
-  const excludedTitle = findExcludedTitleTerm(input.title, input.excludedTitleTerms);
-  if (excludedTitle) {
-    return { qualified: false, reason: `excluded_title:${excludedTitle}` };
-  }
-
-  // A MISSING UPC NO LONGER DISQUALIFIES -- rule removed 2026-08-21.
-  //
-  // It used to, and the reasoning was sound when it was written:
-  // find-source-candidates searched UPC-first and degraded to brand+title
-  // without one, so untagged items spent a full verification budget and came
-  // back "no likely sources".
-  //
-  // That function no longer exists. Automated sourcing was removed 2026-08-19
-  // (commit ee359a3 -- Google CSE returned 403 across three projects) and
-  // replaced with a manual "Search on Google" button that deliberately carries
-  // the TITLE ONLY, never the UPC, because retail pages print the product name
-  // and almost never the raw barcode.
-  //
-  // So the rule was rejecting listings for lacking a field the current workflow
-  // does not use -- and it was by far the largest filter: 6,116 of 8,717 queued
-  // rows, 70%, measured 2026-08-21. It was quietly deciding what never reached
-  // the user for review. Their call, in their words: "I don't want to disqualify
-  // if no upc because I'm losing potential checking."
-  //
-  // Stated consequence, so nobody later reads the volume as a regression:
-  // qualified detections go from roughly 25/day to roughly 3,000/day. That is
-  // the intended trade -- see everything, filter by eye -- not an oversight. If
-  // the queue later needs trimming, trim it on a criterion someone actually
-  // believes in (rank, price, offer count), not on a deleted searcher's
-  // preferred input format.
-
-  if (typeof input.salesRank === 'number' && input.salesRank > MAX_SALES_RANK) {
-    return { qualified: false, reason: `rank_over_${MAX_SALES_RANK}:${input.salesRank}` };
-  }
-
+  // Everything else qualifies. The strict_* columns and the excluded-group,
+  // excluded-brand and excluded-title inputs are still ACCEPTED by the
+  // signature and still stored on the row -- they are simply no longer
+  // consulted. Removing them from the type would break every caller for no
+  // gain, and keeping the data means this decision is reversible.
   return { qualified: true, reason: null };
 }

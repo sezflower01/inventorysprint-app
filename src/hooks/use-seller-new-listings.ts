@@ -51,7 +51,7 @@ export interface NewListing {
 
 const SELECT_COLS =
   "id, watch_id, seller_id, marketplace, asin, title, brand, image_url, upc, detected_at, " +
-  "source_status, qualified, disqualified_reason, " +
+  "source_status, qualified, disqualified_reason, brand_match_state, " +
   // Price is the one signal kept from the automated era: it costs nothing,
   // since check-seller-watchlist captures it from a Keepa call it already
   // makes, and it answers "is this worth clicking" before opening a search.
@@ -174,27 +174,36 @@ export function useSellerNewListings() {
           .order(myBrandsOnly ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
-        // Reviewable only. `qualified` may be null on rows predating the
-        // column, and null has never meant "excluded" -- the client filter was
-        // `!== false` for exactly that reason, so it is preserved here.
+        // ONE RULE: does this listing's brand match the seller's own brands?
+        //
+        // Replaces a `qualified` filter that stood for seven overlapping rules
+        // -- category, rank, UPC, approval, excluded brands, excluded titles --
+        // written to decide what deserved an API call for a source worker
+        // deleted on 2026-08-19, then left deciding what deserved the seller's
+        // attention. They were hiding 394 of 1,238 brand-matched listings for
+        // brands already stocked. Removed at the seller's instruction
+        // 2026-09-02; only `restricted` survives, applied upstream.
         brandFilter(supabase
           .from("seller_new_listings_branded")
           .select(SELECT_COLS)
           .in("source_status", ["unsourced", "sourcing"]))
-          .or("qualified.is.null,qualified.eq.true")
+          .eq("brand_match_state", "matched")
           .order(myBrandsOnly ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
-        // Excluded, as its own page. These are shown WITH their reason so the
-        // seller decides case by case: a category rule written to protect a
-        // search budget should not silently hide a listing for a brand they
-        // already sell. 394 of 1,238 brand-matched listings were being dropped
-        // this way on 2026-09-02.
+        // NO BRAND FROM AMAZON -- kept visible, in its own group.
+        //
+        // getCatalogItem returns a brand ~78% of the time; for the rest Amazon
+        // genuinely has none, and the classifier records those as `unknown`
+        // rather than `not_mine` precisely so missing data cannot masquerade as
+        // a confirmed mismatch. 5,320 rows sit here. Folding them into
+        // `not_mine` would hide listings on the strength of an absent field, so
+        // they are surfaced separately for the seller to skim.
         brandFilter(supabase
           .from("seller_new_listings_branded")
           .select(SELECT_COLS)
           .in("source_status", ["unsourced", "sourcing"]))
-          .eq("qualified", false)
+          .eq("brand_match_state", "unknown")
           .order(myBrandsOnly ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
@@ -202,7 +211,7 @@ export function useSellerNewListings() {
           .from("seller_new_listings_branded")
           .select("id", { count: "exact", head: true })
           .in("source_status", ["unsourced", "sourcing"]))
-          .eq("qualified", false),
+          .eq("brand_match_state", "unknown"),
         // Listing rows carry seller_id but not the seller's NAME -- that lives
         // on the watch. Fetched here so a listing can say who it came from,
         // which is the first thing you need in order to judge it.

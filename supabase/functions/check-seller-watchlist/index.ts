@@ -634,6 +634,38 @@ Deno.serve(async (req) => {
       // seller_watchlist.notify_email already holds -- so the fallback below is
       // the existing behaviour, unchanged.
       let notifyOverride: string | null = null;
+
+      // The seller's own brands, for the price-capture filter further down.
+      //
+      // Declared HERE, beside userExclusions, rather than inside the
+      // `unionNewAsins.size > 0` block where it was first written: that block
+      // closes before Pass 2 builds the rows, so the helper was out of scope at
+      // the only place that uses it.
+      const myBrandsExact = new Set<string>();
+      const myBrandsPrefix: string[] = [];
+      try {
+        const { data: ub } = await admin
+          .from('user_brands')
+          .select('brand, match_mode, status')
+          .eq('user_id', group[0].user_id);
+        for (const b of ub || []) {
+          const name = String(b?.brand ?? '').trim().toLowerCase();
+          if (!name) continue;
+          if (String(b?.status ?? '') === 'ignore') continue;
+          if (String(b?.match_mode ?? '') === 'prefix') myBrandsPrefix.push(name);
+          else myBrandsExact.add(name);
+        }
+      } catch (e) {
+        // Non-fatal, and it fails CLOSED: an empty brand set prices nothing,
+        // which is the safe direction for a Keepa budget the repricer shares.
+        console.warn('[seller-watch] user_brands load failed:', (e as Error).message);
+      }
+      const isMyBrand = (raw: string | null | undefined): boolean => {
+        const b = String(raw ?? '').trim().toLowerCase();
+        if (!b) return false;
+        if (myBrandsExact.has(b)) return true;
+        return myBrandsPrefix.some((pfx) => b.startsWith(pfx));
+      };
       if (unionNewAsins.size > 0) {
         const uid = group[0].user_id;
         const { data: cfg } = await admin
@@ -752,12 +784,26 @@ Deno.serve(async (req) => {
             };
           });
 
-          // PRICE CAPTURE, for ROI -- only on rows that QUALIFIED.
+          // PRICE CAPTURE, for ROI -- only on rows matching the SELLER'S OWN
+          // BRANDS.
           //
-          // Deliberately not on every detection. Measured 2026-08-17: 101 of
-          // 2,484 listings qualified (4%), so pricing everything would spend
-          // ~25x the tokens to price rows that will never be searched, never
-          // sourced, and never have an ROI computed.
+          // Was `r.qualified`, which stopped being a useful selector on
+          // 2026-09-02 when qualification was reduced to the `restricted` check
+          // alone. Under the old seven rules ~4% of detections qualified; under
+          // one rule nearly all do, so keeping that predicate would have priced
+          // roughly 25x more ASINs against a Keepa budget of 20 tokens/min that
+          // the repricer shares -- starving live repricing to price listings
+          // nobody asked to see.
+          //
+          // Brand match is the right selector now because it is the ONLY filter
+          // the seller kept: a listing that is not one of their brands is never
+          // shown, so pricing it buys nothing. Volume lands close to the old 4%
+          // for the same reason.
+          //
+          // Matched here rather than read from brand_match_state because that
+          // column is filled later by classify-listing-brands, on its own cron.
+          // At detection time it is always 'pending', so reading it would price
+          // nothing at all.
           //
           // WHY A SEPARATE CALL. The Keepa /product above only runs for ASINs
           // SP-API could not resolve, and since the batched catalog lookup
@@ -772,7 +818,9 @@ Deno.serve(async (req) => {
           // buybox=1 was measured at tokensConsumed 3 -- triple -- and is
           // deliberately NOT used. stats.current[1] (lowest New) is the proxy;
           // it is not the buy-box price and the column comment says so.
-          const needPrice = rows.filter((r: any) => r.qualified).map((r: any) => r.asin);
+          const needPrice = rows
+            .filter((r: any) => isMyBrand(r.brand))
+            .map((r: any) => r.asin);
           if (needPrice.length && Date.now() < deadlineAt) {
             // offers=20 rather than stats=1 alone, changed 2026-08-19.
             //

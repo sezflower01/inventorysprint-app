@@ -418,6 +418,8 @@ export default function NewListingsPanel() {
             // recency routinely held nothing reviewable and the tab read
             // "Nothing to review right now" while 844 qualified listings sat
             // deeper in the table.
+            // Amazon returned no brand for these, so no rule can classify them.
+            // Shown rather than hidden: absent data is not a confirmed mismatch.
             const blocked = isDone ? [] : excluded;
             let shown = rows;
 
@@ -779,8 +781,8 @@ export default function NewListingsPanel() {
                               actually are is EXCLUDED BY YOUR OWN RULES -- and
                               on 2026-09-02 that was hiding 394 listings for
                               brands the seller already sells. */}
-                          {(excludedTotal || blocked.length).toLocaleString()} excluded by your rules
-                          {" "}— open to review and decide
+                          {(excludedTotal || blocked.length).toLocaleString()} with no brand from Amazon
+                          {" "}— open to skim
                         </span>
                         <ChevronDown className="h-3.5 w-3.5 shrink-0" />
                       </button>
