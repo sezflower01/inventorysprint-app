@@ -243,8 +243,13 @@ function DeleteMatchingExcludedWords({ onDone }: { onDone: () => void }) {
 }
 
 export default function NewListingsPanel() {
-  const { done, pending, excluded, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, pendingOlderTotal, reviewWindowDays, myBrandsOnly, setMyBrandsOnly, loading, eligibility, sellerNames, deleteListings, deleteByStatus, refresh } = useSellerNewListings();
-  const [tab, setTab] = useState("done");
+  const { done, pending, excluded, sellerActivity, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, pendingOlderTotal, reviewWindowDays, myBrandsOnly, setMyBrandsOnly, loading, eligibility, sellerNames, deleteListings, deleteByStatus, refresh } = useSellerNewListings();
+  // Lands on the review list. Was "done", a tab frozen at 6 rows: its statuses
+  // were written only by the source worker deleted on 2026-08-19, and a grep of
+  // every edge function and the whole frontend on 2026-09-02 found nothing that
+  // writes them now. The panel opened on six fossils while 1,246 listings
+  // waited behind it.
+  const [tab, setTab] = useState("searching");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [removing, setRemoving] = useState(false);
   const { toast } = useToast();
@@ -373,9 +378,15 @@ export default function NewListingsPanel() {
               is the one place it is the honest number, because a purge deletes
               disqualified rows too.
             */}
-            <TabsTrigger value="done" className="gap-2">
-              Done
-              {doneTotal > 0 && <Badge variant="secondary">{doneTotal.toLocaleString()}</Badge>}
+            {/* Replaces "Done". Those 6 rows remain in the database; nothing
+                can ever join them, so they no longer get a tab of their own.
+                This answers a question that can still change: which watched
+                sellers are adding listings in MY brands, and how recently. */}
+            <TabsTrigger value="sellers" className="gap-2">
+              Seller activity
+              {sellerActivity.length > 0 && (
+                <Badge variant="secondary">{sellerActivity.length.toLocaleString()}</Badge>
+              )}
             </TabsTrigger>
             {/*
               "To review", not "Searching".
@@ -398,7 +409,97 @@ export default function NewListingsPanel() {
             </TabsTrigger>
           </TabsList>
 
-          {(["done", "searching"] as const).map((key) => {
+          {/* SELLER ACTIVITY — replaces the frozen "Done" tab.
+              Which watched sellers are adding listings in MY brands, and how
+              recently. Sorted by most-recently-active rather than by volume:
+              the useful question is who is moving NOW, not who has the largest
+              all-time pile. */}
+          <TabsContent value="sellers" className="mt-3">
+            {loading ? (
+              <div className="flex items-center justify-center gap-2 py-8 text-xs text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>Loading seller activity…</span>
+              </div>
+            ) : sellerActivity.length === 0 ? (
+              <div className="py-8 text-center text-xs text-muted-foreground">
+                No watched seller has added a listing in your brands in the last{" "}
+                {reviewWindowDays} days.
+              </div>
+            ) : (
+              <div className="divide-y rounded-md border">
+                {sellerActivity.map((a) => {
+                  const key = `${a.seller_id}|${a.marketplace}`;
+                  const theirs = pending.filter(
+                    (l) => l.seller_id === a.seller_id && l.marketplace === a.marketplace,
+                  );
+                  return (
+                    <Collapsible key={key}>
+                      <CollapsibleTrigger asChild>
+                        <button
+                          type="button"
+                          className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left hover:bg-muted/50"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="truncate text-sm font-medium">
+                              {a.seller_name || a.seller_id}
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                              {a.listings_added.toLocaleString()} listing
+                              {a.listings_added === 1 ? "" : "s"} in your brands
+                              {" · last "}
+                              {new Date(a.last_added_at).toLocaleString()}
+                              {" · "}{a.marketplace}
+                            </div>
+                          </div>
+                          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+                        </button>
+                      </CollapsibleTrigger>
+                      <CollapsibleContent>
+                        <div className="border-t bg-muted/20 px-3 py-2 space-y-1">
+                          {theirs.length === 0 ? (
+                            /* The count comes from the whole table; this list
+                               comes from the loaded page. A seller whose rows
+                               fall outside it shows its true count and says so,
+                               rather than appearing to have none. */
+                            <p className="text-xs text-muted-foreground">
+                              Not in the currently loaded page — open the review tab to see them.
+                            </p>
+                          ) : (
+                            theirs.map((l) => (
+                              <div key={l.id} className="flex items-center gap-2 text-xs">
+                                <a
+                                  href={amazonListingUrl(l.asin, l.marketplace)}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="text-primary hover:underline shrink-0"
+                                >
+                                  {l.asin}
+                                </a>
+                                <span className="truncate">{l.title || "(no title)"}</span>
+                                <span className="ml-auto shrink-0 text-muted-foreground">
+                                  {new Date(l.detected_at).toLocaleDateString()}
+                                </span>
+                              </div>
+                            ))
+                          )}
+                          <a
+                            href={amazonStorefrontUrl(a.seller_id, a.marketplace)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 pt-1 text-xs text-primary hover:underline"
+                          >
+                            <Store className="h-3 w-3" /> Open storefront
+                          </a>
+                        </div>
+                      </CollapsibleContent>
+                    </Collapsible>
+                  );
+                })}
+              </div>
+            )}
+          </TabsContent>
+
+          {(["searching"] as const).map((key) => {
             const isDone = key === "done";
             const rows = isDone ? done : pending;
             const total = isDone ? doneTotal : pendingTotal;

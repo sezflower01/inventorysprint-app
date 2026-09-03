@@ -2,6 +2,16 @@ import { useCallback, useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import type { EligibilityStatus } from "@/components/common/EligibilityBadge";
 
+/** One watched seller's recent additions in the user's own brands. */
+export interface SellerActivity {
+  seller_id: string;
+  marketplace: string;
+  seller_name: string | null;
+  listings_added: number;
+  last_added_at: string;
+  first_added_at: string;
+}
+
 export interface NewListing {
   id: string;
   watch_id: string;
@@ -149,6 +159,11 @@ export function useSellerNewListings() {
    */
   const [pendingQualifiedTotal, setPendingQualifiedTotal] = useState(0);
   const [pendingOlderTotal, setPendingOlderTotal] = useState(0);
+  // Aggregated server-side by get_seller_new_listing_activity rather than
+  // grouped from `pending`: that array is capped at PAGE_SIZE, so a seller
+  // whose additions fell outside the window would report a count that is
+  // quietly wrong -- worse than none, because nothing about it looks wrong.
+  const [sellerActivity, setSellerActivity] = useState<SellerActivity[]>([]);
   const [myBrandsOnly, setMyBrandsOnly] = useState(false);
   const [loading, setLoading] = useState(false);
   const [eligibility, setEligibility] = useState<Record<string, EligibilityStatus>>({});
@@ -290,6 +305,18 @@ export function useSellerNewListings() {
       if (excludedError) throw excludedError;
       setDone((doneRows as unknown as NewListing[]) || []);
       setPending((pendingRows as unknown as NewListing[]) || []);
+      // Non-fatal: the listing view is the point, and a missing activity
+      // summary must not blank it.
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data: act, error: actErr } = await (supabase as any)
+          .rpc("get_seller_new_listing_activity", { p_days: REVIEW_WINDOW_DAYS });
+        if (actErr) throw actErr;
+        setSellerActivity((act as SellerActivity[]) || []);
+      } catch (e) {
+        console.warn("[useSellerNewListings] seller activity failed", e);
+        setSellerActivity([]);
+      }
       setExcluded((excludedRows as unknown as NewListing[]) || []);
       setExcludedTotal(excludedCount ?? 0);
       setDoneTotal(doneCount ?? 0);
@@ -458,7 +485,7 @@ export function useSellerNewListings() {
   }, [refresh]);
 
   return {
-    done, pending, excluded, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, loading,
+    done, pending, excluded, sellerActivity, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, loading,
     pendingOlderTotal, reviewWindowDays: REVIEW_WINDOW_DAYS,
     myBrandsOnly, setMyBrandsOnly,
     eligibility, sellerNames, deleteListings,
