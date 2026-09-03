@@ -26,11 +26,13 @@ export interface SellerBrandRow {
   seller_name: string | null;
   /** Items of theirs matching my brands, within this tab's window. */
   count: number;
-  /** Catalogue view only: size of their full ASIN list, and how much of it we can name a brand for. */
+  /** Catalogue view only: their full ASIN list size, how many of those we are
+   *  checking (capped at 1,000), and how many we now have a brand for. */
   catalogueSize?: number | null;
+  inScope?: number | null;
   identified?: number | null;
   /** Most recent detection in this tab's window. */
-  lastAt: string;
+  lastAt: string | null;
 }
 
 interface Item {
@@ -38,7 +40,10 @@ interface Item {
   title: string | null;
   brand: string | null;
   image_url: string | null;
-  detected_at: string;
+  /** NULL when the item came from the brand backfill rather than from a
+   *  detection -- most catalogue items were never "detected", they were just
+   *  looked up. Rendering it blindly gave "Invalid Date". */
+  detected_at: string | null;
   still_listed: boolean;
 }
 
@@ -79,22 +84,36 @@ function SellerRow({ row, since }: { row: SellerBrandRow; since: string | null }
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-medium">
               {row.seller_name || row.seller_id}
+              {typeof row.catalogueSize === "number" &&
+                typeof row.inScope === "number" &&
+                row.catalogueSize > row.inScope && (
+                  <Badge variant="outline" className="ml-2 text-[10px] font-normal">
+                    sample
+                  </Badge>
+                )}
             </div>
             <div className="text-xs text-muted-foreground">
               {row.count.toLocaleString()} in your brands
-              {/* The denominator matters more than the count. We can only name
-                  the brand of ASINs we have detected, so a bare "160" beside a
-                  55,330-item catalogue would read as the whole answer. */}
-              {typeof row.catalogueSize === "number" && (
+              {/* The denominator matters more than the count. A bare "306"
+                  beside a 55,330-item catalogue would read as the whole
+                  answer when it is drawn from a 1,000-item sample. */}
+              {typeof row.inScope === "number" && row.inScope > 0 && (
                 <>
-                  {" · of "}
-                  {(row.identified ?? 0).toLocaleString()} identified
-                  {" in a "}
-                  {row.catalogueSize.toLocaleString()}-item catalogue
+                  {" · "}
+                  {(row.identified ?? 0).toLocaleString()} of{" "}
+                  {row.inScope.toLocaleString()} checked
+                  {typeof row.catalogueSize === "number" &&
+                    row.catalogueSize > row.inScope && (
+                      <> , sampled from {row.catalogueSize.toLocaleString()}</>
+                    )}
                 </>
               )}
-              {" · "}
-              {new Date(row.lastAt).toLocaleDateString()}
+              {row.lastAt && (
+                <>
+                  {" · "}
+                  {new Date(row.lastAt).toLocaleDateString()}
+                </>
+              )}
               {" · "}{row.marketplace}
             </div>
           </div>
@@ -132,7 +151,7 @@ function SellerRow({ row, since }: { row: SellerBrandRow; since: string | null }
                 <Badge variant="secondary" className="shrink-0 text-[10px]">no longer listed</Badge>
               )}
               <span className="ml-auto shrink-0 text-muted-foreground">
-                {new Date(it.detected_at).toLocaleDateString()}
+                {it.detected_at ? new Date(it.detected_at).toLocaleDateString() : "in catalogue"}
               </span>
             </div>
           ))}

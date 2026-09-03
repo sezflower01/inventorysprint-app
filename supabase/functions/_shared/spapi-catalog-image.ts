@@ -235,7 +235,20 @@ export async function fetchCatalogItemsBatch(
   for (let i = 0; i < asins.length; i += CATALOG_BATCH_SIZE) {
     const chunk = asins.slice(i, i + CATALOG_BATCH_SIZE);
     try {
-      await waitForApiToken(supabase, 'catalog_api');
+      // The return value MATTERS here and used to be discarded.
+      // waitForApiToken fails OPEN: after maxWaitMs it logs, returns false and
+      // lets the caller through, which is right for one interactive lookup and
+      // wrong for a long backfill -- 15,845 batched calls that each ignore a
+      // false would push clean past the bucket's 2 req/s and earn throttling
+      // for every other catalog_api consumer, not just this one.
+      //
+      // Waiting longer than the default 8s is deliberate: a backfill has
+      // nowhere to be, and yielding is cheaper than a 429.
+      const gotToken = await waitForApiToken(supabase, 'catalog_api', { maxWaitMs: 30000 });
+      if (!gotToken) {
+        console.warn(`[spapi-catalog-image] no catalog_api token for ${chunk.length} ASINs -- skipping chunk`);
+        continue; // left unchecked; the caller retries it on a later pass
+      }
 
       const url = new URL(`https://${host}/catalog/2022-04-01/items`);
       url.searchParams.set('identifiers', chunk.join(','));

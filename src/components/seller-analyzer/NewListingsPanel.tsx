@@ -426,9 +426,10 @@ export default function NewListingsPanel() {
               <>
                 <p className="mb-2 text-xs text-muted-foreground">
                   What each watched seller is selling <strong>right now</strong> that matches
-                  your brands — no date filter. Limited to ASINs we have identified: we store
-                  every seller's full ASIN list, but not the brand of each one, so an item we
-                  have never looked up cannot be matched. Each row shows that denominator.
+                  your brands — no date filter. We store every seller's full ASIN list but not
+                  the brand of each item, so brands are looked up from Amazon in the background,
+                  capped at 1,000 per seller. Each row shows how far that has got; rows marked
+                  <em> sample</em> are drawn from a slice of a larger catalogue, not all of it.
                 </p>
                 <SellerBrandList
                   since={null}
@@ -438,6 +439,7 @@ export default function NewListingsPanel() {
                     seller_name: c.seller_name,
                     count: c.matched_items,
                     catalogueSize: c.catalogue_size,
+                    inScope: c.in_scope,
                     identified: c.identified,
                     lastAt: c.last_seen_at,
                   }))}

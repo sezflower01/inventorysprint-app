@@ -26,9 +26,13 @@ export interface SellerCatalogEntry {
   matched_items: number;
   /** Their full ASIN list length. We hold the list; we do NOT hold its brands. */
   catalogue_size: number | null;
-  /** How many of that catalogue we can name a brand for. The honest denominator. */
+  /** How many ASINs of theirs the backfill is checking -- capped at 1,000. */
+  in_scope: number | null;
+  /** How many of those we now have a brand for. The honest denominator. */
   identified: number | null;
-  last_seen_at: string;
+  /** When the rollup was last rebuilt; the backfill moves these numbers hourly. */
+  refreshed_at: string | null;
+  last_seen_at: string | null;
 }
 
 export interface NewListing {

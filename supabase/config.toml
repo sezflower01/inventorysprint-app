@@ -501,6 +501,9 @@ verify_jwt = false
 [functions.backfill-asin-brands]
 verify_jwt = false
 
+[functions.backfill-catalog-brands]
+verify_jwt = false
+
 [functions.classify-listing-brands]
 verify_jwt = false
 
