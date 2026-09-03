@@ -12,6 +12,25 @@ export interface SellerActivity {
   first_added_at: string;
 }
 
+/**
+ * One watched seller's CURRENT overlap with my brands -- state, not events.
+ *
+ * Deliberately separate from SellerActivity, which answers "what did they add
+ * recently". Merging the two is what let a detection date be read as a claim
+ * about when the seller started selling something.
+ */
+export interface SellerCatalogEntry {
+  seller_id: string;
+  marketplace: string;
+  seller_name: string | null;
+  matched_items: number;
+  /** Their full ASIN list length. We hold the list; we do NOT hold its brands. */
+  catalogue_size: number | null;
+  /** How many of that catalogue we can name a brand for. The honest denominator. */
+  identified: number | null;
+  last_seen_at: string;
+}
+
 export interface NewListing {
   id: string;
   watch_id: string;
@@ -96,6 +115,22 @@ const ELIGIBILITY_BATCH = 20;
 // quietly missing.
 const REVIEW_WINDOW_DAYS = 30;
 
+/**
+ * When baselines finished rebuilding after the 2026-08-22 to 2026-09-01
+ * seller-watch outage.
+ *
+ * detected_at is when THIS APP first saw an ASIN in a seller's catalogue, not
+ * when the seller began offering it. With a stale baseline those differ wildly
+ * -- verified against Keepa on 2026-09-03, a listing stamped 2026-09-01 had
+ * been sold by that seller since May. Measured: 1,517 matched detections in 30
+ * days, only 184 of them after this boundary. The other 1,333 are the outage
+ * unwinding.
+ *
+ * Detections after this date mean what they appear to mean. Everything before
+ * is still stored and still reachable via the toggle -- filtered, never hidden.
+ */
+export const DETECTION_TRUST_BOUNDARY = "2026-09-02T00:00:00.000Z";
+
 // Sourcing filter: only listings whose brand the user already carries.
 //
 // Matched in the database (see seller_new_listings_branded) rather than by
@@ -164,7 +199,10 @@ export function useSellerNewListings() {
   // whose additions fell outside the window would report a count that is
   // quietly wrong -- worse than none, because nothing about it looks wrong.
   const [sellerActivity, setSellerActivity] = useState<SellerActivity[]>([]);
+  const [sellerCatalog, setSellerCatalog] = useState<SellerCatalogEntry[]>([]);
   const [myBrandsOnly, setMyBrandsOnly] = useState(false);
+  /** Default true: show only detections whose dates are trustworthy. */
+  const [trustedDetectionsOnly, setTrustedDetectionsOnly] = useState(true);
   const [loading, setLoading] = useState(false);
   const [eligibility, setEligibility] = useState<Record<string, EligibilityStatus>>({});
   /** `${seller_id}|${marketplace}` -> seller_name, for listings to show their origin. */
@@ -310,12 +348,28 @@ export function useSellerNewListings() {
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const { data: act, error: actErr } = await (supabase as any)
-          .rpc("get_seller_new_listing_activity", { p_days: REVIEW_WINDOW_DAYS });
+          .rpc("get_seller_new_listing_activity", {
+            p_days: REVIEW_WINDOW_DAYS,
+            // null asks for everything; nothing is deleted either way.
+            p_since: trustedDetectionsOnly ? DETECTION_TRUST_BOUNDARY : null,
+          });
         if (actErr) throw actErr;
         setSellerActivity((act as SellerActivity[]) || []);
       } catch (e) {
         console.warn("[useSellerNewListings] seller activity failed", e);
         setSellerActivity([]);
+      }
+      // Independent of the window above -- the catalogue view has no date
+      // filter at all, so it must not inherit trustedDetectionsOnly.
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const { data: cat, error: catErr } = await (supabase as any)
+          .rpc("get_seller_brand_catalog");
+        if (catErr) throw catErr;
+        setSellerCatalog((cat as SellerCatalogEntry[]) || []);
+      } catch (e) {
+        console.warn("[useSellerNewListings] seller catalog failed", e);
+        setSellerCatalog([]);
       }
       setExcluded((excludedRows as unknown as NewListing[]) || []);
       setExcludedTotal(excludedCount ?? 0);
@@ -335,7 +389,7 @@ export function useSellerNewListings() {
     } finally {
       setLoading(false);
     }
-  }, [myBrandsOnly]);
+  }, [myBrandsOnly, trustedDetectionsOnly]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -485,9 +539,10 @@ export function useSellerNewListings() {
   }, [refresh]);
 
   return {
-    done, pending, excluded, sellerActivity, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, loading,
+    done, pending, excluded, sellerActivity, sellerCatalog, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, loading,
     pendingOlderTotal, reviewWindowDays: REVIEW_WINDOW_DAYS,
     myBrandsOnly, setMyBrandsOnly,
+    trustedDetectionsOnly, setTrustedDetectionsOnly,
     eligibility, sellerNames, deleteListings,
     deleteByStatus, refresh,
   };

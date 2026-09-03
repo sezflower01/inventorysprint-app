@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { SellerBrandList, type SellerBrandRow } from "./SellerBrandList";
+import { amazonListingUrl, amazonStorefrontUrl } from "./amazonUrls";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -17,7 +19,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Loader2, ExternalLink, Package, Search, Store, Trash2, ChevronDown } from "lucide-react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { useSellerNewListings, type NewListing } from "@/hooks/use-seller-new-listings";
+import { useSellerNewListings, DETECTION_TRUST_BOUNDARY, type NewListing } from "@/hooks/use-seller-new-listings";
 import EligibilityBadge from "@/components/common/EligibilityBadge";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
@@ -64,30 +66,6 @@ function formatFbaOffers(l: NewListing): string | null {
   return n === 1 ? "1 FBA seller" : `${n} FBA sellers`;
 }
 
-const MARKETPLACE_DOMAIN: Record<string, string> = {
-  US: "amazon.com", CA: "amazon.ca", MX: "amazon.com.mx", BR: "amazon.com.br",
-  UK: "amazon.co.uk", GB: "amazon.co.uk", DE: "amazon.de", FR: "amazon.fr",
-  IT: "amazon.it", ES: "amazon.es", JP: "amazon.co.jp", IN: "amazon.in",
-};
-function amazonListingUrl(asin: string, marketplace: string): string {
-  const host = MARKETPLACE_DOMAIN[marketplace.toUpperCase()] || "amazon.com";
-  return `https://www.${host}/dp/${asin}`;
-}
-
-/**
- * The seller's STOREFRONT (their listings), not their profile page.
- *
- * Two shapes exist in this codebase: send-email uses `/sp?seller=` (the
- * profile, with feedback and business details) and OffersTable uses
- * merchant-items (their actual catalogue). From a new-listing row the useful
- * destination is what else they are selling, so this follows OffersTable --
- * but marketplace-aware, where that one hardcodes amazon.com and a US
- * marketplace id.
- */
-function amazonStorefrontUrl(sellerId: string, marketplace: string): string {
-  const host = MARKETPLACE_DOMAIN[marketplace.toUpperCase()] || "amazon.com";
-  return `https://www.${host}/s?i=merchant-items&me=${encodeURIComponent(sellerId)}`;
-}
 
 /**
  * Turn a stored disqualified_reason into something a person can act on.
@@ -243,7 +221,7 @@ function DeleteMatchingExcludedWords({ onDone }: { onDone: () => void }) {
 }
 
 export default function NewListingsPanel() {
-  const { done, pending, excluded, sellerActivity, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, pendingOlderTotal, reviewWindowDays, myBrandsOnly, setMyBrandsOnly, loading, eligibility, sellerNames, deleteListings, deleteByStatus, refresh } = useSellerNewListings();
+  const { done, pending, excluded, sellerActivity, sellerCatalog, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, pendingOlderTotal, reviewWindowDays, myBrandsOnly, setMyBrandsOnly, trustedDetectionsOnly, setTrustedDetectionsOnly, loading, eligibility, sellerNames, deleteListings, deleteByStatus, refresh } = useSellerNewListings();
   // Lands on the review list. Was "done", a tab frozen at 6 rows: its statuses
   // were written only by the source worker deleted on 2026-08-19, and a grep of
   // every edge function and the whole frontend on 2026-09-02 found nothing that
@@ -380,10 +358,22 @@ export default function NewListingsPanel() {
             */}
             {/* Replaces "Done". Those 6 rows remain in the database; nothing
                 can ever join them, so they no longer get a tab of their own.
-                This answers a question that can still change: which watched
-                sellers are adding listings in MY brands, and how recently. */}
+                Named "detections", not "activity". detected_at is when WE
+                first saw an ASIN in a seller's catalogue -- not when the seller
+                started offering it. The detector diffs their current list
+                against a baseline we stored, so a stale or lost baseline
+                reports long-standing listings as new. Confirmed against Keepa
+                on 2026-09-03: a listing stamped 2026-09-01 had been sold by
+                that seller since May. Calling it "activity" asserted seller
+                behaviour the data cannot support. */}
+            <TabsTrigger value="catalog" className="gap-2">
+              Seller catalogue
+              {sellerCatalog.length > 0 && (
+                <Badge variant="secondary">{sellerCatalog.length.toLocaleString()}</Badge>
+              )}
+            </TabsTrigger>
             <TabsTrigger value="sellers" className="gap-2">
-              Seller activity
+              New since 2 Sep
               {sellerActivity.length > 0 && (
                 <Badge variant="secondary">{sellerActivity.length.toLocaleString()}</Badge>
               )}
@@ -409,93 +399,103 @@ export default function NewListingsPanel() {
             </TabsTrigger>
           </TabsList>
 
-          {/* SELLER ACTIVITY — replaces the frozen "Done" tab.
-              Which watched sellers are adding listings in MY brands, and how
-              recently. Sorted by most-recently-active rather than by volume:
-              the useful question is who is moving NOW, not who has the largest
-              all-time pile. */}
+          {/* TWO TABS, TWO QUESTIONS -- deliberately not merged.
+
+              "Seller catalogue" is STATE: what this seller sells right now
+              that matches my brands. No date filter.
+
+              "New since 2 Sep" is EVENTS: what they genuinely added after the
+              re-baselining finished.
+
+              These were one tab called "Seller activity", and that is exactly
+              how it went wrong -- a detection date got read as a claim about
+              when the seller started selling. Confirmed against Keepa on
+              2026-09-03: a listing stamped 2026-09-01 had been sold by that
+              seller since May. */}
+          <TabsContent value="catalog" className="mt-3">
+            {loading ? (
+              <div className="flex items-center justify-center gap-2 py-8 text-xs text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>Loading seller catalogues…</span>
+              </div>
+            ) : sellerCatalog.length === 0 ? (
+              <div className="py-8 text-center text-xs text-muted-foreground">
+                No watched seller currently lists anything matching your brands.
+              </div>
+            ) : (
+              <>
+                <p className="mb-2 text-xs text-muted-foreground">
+                  What each watched seller is selling <strong>right now</strong> that matches
+                  your brands — no date filter. Limited to ASINs we have identified: we store
+                  every seller's full ASIN list, but not the brand of each one, so an item we
+                  have never looked up cannot be matched. Each row shows that denominator.
+                </p>
+                <SellerBrandList
+                  since={null}
+                  rows={sellerCatalog.map((c): SellerBrandRow => ({
+                    seller_id: c.seller_id,
+                    marketplace: c.marketplace,
+                    seller_name: c.seller_name,
+                    count: c.matched_items,
+                    catalogueSize: c.catalogue_size,
+                    identified: c.identified,
+                    lastAt: c.last_seen_at,
+                  }))}
+                />
+              </>
+            )}
+          </TabsContent>
+
           <TabsContent value="sellers" className="mt-3">
             {loading ? (
               <div className="flex items-center justify-center gap-2 py-8 text-xs text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                <span>Loading seller activity…</span>
+                <span>Loading detections…</span>
               </div>
             ) : sellerActivity.length === 0 ? (
               <div className="py-8 text-center text-xs text-muted-foreground">
-                No watched seller has added a listing in your brands in the last{" "}
-                {reviewWindowDays} days.
+                {trustedDetectionsOnly
+                  ? "No watched seller has added anything in your brands since 2 September."
+                  : `Nothing first seen in your brands from a watched seller in the last ${reviewWindowDays} days.`}
               </div>
             ) : (
-              <div className="divide-y rounded-md border">
-                {sellerActivity.map((a) => {
-                  const key = `${a.seller_id}|${a.marketplace}`;
-                  const theirs = pending.filter(
-                    (l) => l.seller_id === a.seller_id && l.marketplace === a.marketplace,
-                  );
-                  return (
-                    <Collapsible key={key}>
-                      <CollapsibleTrigger asChild>
-                        <button
-                          type="button"
-                          className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left hover:bg-muted/50"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-sm font-medium">
-                              {a.seller_name || a.seller_id}
-                            </div>
-                            <div className="text-xs text-muted-foreground">
-                              {a.listings_added.toLocaleString()} listing
-                              {a.listings_added === 1 ? "" : "s"} in your brands
-                              {" · last "}
-                              {new Date(a.last_added_at).toLocaleString()}
-                              {" · "}{a.marketplace}
-                            </div>
-                          </div>
-                          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-                        </button>
-                      </CollapsibleTrigger>
-                      <CollapsibleContent>
-                        <div className="border-t bg-muted/20 px-3 py-2 space-y-1">
-                          {theirs.length === 0 ? (
-                            /* The count comes from the whole table; this list
-                               comes from the loaded page. A seller whose rows
-                               fall outside it shows its true count and says so,
-                               rather than appearing to have none. */
-                            <p className="text-xs text-muted-foreground">
-                              Not in the currently loaded page — open the review tab to see them.
-                            </p>
-                          ) : (
-                            theirs.map((l) => (
-                              <div key={l.id} className="flex items-center gap-2 text-xs">
-                                <a
-                                  href={amazonListingUrl(l.asin, l.marketplace)}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-primary hover:underline shrink-0"
-                                >
-                                  {l.asin}
-                                </a>
-                                <span className="truncate">{l.title || "(no title)"}</span>
-                                <span className="ml-auto shrink-0 text-muted-foreground">
-                                  {new Date(l.detected_at).toLocaleDateString()}
-                                </span>
-                              </div>
-                            ))
-                          )}
-                          <a
-                            href={amazonStorefrontUrl(a.seller_id, a.marketplace)}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 pt-1 text-xs text-primary hover:underline"
-                          >
-                            <Store className="h-3 w-3" /> Open storefront
-                          </a>
-                        </div>
-                      </CollapsibleContent>
-                    </Collapsible>
-                  );
-                })}
-              </div>
+              <>
+                <div className="mb-2 flex items-start justify-between gap-3">
+                  <p className="text-xs text-muted-foreground">
+                    {trustedDetectionsOnly ? (
+                      <>
+                        Genuinely new: added by the seller <strong>after 2 September</strong>,
+                        once every baseline had been rebuilt. Dates here mean what they say.
+                      </>
+                    ) : (
+                      <>
+                        Showing everything, <strong>including the backlog</strong>. Seller watch
+                        was dead 22 Aug – 1 Sep, so detections before 2 September are stale
+                        baselines unwinding — a long-standing listing shows a recent date.
+                      </>
+                    )}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 shrink-0 text-xs"
+                    onClick={() => setTrustedDetectionsOnly(!trustedDetectionsOnly)}
+                  >
+                    {trustedDetectionsOnly ? "Include backlog" : "Confirmed new only"}
+                  </Button>
+                </div>
+                <SellerBrandList
+                  since={trustedDetectionsOnly ? DETECTION_TRUST_BOUNDARY : null}
+                  rows={sellerActivity.map((a): SellerBrandRow => ({
+                    seller_id: a.seller_id,
+                    marketplace: a.marketplace,
+                    seller_name: a.seller_name,
+                    count: a.listings_added,
+                    lastAt: a.last_added_at,
+                  }))}
+                />
+              </>
             )}
           </TabsContent>
 
