@@ -64,6 +64,10 @@ function SellerRow({ row, since }: { row: SellerBrandRow; since: string | null }
         p_seller_id: row.seller_id,
         p_marketplace: row.marketplace,
         p_since: since,
+        // The backfill caps each seller at 1,000 ASINs, so 1,000 is the most
+        // this can ever return. The function's own default is 500, which
+        // silently truncated a 737-item seller.
+        p_limit: 1000,
       });
       if (error) throw error;
       setItems((data as Item[]) || []);
