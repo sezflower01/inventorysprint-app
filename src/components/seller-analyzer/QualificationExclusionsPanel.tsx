@@ -36,7 +36,11 @@ function CategoryToggles({
   setExcluded: (kind: ExclusionKind, values: string[], excluded: boolean) => Promise<void>;
 }) {
   const { toast } = useToast();
-  const excludedValues = new Set(terms.filter((t) => t.kind === "category").map((t) => t.value));
+  // Muted shared terms are excluded from this set deliberately: the user
+  // opted out of them, so the toggle must read as OFF.
+  const excludedValues = new Set(
+    terms.filter((t) => t.kind === "category" && !t.muted).map((t) => t.value),
+  );
   const countByValue = new Map(counts.map((c) => [c.value, c.n]));
 
   const guard = (p: Promise<unknown>) =>
@@ -118,8 +122,12 @@ function ExclusionList({
   const [draft, setDraft] = useState("");
   const { toast } = useToast();
 
+  // `mine` keeps muted rows so they can be shown and restored; `excluded` is
+  // what is actually IN EFFECT, which is what the shortlist below reasons
+  // about.
   const mine = terms.filter((t) => t.kind === kind);
-  const excluded = new Set(mine.map((t) => t.value));
+  const active = mine.filter((t) => !t.muted);
+  const excluded = new Set(active.map((t) => t.value));
   // Values present in the listings that are NOT yet excluded — the honest
   // shortlist, since a rule for something you have none of does nothing.
   const available = suggestions.filter((s) => !excluded.has(s.value)).slice(0, 12);
@@ -136,7 +144,10 @@ function ExclusionList({
     <div className="space-y-2">
       <div className="flex items-baseline justify-between gap-2">
         <h3 className="text-sm font-medium">{title}</h3>
-        <span className="text-xs text-muted-foreground">{mine.length} excluded</span>
+        <span className="text-xs text-muted-foreground">
+          {active.length} excluded
+          {mine.length > active.length && ` · ${mine.length - active.length} hidden`}
+        </span>
       </div>
       <p className="text-xs text-muted-foreground">{blurb}</p>
 
@@ -363,15 +374,32 @@ function ApplyToExisting({ termCount }: { termCount: number }) {
  * contains-"unknown" rule would wrongly reject it.
  */
 export default function QualificationExclusionsPanel() {
-  const { terms, categoryCounts, brandCounts, loading, busy, add, remove, setExcluded, impactOf } =
-    useQualificationExclusions();
+  const {
+    terms, categoryCounts, brandCounts, loading, busy,
+    isAdmin, shareNew, setShareNew,
+    add, remove, setExcluded, impactOf,
+  } = useQualificationExclusions();
   const shared = { terms, busy, add, remove, impactOf };
   const excludedCategoryValues = new Set(
-    terms.filter((t) => t.kind === "category").map((t) => t.value),
+    terms.filter((t) => t.kind === "category" && !t.muted).map((t) => t.value),
   );
 
   return (
     <Card>
+      {isAdmin && (
+        <div className="border-b bg-muted/30 px-6 py-2">
+          <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={shareNew}
+              onChange={(e) => setShareNew(e.target.checked)}
+              className="h-3 w-3"
+            />
+            Share exclusions you add here with all users. They take effect
+            immediately and each user can opt out individually.
+          </label>
+        </div>
+      )}
       <CardContent className="p-4 space-y-5">
         <div>
           <h2 className="text-sm font-semibold">Never auto-search these</h2>
@@ -430,7 +458,7 @@ export default function QualificationExclusionsPanel() {
                 {...shared}
               />
               <ApplyToExisting
-                termCount={terms.filter((t) => t.kind === "title_keyword").length}
+                termCount={terms.filter((t) => t.kind === "title_keyword" && !t.muted).length}
               />
             </div>
           </>

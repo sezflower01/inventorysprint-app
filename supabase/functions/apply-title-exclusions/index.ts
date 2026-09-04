@@ -82,12 +82,14 @@ Deno.serve(async (req) => {
     const kinds = requested.filter((k) => k === 'title_keyword' || k === 'brand');
     if (!kinds.length) return json({ error: 'kinds must include title_keyword and/or brand' }, 400);
 
-    const { data: termRows, error: termErr } = await admin
-      .from('source_excluded_terms')
-      .select('kind, value, label')
-      .eq('user_id', user.id)
-      .in('kind', kinds);
+    // Same effective set the seller-watch worker uses: own + shared - muted.
+    // Applying only the user's own terms here would make "apply to existing
+    // listings" quietly weaker than the live filter.
+    const { data: allTerms, error: termErr } = await admin
+      .rpc('get_effective_excluded_terms_for', { p_user: user.id });
     if (termErr) return json({ error: termErr.message }, 500);
+    const termRows = ((allTerms ?? []) as Array<{ kind: string; value: string; label: string | null }>)
+      .filter((t) => kinds.includes(t.kind as typeof kinds[number]));
 
     // `label` is what the user typed and is what the reason should name; `value`
     // is the normalised form. The matcher normalises either way, so preferring

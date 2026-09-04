@@ -677,10 +677,13 @@ Deno.serve(async (req) => {
         allowNeedsApproval = cfg?.search_needs_approval !== false;
         notifyOverride = cfg?.notify_email?.trim() || null;
 
+        // Effective exclusions: the user's own PLUS the shared catalogue,
+        // minus anything they muted. Reading source_excluded_terms directly
+        // would silently ignore every shared category, so the panel and this
+        // worker would disagree about what is excluded -- and the worker is
+        // the one that actually decides.
         const { data: terms } = await admin
-          .from('source_excluded_terms')
-          .select('kind, value')
-          .eq('user_id', uid);
+          .rpc('get_effective_excluded_terms_for', { p_user: uid });
         // Each kind is assigned ONLY when it actually has entries.
         //
         // The outer `terms?.length` guard was not enough. qualifyListing reads
