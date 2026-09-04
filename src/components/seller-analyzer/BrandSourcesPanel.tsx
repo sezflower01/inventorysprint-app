@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { Loader2, Plus, Trash2, ExternalLink, Pencil, Check, X } from "lucide-react";
+import {
+  Loader2, Plus, Trash2, ExternalLink, Pencil, Check, X, Globe, EyeOff, Eye,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -36,8 +38,8 @@ const MAX_SHOWN = 120;
 
 export function BrandSourcesPanel() {
   const {
-    retailers, sourceMap, loading, error,
-    addRetailer, updateRetailer, deleteRetailer,
+    retailers, sourceMap, isAdmin, loading, error,
+    addRetailer, shareRetailer, updateRetailer, deleteRetailer, setRetailerMuted,
     attachBrands, detachBrand, setNote,
   } = useBrandSources();
 
@@ -55,6 +57,11 @@ export function BrandSourcesPanel() {
   const [target, setTarget] = useState<string>("");
   const [note, setNoteDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  // Defaults ON for admins. Finding new shops while sourcing is the normal
+  // case, and the whole point of the shared catalogue is that those reach
+  // users without a separate publishing step. A niche supplier worth keeping
+  // private is one unticked box away.
+  const [shareNew, setShareNew] = useState(true);
 
   useEffect(() => {
     void (async () => {
@@ -155,7 +162,7 @@ export function BrandSourcesPanel() {
                         type="button" size="sm" variant="ghost" className="h-7 px-2"
                         disabled={busy || !editLabel.trim() || !editTemplate.trim()}
                         onClick={() => void run(async () => {
-                          await updateRetailer(r.id, editLabel, editTemplate);
+                          await updateRetailer(r.id, editLabel, editTemplate, r.scope);
                           setEditing(null);
                         }, "Shop updated")}
                       >
@@ -170,7 +177,15 @@ export function BrandSourcesPanel() {
                     </>
                   ) : (
                     <>
-                      <span className="w-[130px] shrink-0 truncate font-medium">{r.label}</span>
+                      <span className="w-[130px] shrink-0 truncate font-medium">
+                        {r.label}
+                        {r.scope === "catalog" && (
+                          <Globe
+                            className="ml-1 inline h-3 w-3 text-muted-foreground"
+                            aria-label="Shared with all users"
+                          />
+                        )}
+                      </span>
                       <span className="flex-1 truncate font-mono text-[11px] text-muted-foreground">
                         {retailerHost(r.url_template)} · {describeTemplate(r.url_template)}
                       </span>
@@ -185,23 +200,67 @@ export function BrandSourcesPanel() {
                       >
                         <ExternalLink className="h-3.5 w-3.5" />
                       </a>
+                      {/* Opting out of a shared shop, rather than deleting it
+                          for everyone. A non-admin has no other escape from a
+                          catalogue entry that does not suit them. */}
+                      {r.scope === "catalog" && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          title={r.muted
+                            ? `Show ${r.label} again`
+                            : `Hide ${r.label} from your listings`}
+                          onClick={() => void run(
+                            () => setRetailerMuted(r.id, !r.muted),
+                            r.muted ? `${r.label} restored` : `${r.label} hidden`,
+                          )}
+                          className="rounded p-1 text-muted-foreground hover:text-foreground"
+                        >
+                          {r.muted
+                            ? <Eye className="h-3.5 w-3.5" />
+                            : <EyeOff className="h-3.5 w-3.5" />}
+                        </button>
+                      )}
+                      {/* Publish a shop found later. RLS refuses this for
+                          non-admins, so the button is a shortcut, not the
+                          permission check. */}
+                      {isAdmin && r.scope === "user" && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          title={`Share ${r.label} with all users`}
+                          onClick={() => void run(
+                            () => shareRetailer(r),
+                            `${r.label} shared with all users`,
+                          )}
+                          className="rounded p-1 text-muted-foreground hover:text-primary"
+                        >
+                          <Globe className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                      {(r.scope === "user" || isAdmin) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditing(r.id);
+                            setEditLabel(r.label);
+                            setEditTemplate(r.url_template);
+                          }}
+                          className="rounded p-1 text-muted-foreground hover:text-foreground"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                       <button
                         type="button"
-                        onClick={() => {
-                          setEditing(r.id);
-                          setEditLabel(r.label);
-                          setEditTemplate(r.url_template);
-                        }}
-                        className="rounded p-1 text-muted-foreground hover:text-foreground"
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busy}
-                        title={`Remove ${r.label} and detach its ${count} brand${count === 1 ? "" : "s"}`}
+                        disabled={busy || (r.scope === "catalog" && !isAdmin)}
+                        title={r.scope === "catalog"
+                          ? (isAdmin
+                              ? `Remove ${r.label} from the shared catalogue for ALL users`
+                              : `${r.label} is shared by the platform — hide it instead`)
+                          : `Remove ${r.label} and detach its ${count} brand${count === 1 ? "" : "s"}`}
                         onClick={() => void run(
-                          () => deleteRetailer(r.id),
+                          () => deleteRetailer(r.id, r.scope),
                           `${r.label} removed`,
                         )}
                         className="rounded p-1 text-muted-foreground hover:text-destructive"
@@ -220,7 +279,7 @@ export function BrandSourcesPanel() {
           onSubmit={(e) => {
             e.preventDefault();
             void run(async () => {
-              await addRetailer(label, template);
+              await addRetailer(label, template, isAdmin && shareNew);
               setLabel(""); setTemplate("");
             }, "Shop added");
           }}
@@ -243,6 +302,22 @@ export function BrandSourcesPanel() {
             <Plus className="h-3.5 w-3.5" /> Add
           </Button>
         </form>
+
+        {/* Admins publish by default. Discovering shops while sourcing is
+            ongoing, not a setup task, so the shared catalogue only stays
+            current if sharing is the default path rather than a second step. */}
+        {isAdmin && (
+          <label className="flex items-center gap-2 text-[11px] text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={shareNew}
+              onChange={(e) => setShareNew(e.target.checked)}
+              className="h-3 w-3"
+            />
+            Share this shop with all users — they see it immediately, with no
+            discount codes and no link to your brands.
+          </label>
+        )}
 
         {/* The preview is the explanation. Describing placeholders in prose
             never lands as well as showing the URL that will actually open. */}
@@ -280,8 +355,10 @@ export function BrandSourcesPanel() {
               className="h-8 rounded border bg-background px-2 text-xs"
             >
               <option value="">Choose a shop…</option>
-              {retailers.map((r) => (
-                <option key={r.id} value={r.id}>{r.label}</option>
+              {retailers.filter((r) => !r.muted).map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.label}{r.scope === "catalog" ? " (shared)" : ""}
+                </option>
               ))}
             </select>
             <Input
@@ -294,7 +371,12 @@ export function BrandSourcesPanel() {
               type="button" size="sm" className="h-8 shrink-0"
               disabled={busy || !target || picked.size === 0}
               onClick={() => void run(async () => {
-                await attachBrands([...picked], target, note);
+                await attachBrands(
+                  [...picked],
+                  target,
+                  retailers.find((r) => r.id === target)?.scope ?? "user",
+                  note,
+                );
                 setPicked(new Set()); setNoteDraft("");
               }, `${picked.size} brand${picked.size === 1 ? "" : "s"} attached`)}
             >

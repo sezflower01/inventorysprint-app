@@ -29,6 +29,8 @@ export interface BrandSource {
   brand: string;
   label: string;
   template: string;
+  /** 'catalog' = a shop shared by the platform; 'user' = one you added. */
+  scope?: "user" | "catalog";
   note: string | null;
 }
 
