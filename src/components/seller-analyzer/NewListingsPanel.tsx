@@ -2,6 +2,8 @@ import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SellerBrandList, type SellerBrandRow } from "./SellerBrandList";
+import { SourceButtons } from "./SourceButtons";
+import { useBrandSources } from "@/hooks/use-brand-sources";
 import { amazonListingUrl, amazonStorefrontUrl } from "./amazonUrls";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -36,11 +38,10 @@ import { supabase } from "@/integrations/supabase/client";
  * Opens in a new tab. rel="noopener" matters: without it the opened page gets a
  * handle back to this one via window.opener.
  */
-function googleSearchUrl(title: string | null): string | null {
-  const q = (title ?? "").trim();
-  if (!q) return null;
-  return `https://www.google.com/search?q=${encodeURIComponent(q)}`;
-}
+/* googleSearchUrl moved to @/lib/brandSources -- SourceButtons owns the
+   fallback now, so the panel no longer builds its own search URL. The note
+   above is kept because the title-over-UPC finding still explains WHY the
+   fallback searches the title. */
 
 /** Amazon sell price, captured during detection by a Keepa call that already runs. */
 function formatAmazonPrice(l: NewListing): string | null {
@@ -221,6 +222,7 @@ function DeleteMatchingExcludedWords({ onDone }: { onDone: () => void }) {
 }
 
 export default function NewListingsPanel() {
+  const { sourceMap } = useBrandSources();
   const { done, pending, excluded, sellerActivity, sellerCatalog, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, pendingOlderTotal, reviewWindowDays, myBrandsOnly, setMyBrandsOnly, trustedDetectionsOnly, setTrustedDetectionsOnly, loading, eligibility, sellerNames, deleteListings, deleteByStatus, refresh } = useSellerNewListings();
   // Lands on the review list. Was "done", a tab frozen at 6 rows: its statuses
   // were written only by the source worker deleted on 2026-08-19, and a grep of
@@ -432,6 +434,7 @@ export default function NewListingsPanel() {
                   <em> sample</em> are drawn from a slice of a larger catalogue, not all of it.
                 </p>
                 <SellerBrandList
+                  sourceMap={sourceMap}
                   since={null}
                   rows={sellerCatalog.map((c): SellerBrandRow => ({
                     seller_id: c.seller_id,
@@ -488,6 +491,7 @@ export default function NewListingsPanel() {
                   </Button>
                 </div>
                 <SellerBrandList
+                  sourceMap={sourceMap}
                   since={trustedDetectionsOnly ? DETECTION_TRUST_BOUNDARY : null}
                   rows={sellerActivity.map((a): SellerBrandRow => ({
                     seller_id: a.seller_id,
@@ -839,27 +843,15 @@ export default function NewListingsPanel() {
                       {" "}({listing.marketplace})
                     </div>
                   </div>
-                  {/* Manual search, replacing the automated pipeline. Title
-                      only -- see googleSearchUrl. Disabled rather than hidden
-                      when there is no title yet, so the row does not silently
-                      lose its action: SP-API sometimes resolves the title a
-                      cycle after detection. */}
-                  {googleSearchUrl(listing.title) ? (
-                    <Button asChild type="button" size="sm" variant="outline" className="shrink-0">
-                      <a
-                        href={googleSearchUrl(listing.title)!}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        title="Search Google for this product title"
-                      >
-                        <Search className="h-3.5 w-3.5 mr-1" /> Search on Google
-                      </a>
-                    </Button>
-                  ) : (
-                    <span className="text-xs text-muted-foreground shrink-0" title="No title captured yet">
-                      No title yet
-                    </span>
-                  )}
+                  {/* Direct links to where this brand is actually bought,
+                      falling back to Google when none are saved. Google is
+                      never removed -- a direct link can come up empty, and it
+                      is the backstop for that. */}
+                  <SourceButtons
+                    brand={listing.brand}
+                    title={listing.title}
+                    sourceMap={sourceMap}
+                  />
 
                   {/* Single-row delete. No confirm: one row is cheap to lose and
                       the bulk path is where an accident would actually hurt. */}

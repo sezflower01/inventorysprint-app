@@ -28,6 +28,7 @@ import SourceRetailersPanel from "@/components/seller-analyzer/SourceRetailersPa
 import ExcludedDomainsPanel from "@/components/seller-analyzer/ExcludedDomainsPanel";
 import QualificationExclusionsPanel from "@/components/seller-analyzer/QualificationExclusionsPanel";
 import WatchedBrandsPanel from "@/components/seller-analyzer/WatchedBrandsPanel";
+import { BrandSourcesPanel } from "@/components/seller-analyzer/BrandSourcesPanel";
 import BulkAddPanel from "@/components/seller-analyzer/BulkAddPanel";
 import { Helmet } from "react-helmet-async";
 
@@ -416,6 +417,10 @@ export default function SellerAnalyzer() {
             <ExcludedDomainsPanel />
 
             <WatchedBrandsPanel />
+
+            {/* Directly under the brand list, because attaching a shop to a
+                brand only makes sense next to the brands themselves. */}
+            <BrandSourcesPanel />
 
             <QualificationExclusionsPanel />
 

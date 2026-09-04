@@ -4,6 +4,8 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Badge } from "@/components/ui/badge";
 import { supabase } from "@/integrations/supabase/client";
 import { amazonListingUrl, amazonStorefrontUrl } from "./amazonUrls";
+import { SourceButtons } from "./SourceButtons";
+import type { BrandSourceMap } from "@/lib/brandSources";
 
 /**
  * One seller row, expandable to the items of theirs that match my brands.
@@ -47,7 +49,9 @@ interface Item {
   still_listed: boolean;
 }
 
-function SellerRow({ row, since }: { row: SellerBrandRow; since: string | null }) {
+function SellerRow({ row, since, sourceMap }: {
+  row: SellerBrandRow; since: string | null; sourceMap: BrandSourceMap;
+}) {
   const [items, setItems] = useState<Item[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -157,6 +161,14 @@ function SellerRow({ row, since }: { row: SellerBrandRow; since: string | null }
               <span className="ml-auto shrink-0 text-muted-foreground">
                 {it.detected_at ? new Date(it.detected_at).toLocaleDateString() : "in catalogue"}
               </span>
+              {/* Where to buy it. Same component as the To review tab, so a
+                  brand cannot offer different links depending on the tab. */}
+              <SourceButtons
+                brand={it.brand}
+                title={it.title}
+                sourceMap={sourceMap}
+                size="xs"
+              />
             </div>
           ))}
           <a
@@ -176,14 +188,21 @@ function SellerRow({ row, since }: { row: SellerBrandRow; since: string | null }
 export function SellerBrandList({
   rows,
   since,
+  sourceMap,
 }: {
   rows: SellerBrandRow[];
   since: string | null;
+  sourceMap: BrandSourceMap;
 }) {
   return (
     <div className="divide-y rounded-md border">
       {rows.map((r) => (
-        <SellerRow key={`${r.seller_id}|${r.marketplace}`} row={r} since={since} />
+        <SellerRow
+          key={`${r.seller_id}|${r.marketplace}`}
+          row={r}
+          since={since}
+          sourceMap={sourceMap}
+        />
       ))}
     </div>
   );
