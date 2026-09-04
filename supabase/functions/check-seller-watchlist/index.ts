@@ -644,14 +644,19 @@ Deno.serve(async (req) => {
       const myBrandsExact = new Set<string>();
       const myBrandsPrefix: string[] = [];
       try {
+        // Effective set: their own brands plus the shared catalogue, minus
+        // muted. This gates PRICE CAPTURE, so reading a narrower set here
+        // would quietly skip Keepa lookups for listings the rest of the app
+        // considers matches -- the row would show with no price and nothing
+        // would say why.
+        //
+        // 'ignore' is filtered inside the function, so it is not re-checked
+        // here; one definition of "my brands", not two.
         const { data: ub } = await admin
-          .from('user_brands')
-          .select('brand, match_mode, status')
-          .eq('user_id', group[0].user_id);
+          .rpc('get_effective_brands_for', { p_user: group[0].user_id });
         for (const b of ub || []) {
           const name = String(b?.brand ?? '').trim().toLowerCase();
           if (!name) continue;
-          if (String(b?.status ?? '') === 'ignore') continue;
           if (String(b?.match_mode ?? '') === 'prefix') myBrandsPrefix.push(name);
           else myBrandsExact.add(name);
         }

@@ -801,6 +801,30 @@ Deno.serve(async (req) => {
       console.warn('Assignment backfill error:', assignError.message);
     }
 
+    // Brands are a PROJECTION of inventory, so they are refreshed where
+    // inventory changes rather than on a schedule of their own -- anywhere
+    // else and the two drift.
+    //
+    // Nothing called this before today. refresh_user_brands() is SECURITY
+    // INVOKER and needs auth.uid(), which a service-role job does not have, so
+    // every brand list in the database had been filled by hand. That is why a
+    // new account looked as though it needed someone else's brands: its own
+    // were derivable from its own stock all along, and simply never derived.
+    //
+    // Non-fatal on purpose. A failed brand refresh must not fail an inventory
+    // sync that otherwise succeeded; the next sync retries it.
+    try {
+      const { data: brandRows, error: brandErr } = await supabase
+        .rpc('refresh_user_brands_for', { p_user: user.id });
+      if (brandErr) {
+        console.warn('Brand refresh failed:', brandErr.message);
+      } else {
+        console.log(`Brand refresh complete: ${brandRows ?? 0} rows`);
+      }
+    } catch (brandError: any) {
+      console.warn('Brand refresh error:', brandError.message);
+    }
+
     // Trigger full merchant listings sync to capture ALL active listings (FBA + FBM)
     // This ensures the inventory table includes items the FBA Inventory API doesn't return
     let merchantListingsCount = 0;

@@ -30,12 +30,18 @@ import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 
 type Row = {
+  /** NULL for the user's own rows; the catalogue row id for shared ones. */
+  id: string | null;
   brand: string;
   asin_count: number;
   unit_count: number;
   source: "inventory" | "manual";
   match_mode: "exact" | "prefix";
   status: string | null;
+  /** 'catalog' rows come from the shared list and belong to no user. */
+  scope: "user" | "catalog";
+  /** Only meaningful for catalog rows: this user opted out of it. */
+  muted: boolean;
 };
 
 export default function WatchedBrandsPanel() {
@@ -44,25 +50,63 @@ export default function WatchedBrandsPanel() {
   const [loading, setLoading] = useState(true);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   const load = useCallback(async () => {
     if (!user) return;
     setLoading(true);
-    const { data, error } = await supabase
-      .from("user_brands")
-      .select("brand, asin_count, unit_count, source, match_mode, status")
-      .eq("user_id", user.id)
-      .order("asin_count", { ascending: false })
-      .limit(2000);
+    // Own brands UNION the shared catalogue MINUS muted. Reading user_brands
+    // directly would show a narrower list than the matcher actually uses, so
+    // a listing could match on a brand the panel never mentioned.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const sb = supabase as any;
+    const [{ data, error }, { data: admin }] = await Promise.all([
+      sb.rpc("get_effective_brands"),
+      sb.rpc("has_role", { _user_id: user.id, _role: "admin" }),
+    ]);
     if (error) console.warn("[watched-brands]", error.message);
-    setRows((data ?? []) as Row[]);
+    setIsAdmin(admin === true);
+    setRows(((data ?? []) as Row[]).map((r) => ({
+      ...r,
+      source: r.source ?? "inventory",
+      scope: r.scope === "catalog" ? "catalog" : "user",
+      muted: r.muted === true,
+      asin_count: r.asin_count ?? 0,
+      unit_count: r.unit_count ?? 0,
+    })).sort((a, b) => b.asin_count - a.asin_count));
     setLoading(false);
   }, [user]);
 
+  /** Opt out of a shared brand, or put it back. Never deletes it for others. */
+  const setBrandMuted = async (r: Row, muted: boolean) => {
+    if (!user || !r.id) return;
+    setBusy(true);
+    const q = supabase.from("user_catalog_mutes");
+    const { error } = muted
+      ? await q.upsert({ user_id: user.id, kind: "brand", target_id: r.id },
+                       { onConflict: "user_id,kind,target_id" })
+      : await q.delete().eq("user_id", user.id).eq("kind", "brand").eq("target_id", r.id);
+    setBusy(false);
+    if (error) { toast.error(error.message); return; }
+    void load();
+  };
+
+  /** Publish one of your own brands to every user. Admin-only via RLS. */
+  const publishBrand = async (r: Row) => {
+    setBusy(true);
+    const { error } = await supabase.from("catalog_brands")
+      .insert({ brand: r.brand, match_mode: r.match_mode });
+    setBusy(false);
+    if (error) { toast.error(error.message); return; }
+    toast.success(`${r.brand} shared with all users`);
+    void load();
+  };
+
   useEffect(() => { void load(); }, [load]);
 
-  const watched = rows.filter((r) => (r.status ?? "") !== "ignore");
-  const ignored = rows.filter((r) => (r.status ?? "") === "ignore");
+  const watched = rows.filter((r) => (r.status ?? "") !== "ignore" && !r.muted);
+  const ignored = rows.filter((r) => (r.status ?? "") === "ignore" || r.muted);
+  const sharedCount = rows.filter((r) => r.scope === "catalog" && !r.muted).length;
 
   const add = async () => {
     const name = draft.trim();
@@ -131,9 +175,11 @@ export default function WatchedBrandsPanel() {
       <div>
         <div className="text-sm font-medium">Watched Brands</div>
         <div className="text-xs text-muted-foreground">
-          {watched.length} watched. A new listing from a watched seller is checked against
-          these automatically and emailed to you if it matches. Brands you stock are added
-          for you; type any others below, including ones you have never carried.
+          {watched.length} watched{sharedCount > 0 && `, ${sharedCount} of them shared`}. A new
+          listing from a watched seller is checked against these automatically and emailed to
+          you if it matches. Brands you stock are added for you from your own inventory; shared
+          ones come from the platform and can be switched off individually; type any others
+          below, including ones you have never carried.
         </div>
       </div>
 
@@ -150,7 +196,12 @@ export default function WatchedBrandsPanel() {
             >
               <span className="font-medium">{r.brand}</span>
               {r.asin_count > 0 && <span className="text-muted-foreground">· {r.asin_count}</span>}
-              {r.source === "manual" && (
+              {r.scope === "catalog" && (
+                <Badge variant="secondary" className="h-4 px-1 py-0 text-[9px]" title="Shared with all users">
+                  shared
+                </Badge>
+              )}
+              {r.scope === "user" && r.source === "manual" && (
                 <Badge variant="outline" className="text-[9px] px-1 py-0 h-4">watch</Badge>
               )}
               <button
@@ -170,15 +221,42 @@ export default function WatchedBrandsPanel() {
               >
                 {r.match_mode === "prefix" ? "abc*" : "abc"}
               </button>
-              <button
-                type="button"
-                onClick={() => remove(r)}
-                disabled={busy}
-                title={r.source === "manual" ? "Remove" : "Stop watching this brand"}
-                className="rounded p-0.5 text-muted-foreground hover:text-destructive"
-              >
-                <X className="h-3 w-3" />
-              </button>
+              {r.scope === "catalog" ? (
+                <button
+                  type="button"
+                  onClick={() => void setBrandMuted(r, !r.muted)}
+                  disabled={busy}
+                  title={r.muted
+                    ? `Shared brand — click to start matching ${r.brand} again`
+                    : `Shared brand — click to stop matching ${r.brand} for you only`}
+                  className="rounded p-0.5 text-muted-foreground hover:text-destructive"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              ) : (
+                <>
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => void publishBrand(r)}
+                      disabled={busy}
+                      title={`Share ${r.brand} with all users`}
+                      className="rounded px-1 text-[9px] text-muted-foreground hover:text-primary"
+                    >
+                      share
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => remove(r)}
+                    disabled={busy}
+                    title={r.source === "manual" ? "Remove" : "Stop watching this brand"}
+                    className="rounded p-0.5 text-muted-foreground hover:text-destructive"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </>
+              )}
             </span>
           ))}
         </div>

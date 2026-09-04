@@ -96,13 +96,17 @@ Deno.serve(async (req) => {
       // wants it and "POP" must not.
       const brandsByUser = new Map<string, { exact: Set<string>; prefixes: string[] }>();
       for (const uid of userIds) {
+        // Own brands PLUS the shared catalogue, minus anything muted. Reading
+        // user_brands directly would classify against a narrower set than the
+        // panel shows, so a listing the user was told matches would come back
+        // not_mine.
+        //
+        // The function already drops rows whose status is 'ignore', so the
+        // filter that used to live here is gone rather than duplicated -- two
+        // copies of that rule would eventually disagree.
         const { data: ub } = await supabase
-          .from("user_brands")
-          .select("brand, status, match_mode")
-          .eq("user_id", uid);
-        // Ignored brands are dropped HERE, which lands the listing in not_mine
-        // rather than removing it -- visible, not silent.
-        const live = (ub ?? []).filter((b: any) => (b.status ?? "") !== "ignore");
+          .rpc("get_effective_brands_for", { p_user: uid });
+        const live = (ub ?? []) as Array<{ brand: string; match_mode: string }>;
         brandsByUser.set(uid, {
           exact: new Set(live.map((b: any) => String(b.brand ?? "").trim().toLowerCase()).filter(Boolean)),
           prefixes: live
