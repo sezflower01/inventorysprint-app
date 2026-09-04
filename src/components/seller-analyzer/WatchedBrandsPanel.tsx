@@ -142,7 +142,7 @@ export default function WatchedBrandsPanel() {
           <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading brands…
         </div>
       ) : (
-        <div className="flex flex-wrap gap-1.5">
+        <div className="flex max-h-[260px] flex-wrap gap-1.5 overflow-y-auto rounded border p-2">
           {watched.map((r) => (
             <span
               key={r.brand}
@@ -207,7 +207,7 @@ export default function WatchedBrandsPanel() {
                 with no way back is indistinguishable from a bug. */}
             Not watched ({ignored.length}) — click to start watching again
           </div>
-          <div className="flex flex-wrap gap-1.5">
+          <div className="flex max-h-[160px] flex-wrap gap-1.5 overflow-y-auto rounded border p-2">
             {ignored.map((r) => (
               <button
                 key={r.brand}
