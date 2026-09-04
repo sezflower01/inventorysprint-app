@@ -17,17 +17,33 @@ import {
  *
  * ---- GOOGLE IS NEVER REMOVED -------------------------------------------
  *
- * With sources saved it demotes to an icon; with none it is the whole control,
- * exactly as before. A direct link can come up empty -- the retailer dropped
- * the line, the search term does not match their catalogue -- and Google is
- * the backstop for that, not just a placeholder until sources exist.
+ * It sits on every row whatever else is there. A direct link can come up empty
+ * -- the retailer dropped the line, the search term does not match their
+ * catalogue -- so Google is the backstop for that, not merely a placeholder
+ * until sources exist.
+ *
+ * ---- EVERY ROW SHOWS A SOURCE SLOT -------------------------------------
+ *
+ * A brand with no saved source renders "Unavailable" rather than nothing.
+ * Rendering nothing made the feature invisible: there was no way to tell a
+ * brand that needs a source from one the app never supported, so the whole
+ * thing read as absent. A slot on every row makes the gap legible and tells
+ * you which brands are still worth setting up.
+ *
+ * ---- WHAT "UNAVAILABLE" MEANS ------------------------------------------
+ *
+ * It means NO SOURCE IS SAVED for this brand. It does NOT mean a link was
+ * tested and found dead -- the browser cannot fetch a retailer to check,
+ * cross-origin requests are blocked, and claiming otherwise would assert
+ * something we never verified. The tooltip says which brand is missing, so
+ * the fix is one step away.
  *
  * ---- A BROKEN LINK STAYS VISIBLE ---------------------------------------
  *
- * Nothing here validates that a retailer still resolves, and that is on
- * purpose: a source whose URL has broken should be seen and fixed, not quietly
- * hidden. Hiding it would present "this retailer stopped working" and "you
- * never added one" as the same state.
+ * Nothing validates that a retailer still resolves, and that is on purpose: a
+ * source whose URL has broken should be seen and fixed, not quietly hidden.
+ * Hiding it would present "this retailer stopped working" and "you never added
+ * one" as the same state.
  */
 
 const INLINE_LIMIT = 2;
@@ -101,12 +117,27 @@ export function SourceButtons({
         </DropdownMenu>
       )}
 
+      {sources.length === 0 && (
+        <span
+          className={`inline-flex shrink-0 items-center rounded border border-dashed px-2 text-muted-foreground ${
+            size === "xs" ? "h-6 text-[11px]" : "h-7 text-xs"
+          }`}
+          title={
+            brand
+              ? `No purchase source saved for "${brand}". Add one under Purchase sources on the Add sellers tab.`
+              : "No brand on this listing, so no purchase source can be matched."
+          }
+        >
+          Unavailable
+        </span>
+      )}
+
       {google ? (
         <Button
           asChild
           type="button"
           variant="outline"
-          className={sources.length > 0 ? (size === "xs" ? "h-6 px-1.5" : "h-7 px-2") : pad}
+          className={pad}
         >
           <a
             href={google}
@@ -115,8 +146,8 @@ export function SourceButtons({
             title="Search Google for this product"
             aria-label="Search Google for this product"
           >
-            <Search className={sources.length > 0 ? "h-3 w-3" : "mr-1 h-3 w-3"} />
-            {sources.length === 0 && "Search on Google"}
+            <Search className="mr-1 h-3 w-3" />
+            Google
           </a>
         </Button>
       ) : (
