@@ -1726,6 +1726,43 @@ export default function ProfitLoss() {
           if (idx >= 0 && idx < 12) byMonth[idx] = r;
         }
         plRowsByMonth = byMonth;
+
+        // Marketplace facilitator tax comes from a SEPARATE rpc, exactly as
+        // MonthlyPLBreakdown does on screen.
+        //
+        // get_monthly_pl_breakdown's own facilitator columns read Financial
+        // Events, which does not carry ItemWithheldTax for this account, so
+        // they are ~0 for every month -- measured 2026-09-05: zero for January
+        // through August and $646.54 for September. The real figures live in
+        // settlement_line_items (90-day retention) plus the manual
+        // facilitator_tax_adjustments seeded for the months that fell outside
+        // it, which is what get_monthly_facilitator_tax unions.
+        //
+        // The export read only the breakdown, so the web showed $51,652.18 for
+        // the year and the spreadsheet showed zeros. That is the exact drift
+        // this file's model is meant to prevent: one number, two readers, one
+        // of them updated. The merge below is a copy of the on-screen one and
+        // must stay in step with it -- if a third reader ever appears, this
+        // belongs inside get_monthly_pl_breakdown instead.
+        try {
+          const { data: facData, error: facErr } = await (supabase as any)
+            .rpc('get_monthly_facilitator_tax', { p_year: exportYear, p_marketplace: mpParam });
+          if (facErr) throw facErr;
+          for (const fr of (facData || []) as Array<any>) {
+            const fi = Number(fr?.month_num) - 1;
+            if (fi < 0 || fi > 11 || !plRowsByMonth[fi]) continue;
+            plRowsByMonth[fi] = {
+              ...(plRowsByMonth[fi] as PlMonthRow),
+              marketplace_facilitator_tax: Number(fr?.facilitator_tax) || 0,
+              marketplace_facilitator_tax_refunds: Number(fr?.facilitator_tax_refunds) || 0,
+            };
+          }
+        } catch (fe) {
+          // Warn rather than fail the export: every other line is still
+          // correct, and a silent zero here is what caused the original
+          // mismatch.
+          console.warn('[Export] get_monthly_facilitator_tax unavailable', fe);
+        }
       } catch (e) {
         console.error('[Export] get_monthly_pl_breakdown failed', e);
         // Loud, because every income and expense line depends on it. Silently
