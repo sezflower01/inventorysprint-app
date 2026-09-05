@@ -2307,7 +2307,27 @@ function computeAiWinSalesBoosterPrice(
       // there is no active Buy Box winner, so a hidden "eligible" anchor is misleading
       // and can cause unexpected jumps to the next higher seller.
       const isFbmMode = context.yourFulfillmentType === 'FBM';
-      const shouldUseFbaOnly = !isFbmMode;
+      // Anchor choice must follow the STRATEGY, not merely our own fulfilment
+      // type. This read `!isFbmMode` alone, so an FBA seller always demanded a
+      // "lowest competitor FBA" anchor even when the rule was explicitly
+      // "FBA competes with FBM".
+      //
+      // For a seller who is the ONLY FBA offer that is unsatisfiable by
+      // definition: there are no FBA competitors, so referencePrice is null,
+      // the guard below records suppressed_bb_anchor_unavailable, and the
+      // price holds forever while FBM competitors sit underneath it.
+      //
+      // Observed 2026-09-04 on B0G2YNN87D (US): strategy "FBA competes with
+      // FBM", sole FBA seller, held at $48.75 against FBM offers at $39.93 and
+      // $39.95 for two days, and the log carried both
+      // "FBA competes with FBM" and
+      // "suppressed_anchor_source_lowest_competitor_fba" -- the contradiction
+      // in one line. Selling only resumed when the price was dropped by hand
+      // in Seller Central.
+      //
+      // competeWithFbm is already honoured everywhere else in this file; it
+      // was simply never consulted on the suppressed-Buy-Box path.
+      const shouldUseFbaOnly = !isFbmMode && !competeWithFbm;
       // BUGFIX: When BB is suppressed, the anchor must be the lowest COMPETITOR offer
       // (excluding our own seller_id). Using lowestFbaPrice/lowestOverallPrice directly
       // can include our own offer, which causes the repricer to incorrectly believe it
