@@ -2521,10 +2521,17 @@ export default function ProfitLoss() {
                   onClick={handleClearCacheAndResync} 
                   disabled={syncControlsDisabled} 
                   className="gap-2"
-                  title="Delete all cached data and do a complete fresh sync from Amazon"
+                  title="Admin only — regular users never see this button. Deletes cached financial events for the selected period and re-fetches from Amazon. Rarely needed now: the normal sync upserts on (user_id, event_type, event_date, amazon_order_id, asin) with ignoreDuplicates false, so View already overwrites anything Amazon restates. Deleting first only risks the range not coming back in full."
                 >
                   <Trash2 className="h-4 w-4" />
-                  Clear Cache & Resync
+                  Clear Cache &amp; Resync
+                  {/* The badge is the whole point of keeping the label busy:
+                      without it there is nothing on screen to say this control
+                      is admin-gated, and it is the one destructive button on
+                      the page. */}
+                  <span className="ml-1 rounded bg-white/25 px-1.5 py-0.5 text-[10px] font-normal leading-none">
+                    hidden for users
+                  </span>
                 </Button>
               )}
               
