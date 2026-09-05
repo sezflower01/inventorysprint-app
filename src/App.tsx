@@ -5,6 +5,7 @@ import { LanguageProvider } from "@/contexts/LanguageContext";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { UiModeProvider } from "@/contexts/UiModeContext";
 import { SalesSyncProvider } from "@/contexts/SalesSyncContext";
+import { isStaleChunkError, reloadOnceForStaleChunk } from "@/lib/staleChunk";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as SonnerToaster } from "@/components/ui/sonner";
 import { AppVersionGate } from "@/components/AppVersionGate";
@@ -20,34 +21,10 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 // through to the manual "Hard Refresh" button instead of auto-recovering).
 // Also covers Vite's CSS-chunk failure message and an older webpack-style
 // "Loading chunk" string for safety.
-function isStaleChunkError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const msg = error.message.toLowerCase();
-  return (
-    msg.includes('failed to fetch dynamically imported module') ||
-    msg.includes('error loading dynamically imported module') ||
-    msg.includes('importing a module script failed') ||
-    msg.includes('loading chunk') ||
-    msg.includes('unable to preload css') ||
-    msg.includes('dynamically imported module')
-  );
-}
-
-// One auto-reload per browser session for this failure class — if a reload
-// doesn't actually fix it (e.g. a persistent network issue, not a stale
-// chunk), loop forever is worse than falling through to the manual buttons.
-const CHUNK_RELOAD_GUARD_KEY = 'chunk-error-auto-reload-attempted';
-function reloadOnceForStaleChunk(): boolean {
-  try {
-    if (sessionStorage.getItem(CHUNK_RELOAD_GUARD_KEY)) return false;
-    sessionStorage.setItem(CHUNK_RELOAD_GUARD_KEY, '1');
-  } catch {
-    // sessionStorage unavailable (private mode etc.) — reload once anyway,
-    // no way to guard against a loop in that case.
-  }
-  window.location.reload();
-  return true;
-}
+// isStaleChunkError and reloadOnceForStaleChunk now live in
+// @/lib/staleChunk so non-component dynamic imports can use them too --
+// the exceljs import behind "Export Excel" could not reach them here and
+// failed outright on a tab left open across a deploy.
 
 // Retry wrapper for lazy imports - handles stale chunk errors after HMR/deployments
 function lazyWithRetry<T extends ComponentType<unknown>>(

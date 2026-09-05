@@ -35,6 +35,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
+import { importWithRetry } from "@/lib/staleChunk";
 import { useDbPressure, withTimeout, isTimeoutError, recordDbFailure, isDbPressureActive } from "@/hooks/use-db-pressure";
 import { SyncReadinessBanner } from "@/components/SyncReadinessBanner";
 import ReplacementCogsSection from "@/components/sales/ReplacementCogsSection";
@@ -2093,7 +2094,15 @@ export default function ProfitLoss() {
       rows.push(get('NET PROFIT/LOSS (confirmation)', netProfitSel));
 
       // Build a styled workbook using ExcelJS (borders, section headers, bold totals, freeze pane)
-      const ExcelJS = (await import('exceljs')).default;
+      // Retried, then reloaded once, if the chunk is stale.
+      //
+      // A tab left open across a deploy still asks for the OLD content-hashed
+      // filename, and the SPA rewrite answers with index.html at HTTP 200
+      // rather than a 404 -- measured 2026-09-05 on
+      // exceljs.min-kycDTznP.js. The browser then reports "Failed to fetch
+      // dynamically imported module", which reads like the exporter is broken
+      // when the export is fine and the tab is simply old.
+      const ExcelJS = (await importWithRetry(() => import('exceljs'))).default;
       const wb2 = new ExcelJS.Workbook();
       const ws2 = wb2.addWorksheet('P&L by Month', {
         views: [{ state: 'frozen', ySplit: 4, xSplit: 1 }],
