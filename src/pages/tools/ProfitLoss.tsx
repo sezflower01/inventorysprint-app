@@ -2534,15 +2534,18 @@ export default function ProfitLoss() {
               
               {summary && (
                 <>
-                  <Button variant="outline" onClick={exportToExcel} disabled={exportingExcel} className="gap-2">
+                  {/* Same big-green treatment already used for the other
+                      primary actions on this page, so the export reads as a
+                      main action rather than a secondary one. */}
+                  <Button onClick={exportToExcel} disabled={exportingExcel} className="gap-2 bg-green-600 hover:bg-green-700 text-white font-semibold text-base px-6 py-5 shadow-md">
                     {exportingExcel ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                     {exportingExcel ? 'Preparing Excel...' : 'Export Excel'}
                   </Button>
                   {excelDownload && !exportingExcel && (
-                    <Button variant="secondary" asChild className="gap-2">
+                    <Button asChild className="gap-2 bg-green-600 hover:bg-green-700 text-white font-semibold text-base px-6 py-5 shadow-md">
                       <a href={excelDownload.url} download={excelDownload.filename}>
                         <Download className="h-4 w-4" />
-                        Download Ready File
+                        Download again
                       </a>
                     </Button>
                   )}
