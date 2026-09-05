@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { useHomeMarketplace } from "@/hooks/use-home-marketplace";
+import { useModuleAccess } from "@/hooks/useModuleAccess";
 import { formatMarketplaceDate } from "@/lib/sales/dateLocale";
 // Category lists, totals and the disposition rule are shared with the Excel
 // export so the two reports cannot drift apart again. See plModel.ts.
@@ -179,6 +180,17 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
     return q.eq(col, mpParam);
   };
   const { user } = useAuth();
+  // Liquidation diagnostics are admin-only. They are debugging instruments,
+  // not seller features: Diagnose downloads a raw JSON dump of one month of
+  // SP-API financial events, and Audit repeats that for all twelve. Neither
+  // tells a seller anything actionable about their own P&L, and both spend
+  // SP-API quota to produce it.
+  //
+  // Not a security boundary -- diagnose-liquidations and
+  // audit-liquidations-year both resolve the caller with auth.getUser(), so
+  // they were always scoped to the requester's own data. This is about not
+  // putting a debugging tool in front of a seller.
+  const { isAdmin } = useModuleAccess();
   const { homeMarketplace, homeCurrency, homeCurrencySymbol } = useHomeMarketplace();
   const [fxRates, setFxRates] = useState<Record<string, number>>({ USD: 1 });
   useEffect(() => {
@@ -1312,26 +1324,36 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
                 ? `Backfilling ${backfillProgress?.done ?? 0}/${backfillProgress?.total ?? 0}…`
                 : `Backfill ${year}`}
             </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => { setDiagnoseResult(null); setDiagnoseOpen(true); }}
-              disabled={loading}
-              title="Read-only diagnostic. Fetches one month of raw SP-API financial events and reports which event lists contain liquidation data for your account."
-            >
-              <Search className="w-3 h-3 mr-1" />
-              Diagnose Liquidations
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => { setAuditResult(null); setAuditOpen(true); }}
-              disabled={loading}
-              title="Read-only. For every month of the year, breaks down liquidation revenue/fees by SP-API source list and compares to what's currently in your P&L cache. Slow — fetches all 12 months from Amazon."
-            >
-              <Search className="w-3 h-3 mr-1" />
-              Audit Liquidations ({year})
-            </Button>
+            {isAdmin && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => { setDiagnoseResult(null); setDiagnoseOpen(true); }}
+                disabled={loading}
+                title="Admin only — regular users never see this button. Read-only diagnostic: fetches one month of raw SP-API financial events and reports which event lists contain liquidation data for your account."
+              >
+                <Search className="w-3 h-3 mr-1" />
+                Diagnose Liquidations
+              <span className="ml-1.5 rounded border px-1 py-0.5 text-[9px] font-normal leading-none opacity-70">
+                hidden for users
+              </span>
+              </Button>
+            )}
+            {isAdmin && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => { setAuditResult(null); setAuditOpen(true); }}
+                disabled={loading}
+                title="Admin only — regular users never see this button. Read-only: for every month of the year, breaks down liquidation revenue/fees by SP-API source list and compares to what's currently in your P&L cache. Slow — fetches all 12 months from Amazon."
+              >
+                <Search className="w-3 h-3 mr-1" />
+                Audit Liquidations ({year})
+              <span className="ml-1.5 rounded border px-1 py-0.5 text-[9px] font-normal leading-none opacity-70">
+                hidden for users
+              </span>
+              </Button>
+            )}
             <Button
               size="lg"
               onClick={async () => { setSettlementOpen(true); await loadReconciliation(); }}
