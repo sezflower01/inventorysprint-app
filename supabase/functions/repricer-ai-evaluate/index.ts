@@ -6205,7 +6205,26 @@ Deno.serve(async (req) => {
       lastRepricedAt: assignment?.last_applied_at || assignment?.last_repriced_at || null,
       competeWithAmazon: rule.compete_with_amazon ?? true,
       competeWithFba: rule.compete_with_fba ?? true,
-      competeWithFbm: rule.ignore_fbm_unless_buybox_owner === false ? true : (rule.compete_with_fbm ?? true),
+      // The checkbox is authoritative. This used to read
+      //   ignore_fbm_unless_buybox_owner === false ? true : (compete_with_fbm ?? true)
+      // so an older, unrelated field silently overrode the explicit setting:
+      // measured 2026-09-04, four rules had compete_with_fbm = false and
+      // competed with FBM regardless -- Aggressive Capture, Match Buy Box,
+      // Smart Match, and the rule actually named "Compete with FBM". Unticking
+      // the box did nothing on any of them.
+      //
+      // Migration 20260904320000 first wrote compete_with_fbm = true onto
+      // exactly those rules, so removing the override changes no pricing: the
+      // stored value now equals what they were already doing. Verified 0 rules
+      // would change behaviour.
+      //
+      // ignore_fbm_unless_buybox_owner keeps its own separate job on the
+      // shouldIgnoreFbm path. The two settings simply stop overriding each
+      // other, which is what the UI already implies.
+      //
+      // Default stays true when unset: FBM offers appear on nearly every
+      // listing, so ignoring them by accident is the more damaging default.
+      competeWithFbm: rule.compete_with_fbm ?? true,
       fbmPremiumPercent: rule.fbm_premium_percent ?? 10,
       fbmPremiumFixed: rule.fbm_premium_fixed ?? 2.0,
       yourFulfillmentType: effectiveOwnFulfillment,
