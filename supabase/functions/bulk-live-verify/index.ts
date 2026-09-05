@@ -548,7 +548,7 @@ Deno.serve(async (req) => {
             const batch = unknownLiveSkus.slice(i, i + CHUNK);
             const { data, error } = await supabase
               .from('created_listings')
-              .select('asin, sku, title, image_url, price, cost, fnsku')
+              .select('asin, sku, title, image_url, price, cost, amount, units, fnsku')
               .eq('user_id', userId)
               .in('sku', batch);
             if (error) {
@@ -571,7 +571,20 @@ Deno.serve(async (req) => {
               title: cl.title ?? null,
               image_url: cl.image_url ?? null,
               price: cl.price ?? null,
-              cost: cl.cost ?? null,
+              // inventory.cost is PER UNIT. created_listings.cost is the LOT
+              // TOTAL and `amount` is the unit cost -- verified 2026-09-05:
+              // cost / units equals amount on 6,876 of 6,889 multi-unit
+              // listings. Writing cl.cost here put a whole purchase order into
+              // a per-unit field, so B0G2YNN87D carried $2,136.34 per unit
+              // instead of $21.58 and a two-unit sale reported -$2,157.92 COGS
+              // against $81.95 of revenue.
+              //
+              // Falls back to cost/units rather than to cl.cost: a wrong unit
+              // cost that is merely missing is recoverable, one inflated 99x
+              // silently poisons every profit and ROI figure that touches it.
+              cost: cl.amount ?? (cl.units && cl.units > 0 && cl.cost
+                ? Number((cl.cost / cl.units).toFixed(4))
+                : null),
               available: live.available,
               reserved: live.reserved,
               inbound: live.inbound,
@@ -638,7 +651,7 @@ Deno.serve(async (req) => {
           for (;;) {
             const { data, error } = await supabase
               .from('created_listings')
-              .select('asin, sku, title, image_url, price, cost, fnsku')
+              .select('asin, sku, title, image_url, price, cost, amount, units, fnsku')
               .eq('user_id', userId)
               .not('fnsku', 'is', null)
               .range(from, from + PAGE - 1);
@@ -665,7 +678,20 @@ Deno.serve(async (req) => {
               title: cl.title ?? null,
               image_url: cl.image_url ?? null,
               price: cl.price ?? null,
-              cost: cl.cost ?? null,
+              // inventory.cost is PER UNIT. created_listings.cost is the LOT
+              // TOTAL and `amount` is the unit cost -- verified 2026-09-05:
+              // cost / units equals amount on 6,876 of 6,889 multi-unit
+              // listings. Writing cl.cost here put a whole purchase order into
+              // a per-unit field, so B0G2YNN87D carried $2,136.34 per unit
+              // instead of $21.58 and a two-unit sale reported -$2,157.92 COGS
+              // against $81.95 of revenue.
+              //
+              // Falls back to cost/units rather than to cl.cost: a wrong unit
+              // cost that is merely missing is recoverable, one inflated 99x
+              // silently poisons every profit and ROI figure that touches it.
+              cost: cl.amount ?? (cl.units && cl.units > 0 && cl.cost
+                ? Number((cl.cost / cl.units).toFixed(4))
+                : null),
               available: 0,
               reserved: 0,
               inbound: 0,
