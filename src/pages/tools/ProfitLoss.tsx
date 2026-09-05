@@ -2511,13 +2511,19 @@ export default function ProfitLoss() {
               )}
               
               
-              {/* Retrieve COGS Button */}
+              {/* COGS source audit.
+                  Named "Retrieve COGS" until 2026-09-05, which implied the
+                  totals would not appear without pressing it. They do: the
+                  export reads get_monthly_cogs itself and the breakdown shows
+                  "COGS coverage 100.0%" unaided. What this actually reports is
+                  the SOURCE of every figure, which is how a cost taken from
+                  the weakest rung gets spotted -- the $2,136 unit cost on a
+                  foam sword the day before came from inventoryFallback. */}
               <Button 
-                variant="secondary" 
                 onClick={retrieveCOGS} 
                 disabled={controlsDisabled || retrievingCogs} 
-                className="gap-2"
-                title="Calculate COGS from sold orders (uses inventory/created_listings costs)"
+                className="gap-2 bg-green-600 hover:bg-green-700 text-white font-semibold text-base px-6 py-5 shadow-md"
+                title="Shows where each cost came from — sales orders, manual override, purchase batch, listing or the weak current-inventory fallback — and flags orders with no cost at all. Your COGS totals appear without this; it is an audit, not a fetch."
               >
                 {retrievingCogs ? (
                   <>
@@ -2527,7 +2533,7 @@ export default function ProfitLoss() {
                 ) : (
                   <>
                     <ReceiptText className="h-4 w-4" />
-                    Retrieve COGS
+                    Check COGS sources
                   </>
                 )}
               </Button>
