@@ -1,3 +1,4 @@
+import { getListingUnitCost } from "../_shared/cost-contract.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
@@ -582,9 +583,15 @@ Deno.serve(async (req) => {
               // Falls back to cost/units rather than to cl.cost: a wrong unit
               // cost that is merely missing is recoverable, one inflated 99x
               // silently poisons every profit and ROI figure that touches it.
-              cost: cl.amount ?? (cl.units && cl.units > 0 && cl.cost
-                ? Number((cl.cost / cl.units).toFixed(4))
-                : null),
+              // getListingUnitCost is the canonical conversion and already
+              // knows the contract: created_listings.cost is the LOT TOTAL and
+              // `amount` is the unit cost, while inventory inverts the two.
+              // This function previously hand-rolled the read and got it
+              // backwards, writing a whole purchase order into a per-unit
+              // field. The helper existed the whole time; it simply was not
+              // imported. Using it is the difference between fixing this once
+              // and fixing it every time someone writes a cost here.
+              cost: getListingUnitCost(cl),
               available: live.available,
               reserved: live.reserved,
               inbound: live.inbound,
@@ -689,9 +696,15 @@ Deno.serve(async (req) => {
               // Falls back to cost/units rather than to cl.cost: a wrong unit
               // cost that is merely missing is recoverable, one inflated 99x
               // silently poisons every profit and ROI figure that touches it.
-              cost: cl.amount ?? (cl.units && cl.units > 0 && cl.cost
-                ? Number((cl.cost / cl.units).toFixed(4))
-                : null),
+              // getListingUnitCost is the canonical conversion and already
+              // knows the contract: created_listings.cost is the LOT TOTAL and
+              // `amount` is the unit cost, while inventory inverts the two.
+              // This function previously hand-rolled the read and got it
+              // backwards, writing a whole purchase order into a per-unit
+              // field. The helper existed the whole time; it simply was not
+              // imported. Using it is the difference between fixing this once
+              // and fixing it every time someone writes a cost here.
+              cost: getListingUnitCost(cl),
               available: 0,
               reserved: 0,
               inbound: 0,

@@ -111,6 +111,41 @@ function pickHistoricalCostForCost(purchases: any[] | undefined, listings: any[]
   return best ? { unitCost: best.unitCost, source: best.source } : { unitCost: null, source: null };
 }
 
+/**
+ * Should a resolved unit cost be LOCKED as the sale-time snapshot?
+ *
+ * Locking freezes the cost so historical sales do not silently re-cost when a
+ * purchase is edited months later. That is right for a cost drawn from a
+ * genuinely historical source -- cost_history, a dated purchase batch, a
+ * manual override, a dated listing.
+ *
+ * It is wrong for the ladder's lowest rung. `fallback_current_inventory` reads
+ * inventory.cost, which is a CURRENT value, and locking it declares a
+ * present-day guess to be historical fact.
+ *
+ * That distinction cost real money on 2026-09-04. bulk-live-verify had written
+ * a lot total into inventory.cost, an order synced while it was poisoned, the
+ * ladder fell to this rung and locked $2,136.34 as the unit cost of a foam
+ * sword. Repairing inventory afterwards could not undo it -- the locked
+ * snapshot outranks every later correction -- and a two-unit sale reported
+ * -$2,157.92 of COGS against $81.95 of revenue until the rows were rewritten
+ * by hand. Six older rows carried the same damage under
+ * legacy_unit_cost_lock_v1, so it had been happening for a while.
+ *
+ * Left unlocked, a fallback cost still displays; it simply re-resolves on the
+ * next read, so the moment a better source appears the number corrects
+ * itself. An unlocked estimate that heals beats a locked one that cannot.
+ */
+function shouldLockCost(
+  unitCost: number | null | undefined,
+  source: string | null | undefined,
+): boolean {
+  if (!unitCost || unitCost <= 0) return false;
+  const src = String(source ?? "").toLowerCase();
+  if (!src) return false;
+  return !src.startsWith("fallback_current_inventory");
+}
+
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -2864,8 +2899,9 @@ Deno.serve(async (req) => {
             unit_cost: unitCost ? Math.round(unitCost * 100) / 100 : 0,
             unit_cost_at_sale: unitCost ? Math.round(unitCost * 100) / 100 : null,
             cost_source_at_sale: costResolution.source,
-            cost_locked: !!(unitCost && unitCost > 0),
-            cost_locked_at: unitCost && unitCost > 0 ? new Date().toISOString() : null,
+            cost_locked: shouldLockCost(unitCost, costResolution.source),
+            cost_locked_at: shouldLockCost(unitCost, costResolution.source)
+              ? new Date().toISOString() : null,
             total_cost: unitCost ? Math.round(unitCost * quantity * 100) / 100 : 0,
             roi: 0, // ROI will be calculated elsewhere based on roi_source
             order_date: orderDate,
@@ -3301,8 +3337,9 @@ Deno.serve(async (req) => {
         unit_cost: unitCost ? Math.round(unitCost * 100) / 100 : 0,
         unit_cost_at_sale: unitCost ? Math.round(unitCost * 100) / 100 : null,
         cost_source_at_sale: costResolution.source,
-        cost_locked: !!(unitCost && unitCost > 0),
-        cost_locked_at: unitCost && unitCost > 0 ? new Date().toISOString() : null,
+        cost_locked: shouldLockCost(unitCost, costResolution.source),
+        cost_locked_at: shouldLockCost(unitCost, costResolution.source)
+          ? new Date().toISOString() : null,
         marketplace,
         fulfillment_channel: enrichFulfillmentChannel, // AFN=FBA, MFN=FBM — sticky, see above
         order_status: currentAmazonStatus, // Track status changes for re-enrichment
