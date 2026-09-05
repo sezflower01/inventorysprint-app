@@ -10,7 +10,17 @@
  * midnight never shows another user's / yesterday's numbers.
  */
 
-const CACHE_KEY_PREFIX = "lov.mobileLiveSales.today.v20";
+// v21 (2026-09-05): invalidate every persisted snapshot after the unit-cost
+// repair. Snapshots written before it baked in a COGS of $2,157.92 for two
+// units of B0G2YNN87D -- bulk-live-verify had copied created_listings.cost,
+// the LOT TOTAL, into inventory.cost, which is per unit.
+//
+// The database was corrected and every rung of the cost ladder now returns
+// $21.58, but a hard refresh does not clear localStorage, so the old figure
+// survived on screen and looked like the fix had failed. Bumping the version
+// is the intended mechanism: it strands the old keys rather than trusting each
+// user to clear site data.
+const CACHE_KEY_PREFIX = "lov.mobileLiveSales.today.v21";
 const MAX_CACHED_ROWS = 300;
 // Keep the last stable period paint available when the user leaves the route
 // and comes back. Manual Refresh / explicit fetches still revalidate, but the
