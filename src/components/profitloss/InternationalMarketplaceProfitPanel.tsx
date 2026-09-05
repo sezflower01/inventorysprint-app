@@ -103,6 +103,15 @@ export default function InternationalMarketplaceProfitPanel({ year, marketplaces
       }
       setRows(results);
     } catch (e: any) {
+      // A superseded request is not a failure. When this reload is replaced by
+      // a newer one the old fetch is cancelled, and reporting that as an error
+      // put "AbortError: signal is aborted without reason" in front of the
+      // user for something entirely internal -- while the newer request was
+      // already on its way to succeeding.
+      const msg = String(e?.message || e?.name || "");
+      if (e?.name === "AbortError" || /aborted|abortError/i.test(msg)) {
+        return;
+      }
       setError(e?.message || "Failed to load");
       toast.error("Failed to load International Marketplace Profit: " + (e?.message || "unknown error"));
     } finally {

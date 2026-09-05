@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo} from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, TrendingUp, TrendingDown, DollarSign, Package, Download, Loader2, Calculator, RefreshCw, Search, Trash2, CalendarIcon, ReceiptText, AlertTriangle, WifiOff, Star, Info } from "lucide-react";
 import OrdersCostEditor from "@/components/profitloss/OrdersCostEditor";
@@ -419,6 +419,24 @@ export default function ProfitLoss() {
   // NA list, so an unconnected marketplace never shows a filter button that
   // just filters to permanently-empty data.
   const [PL_ACTIVE_MARKETPLACES, setPlActiveMarketplaces] = useState<string[]>([]);
+
+  // Memoised because the panel below takes it as a dependency.
+  //
+  // This was `PL_ACTIVE_MARKETPLACES.filter(m => m !== "US")` inline, which
+  // builds a NEW ARRAY on every render of this page. The panel's loader is
+  // useCallback([year, marketplaces]) driven by useEffect([load]), so a fresh
+  // array identity re-ran the entire fetch cascade on EVERY render -- three
+  // marketplaces x three requests each. Switching the marketplace toggle
+  // re-rendered, superseded the in-flight batch, and surfaced the cancellation
+  // as "AbortError: signal is aborted without reason".
+  //
+  // The queries themselves were never slow: measured 2026-09-05, CA takes
+  // 0.11s and 0.08s. The bug was how often they were fired, not how long they
+  // took.
+  const intlMarketplaces = useMemo(
+    () => PL_ACTIVE_MARKETPLACES.filter((m) => m !== "US"),
+    [PL_ACTIVE_MARKETPLACES],
+  );
   useEffect(() => {
     if (!user?.id) return;
     (async () => {
@@ -2338,7 +2356,7 @@ export default function ProfitLoss() {
         <div className="mb-8">
           <InternationalMarketplaceProfitPanel
             year={selectedYear}
-            marketplaces={PL_ACTIVE_MARKETPLACES.filter((m) => m !== "US")}
+            marketplaces={intlMarketplaces}
           />
         </div>
 
