@@ -25,6 +25,12 @@
       "message": "column \"deleted_by\" does not exist",
       "reason": "Same page, same call. repricer_assignments has NO deletion column at all, so there is no successor to map `WHERE deleted_by IS NULL` onto -- the filter either drops entirely or the table lost a concept. Needs a decision, not a rename. Deferred deliberately 2026-08-20.",
       "accepted_on": "2026-08-20"
+    },
+    {
+      "function": "public.refresh_seller_brand_catalog_rollup",
+      "message": "relation \"_cached\" does not exist",
+      "reason": "NOT a broken function -- a plpgsql_check blind spot. The rollup builds six ON COMMIT DROP temp tables and indexes them, and a temp table does not exist while the linter is statically checking the body, so the first statement naming one it did not just create -- CREATE INDEX ON _cached (b) -- cannot be planned. _ub is created earlier and is not flagged because nothing references it until _matched, by which point the check has already stopped on this function. Proven to RUN: 20260903170000 and 20260904160000 both call it inside a DO block, so db push would have aborted if it threw; it rebuilds the rollup in ~0.9s. The temp tables plus their indexes ARE the performance fix -- the previous per-user loop timed out -- so rewriting them away to satisfy the linter would undo the thing this function exists for. Wrapping the CREATE INDEXes in EXECUTE would hide it, but the check stops at the first error per function, so that just surfaces the next temp table and ends with the whole body in dynamic SQL, unchecked. Accepted 2026-09-05.",
+      "accepted_on": "2026-09-05"
     }
   ]
 }
