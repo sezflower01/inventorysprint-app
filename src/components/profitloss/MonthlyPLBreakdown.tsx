@@ -475,11 +475,31 @@ export default function MonthlyPLBreakdown({ year, refreshKey = 0, onCogsBaseTot
       if ((facTaxRes as any)?.error) {
         console.warn("[P&L] get_monthly_facilitator_tax unavailable:", (facTaxRes as any).error?.message);
       } else {
+        // the settlement source is AUTHORITATIVE ONLY WHERE IT HAS DATA.
+        // 
+        //             settlement_line_items keeps ~90 days, so the current month has
+        //             usually not posted yet and get_monthly_facilitator_tax returns 0.00
+        //             for it. Overwriting with that zero strands the offsetting line:
+        //             Amazon COLLECTS the tax from the buyer and WITHHOLDS the same money
+        //             to remit it, so "Sales Tax Collected" and this row cancel out.
+        // 
+        //             Measured 2026-09-05: January to August net to noise (-160.62 to
+        //             +374.39) because settlements carry them and Financial Events does
+        //             not. September had collected 646.54 against a settlement value of
+        //             0.00 -- a clean +646.54 of phantom profit -- while Financial Events
+        //             already held exactly 646.54 for it.
+        // 
+        //             So a zero from settlements means NOT YET POSTED, not zero tax. Only
+        //             a non-zero value overrides, and the Financial Events figure stands
+        //             until the settlement arrives and replaces it.
         for (const r of ((facTaxRes as any)?.data || []) as Array<any>) {
           const idx = Number(r?.month_num) - 1;
           if (idx < 0 || idx > 11 || !filled[idx]) continue;
-          filled[idx].marketplace_facilitator_tax = Number(r?.facilitator_tax) || 0;
-          filled[idx].marketplace_facilitator_tax_refunds = Number(r?.facilitator_tax_refunds) || 0;
+          const fTax = Number(r?.facilitator_tax) || 0;
+          const fRef = Number(r?.facilitator_tax_refunds) || 0;
+          if (fTax === 0 && fRef === 0) continue;
+          filled[idx].marketplace_facilitator_tax = fTax;
+          filled[idx].marketplace_facilitator_tax_refunds = fRef;
         }
       }
 
