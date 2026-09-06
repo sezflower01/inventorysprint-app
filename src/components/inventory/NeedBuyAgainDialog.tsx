@@ -4,13 +4,20 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { supabase } from "@/integrations/supabase/client";
 import { calculateReplenishQty } from "@/lib/replenishment";
+import { isGhostRow } from "@/lib/ghostFilter";
 import { ShoppingCart, ExternalLink, Loader2, Package, Search, RefreshCw, Copy } from "lucide-react";
 import { toast } from "sonner";
 
-const isHiddenInSyncedInventory = (item: { listing_status?: string | null; sku?: string | null }) => {
-  const ls = (item.listing_status || "").toUpperCase();
-  return ls === "NOT_IN_CATALOG" || ls === "DELETED" || (item.sku || "").toLowerCase().startsWith("amzn.gr.");
-};
+// Ghost rows are filtered with the shared platform rule, not a local copy.
+//
+// This file used to carry its own isHiddenInSyncedInventory covering three of
+// the four ghost conditions -- NOT_IN_CATALOG, DELETED and an "amzn.gr." SKU --
+// and silently missed INACTIVE. Measured 2026-09-05: 10,348 zero-stock rows
+// are INACTIVE against 1,175 NOT_IN_CATALOG, so the missing clause was most of
+// the problem. Buy Again hid 1,434 rows where the shared rule hides 11,769.
+//
+// ghostFilter.ts already named "NeedBuyAgain + Repricer parity" in its own
+// docstring; it simply was never imported here.
 
 /** Fetch all rows, bypassing the 1000-row default limit */
 async function fetchAllPaged(
@@ -203,7 +210,7 @@ export function NeedBuyAgainDialog({ open, onOpenChange, userId }: NeedBuyAgainD
       const [inventoryData, recentSalesData, historicalSalesData, listingsData] = await Promise.all([
         fetchAllPaged((from, to) =>
           supabase.from("inventory")
-            .select("asin, title, image_url, available, inbound, reserved, sku, listing_status")
+            .select("asin, title, image_url, available, inbound, reserved, unfulfilled, sku, listing_status")
             .eq("user_id", userId)
             .range(from, to)
         ),
@@ -290,8 +297,22 @@ export function NeedBuyAgainDialog({ open, onOpenChange, userId }: NeedBuyAgainD
         listing.asin && !inventoryAsins.has(listing.asin) && !inventorySkus.has(listing.sku)
       );
 
+      // Ghosts are dropped here, at the inventory branch only.
+      //
+      // NOT further down over the merged list: createdListingsToAdd rows are
+      // synthesised with listing_status null and available 0, and the shared
+      // rule counts "no stock and not ACTIVE" as a ghost -- so a blanket
+      // filter would delete precisely the never-stocked listings this dialog
+      // exists to surface. Ghosthood is a property of a real inventory row.
+      //
+      // Checked before adopting the shared rule: across all 12,087 inventory
+      // rows the zero-stock clause hides nothing the status clause does not
+      // already hide (11,769 either way), and zero rows are hidden by it
+      // alone, so no live restock candidate is lost.
+      const liveInventory = inventoryData.filter((item) => !isGhostRow(item));
+
       const combinedItems = [
-        ...inventoryData.map((item) => ({
+        ...liveInventory.map((item) => ({
           asin: item.asin,
           sku: item.sku,
           listing_status: item.listing_status,
@@ -350,8 +371,6 @@ export function NeedBuyAgainDialog({ open, onOpenChange, userId }: NeedBuyAgainD
 
       const replenishItems: ReplenishItem[] = [];
       for (const item of groupedItems.values()) {
-        if (isHiddenInSyncedInventory(item)) continue;
-
         const recentSales = recentSalesMap.get(item.asin);
         const actualSalesPeriod = recentSales
           ? Math.min(30, getDaysSince(recentSales.earliestOrderDate))
