@@ -94,6 +94,30 @@ Deno.serve(async (req) => {
       let afterBytes: number | null = null;
       try {
         await client.connect();
+
+        // Lift the statement timeout BEFORE the vacuum.
+        //
+        // This connection inherits a ~2 minute ceiling. That was invisible
+        // while the tables were small -- 2026-05-12 reclaimed
+        // repricer_price_actions from 2,938 MB to 214 MB in 24.9s -- but the
+        // table is 7,022 MB now, and 2026-09-06 died at 132.5s with
+        // "canceling statement due to statement timeout", having reclaimed
+        // nothing. VACUUM FULL rewrites the heap AND rebuilds every index
+        // (thirteen here, 1,106 MB of them), so the work grows with the table
+        // while the ceiling does not.
+        //
+        // 30 minutes rather than 0: this is a deliberate admin action behind a
+        // typed confirmation, but an unbounded statement holding an ACCESS
+        // EXCLUSIVE lock is a worse failure than a slow one that ends.
+        await client.queryArray(`SET statement_timeout = '30min'`);
+
+        // Fail fast if the lock cannot be taken, instead of queueing behind a
+        // writer and blocking every other writer that arrives meanwhile.
+        // VACUUM FULL needs ACCESS EXCLUSIVE, so anything still writing to the
+        // table will block it -- pause the repricer first and this returns
+        // promptly with a clear error rather than stalling the table.
+        await client.queryArray(`SET lock_timeout = '60s'`);
+
         const sizeRes1 = await client.queryObject<{ b: bigint }>(
           `SELECT pg_total_relation_size('${table}'::regclass)::bigint AS b`
         );
