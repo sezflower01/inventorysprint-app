@@ -42,6 +42,43 @@ import { FbaReadinessTracker } from "@/components/fba/FbaReadinessTracker";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 
+/**
+ * Does this Total Cost look like a PER-UNIT price that was typed into the
+ * lot-total box?
+ *
+ * This is the exact mistake that produced six bad lots between 2025-05 and
+ * 2025-10, found on 2026-09-05 and worth $2,092.27 of understated COGS. The
+ * panel asks for units and a TOTAL and divides, so a per-unit figure entered
+ * here silently becomes total/units -- $10.79 across 100 units booked as
+ * $0.1079 each, against an item selling for $17-$56. Nothing downstream
+ * questioned it; it propagated into created_listing_purchases,
+ * created_listings, cost_history and finally the locked snapshot on every
+ * order, where it sat for ten months.
+ *
+ * Two independent tests, because either alone misses cases:
+ *   - against the SELLING price, which Amazon supplies and nobody typed. A
+ *     unit cost under 5% of what the item sells for is not a bargain.
+ *   - against an absolute floor, for listings with no price yet.
+ *
+ * Single-unit lots are exempt: there total and per-unit are the same number,
+ * so the confusion cannot arise.
+ */
+export function suspiciousUnitCost(
+  totalCost: number,
+  units: number,
+  listPrice: number | null | undefined,
+): { suspicious: boolean; cog: number; impliedTotal: number; pctOfPrice: number | null } {
+  const cog = units > 0 ? totalCost / units : 0;
+  const price = Number(listPrice) || 0;
+  const pctOfPrice = price > 0 ? (cog / price) * 100 : null;
+  const suspicious =
+    units > 1 &&
+    totalCost > 0 &&
+    cog > 0 &&
+    ((price > 0 && cog < price * 0.05) || cog < 0.5);
+  return { suspicious, cog, impliedTotal: totalCost * units, pctOfPrice };
+}
+
 interface InventoryItem {
   id: string;
   asin: string;
@@ -146,6 +183,9 @@ export default function CreatedListings() {
   const [panelEffectiveDate, setPanelEffectiveDate] = useState<Date>(new Date());
   const [confirmPurchaseOpen, setConfirmPurchaseOpen] = useState(false);
   const [pendingPurchaseItem, setPendingPurchaseItem] = useState<InventoryItem | null>(null);
+  // Acknowledgement for a per-unit cost that looks like it was typed into the
+  // Total Cost box. Same gate-the-save-button pattern as purchaseFbmAck below.
+  const [costSanityAck, setCostSanityAck] = useState(false);
   const [purchaseFbmAck, setPurchaseFbmAck] = useState(false);
   const purchaseFbaElig = useFbaEligibility({
     asin: pendingPurchaseItem?.asin ?? null,
@@ -2406,7 +2446,7 @@ export default function CreatedListings() {
                     {/* Selected record details */}
                     <div className="flex items-end gap-3 flex-shrink-0">
                       <div className="flex flex-col gap-0.5">
-                        <label className="text-[10px] font-semibold text-muted-foreground">Total Cost</label>
+                        <label className="text-[10px] font-semibold text-muted-foreground">Total Cost (lot)</label>
                         <Input
                           value={panelTotalCost}
                           onChange={(e) => {
@@ -2438,11 +2478,19 @@ export default function CreatedListings() {
                         />
                       </div>
                       <div className="flex flex-col gap-0.5">
-                        <label className="text-[10px] font-semibold text-muted-foreground">COG</label>
+                        <label className="text-[10px] font-semibold text-muted-foreground">COG / unit</label>
                         <Input
                           readOnly
-                          value={panelCog ? `$${parseFloat(panelCog).toFixed(2)}` : "—"}
-                          className="w-[90px] h-8 text-xs bg-muted/40"
+                          value={panelCog ? `$${parseFloat(panelCog).toFixed(2)}/ea` : "—"}
+                          title="Total Cost divided by Units. If this looks far too low, the Total Cost box probably has a per-unit price in it."
+                          className={cn(
+                            "w-[90px] h-8 text-xs bg-muted/40",
+                            suspiciousUnitCost(
+                              parseFloat(panelTotalCost) || 0,
+                              parseInt(panelUnits) || 0,
+                              paginatedInventory[highlightedRowIdx]?.price,
+                            ).suspicious && "border-amber-500 text-amber-700 dark:text-amber-400 font-semibold",
+                          )}
                         />
                       </div>
                       <div className="flex flex-col gap-0.5">
@@ -2562,6 +2610,7 @@ export default function CreatedListings() {
                     return;
                   }
 
+                  setCostSanityAck(false);
                   setPendingPurchaseItem(selectedItem);
                   setConfirmPurchaseOpen(true);
                 }}
@@ -3273,7 +3322,7 @@ export default function CreatedListings() {
                   </div>
                   <div className="grid grid-cols-3 gap-2">
                     <div className="rounded border p-2">
-                      <div className="text-[10px] text-muted-foreground uppercase mb-1">Total Cost</div>
+                      <div className="text-[10px] text-muted-foreground uppercase mb-1">Total Cost (whole lot)</div>
                       <Input
                         type="number"
                         step="0.01"
@@ -3308,6 +3357,52 @@ export default function CreatedListings() {
                       Enter a valid Total Cost and Units to continue.
                     </div>
                   )}
+
+                  {/* Catch the per-unit-typed-into-total mistake at entry.
+                      Offers the correction rather than only refusing, because
+                      the right number is already on screen -- it is just in
+                      the wrong box. */}
+                  {(() => {
+                    const chk = suspiciousUnitCost(tc, u, pendingPurchaseItem.price);
+                    if (!chk.suspicious) return null;
+                    return (
+                      <div className="rounded border border-amber-500/40 bg-amber-500/10 p-3 space-y-2">
+                        <div className="text-xs font-semibold text-amber-900 dark:text-amber-300">
+                          That works out to ${chk.cog.toFixed(4)} per unit
+                          {chk.pctOfPrice !== null && (
+                            <> — {chk.pctOfPrice.toFixed(1)}% of the ${Number(pendingPurchaseItem.price).toFixed(2)} selling price</>
+                          )}.
+                        </div>
+                        <div className="text-[11px] text-amber-900/90 dark:text-amber-200/90 leading-relaxed">
+                          <strong>Total Cost</strong> is what the whole lot cost, not the price of one unit.
+                          If ${tc.toFixed(2)} is what you paid <em>per unit</em>, the lot total for {u} units
+                          is <strong>${chk.impliedTotal.toFixed(2)}</strong>.
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="default"
+                            className="h-7 text-xs"
+                            onClick={() => {
+                              setPanelTotalCost(chk.impliedTotal.toFixed(2));
+                              setPanelCog(tc.toFixed(2));
+                              setCostSanityAck(false);
+                            }}
+                          >
+                            ${tc.toFixed(2)} is the per-unit price — set total to ${chk.impliedTotal.toFixed(2)}
+                          </Button>
+                          <label className="flex items-center gap-1.5 text-[11px] cursor-pointer">
+                            <Checkbox
+                              checked={costSanityAck}
+                              onCheckedChange={(v) => setCostSanityAck(!!v)}
+                            />
+                            <span>No, ${tc.toFixed(2)} really is the lot total</span>
+                          </label>
+                        </div>
+                      </div>
+                    );
+                  })()}
                   <details className="rounded border bg-muted/10 group">
                     <summary className="cursor-pointer select-none px-3 py-2 text-xs font-semibold hover:bg-muted/30 rounded">
                       Advanced: backdate this cost for P&amp;L history
@@ -3414,7 +3509,14 @@ export default function CreatedListings() {
                   addingPurchase ||
                   !(parseFloat(panelTotalCost) > 0) ||
                   !(parseInt(panelUnits) > 0) ||
-                  (purchaseFbaBlocked && !purchaseFbmAck)
+                  (purchaseFbaBlocked && !purchaseFbmAck) ||
+                  // An implausible per-unit cost must be corrected or explicitly
+                  // confirmed. Cheap goods exist, so this is a stop, not a ban.
+                  (suspiciousUnitCost(
+                    parseFloat(panelTotalCost) || 0,
+                    parseInt(panelUnits) || 0,
+                    pendingPurchaseItem?.price,
+                  ).suspicious && !costSanityAck)
                 }
                 variant={purchaseFbaBlocked ? "destructive" : "default"}
               >
