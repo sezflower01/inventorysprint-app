@@ -268,7 +268,18 @@ export default function RuleBuilder({ onRulesChange, isAdmin }: RuleBuilderProps
   const [authorizedMarketplaces, setAuthorizedMarketplaces] = useState<string[]>(["US"]);
   const [renamingRuleId, setRenamingRuleId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
-  const [assignmentCounts, setAssignmentCounts] = useState<Record<string, number>>({});
+  // Per-rule counts, resolved in SQL. See get_rule_assignment_counts().
+  //
+  // An assignment is per (asin, marketplace), so with four marketplaces
+  // authorised one ASIN can carry four assignments -- hence both figures:
+  // the badge says ASINs because that is what it is labelled.
+  type RuleCounts = {
+    assignments: number;
+    enabled_assignments: number;
+    distinct_asins: number;
+    enabled_asins: number;
+  };
+  const [assignmentCounts, setAssignmentCounts] = useState<Record<string, RuleCounts>>({});
 
   const startRename = (rule: RepricerRule) => {
     setRenamingRuleId(rule.id);
@@ -336,17 +347,29 @@ export default function RuleBuilder({ onRulesChange, isAdmin }: RuleBuilderProps
       const fetchedRules = (data as RepricerRule[]) || [];
       setRules(fetchedRules);
 
-      // Fetch assignment counts per rule
+      // Counts come from SQL, not from counting fetched rows.
+      //
+      // This used to select every assignment row and tally them here. PostgREST
+      // caps a response at 1,000 rows and truncates SILENTLY, so with 6,214
+      // assignments across 17 rules (measured 2026-09-06) the badges were
+      // sharing out a truncated 1,000 and all of them were wrong -- Momentum
+      // Smart read 54 against a true 254 ASINs. The failure also worsens as the
+      // account grows, since more rules divide the same 1,000 rows.
       if (fetchedRules.length > 0) {
-        const ruleIds = fetchedRules.map(r => r.id);
-        const { data: assignments } = await supabase
-          .from("repricer_assignments")
-          .select("rule_id")
-          .in("rule_id", ruleIds);
-        if (assignments) {
-          const counts: Record<string, number> = {};
-          for (const a of assignments) {
-            if (a.rule_id) counts[a.rule_id] = (counts[a.rule_id] || 0) + 1;
+        const { data: countRows, error: countErr } = await supabase
+          .rpc("get_rule_assignment_counts" as any);
+        if (countErr) {
+          console.error("Rule assignment counts failed:", countErr);
+        } else if (countRows) {
+          const counts: Record<string, RuleCounts> = {};
+          for (const c of countRows as any[]) {
+            if (!c?.rule_id) continue;
+            counts[c.rule_id] = {
+              assignments: Number(c.assignments) || 0,
+              enabled_assignments: Number(c.enabled_assignments) || 0,
+              distinct_asins: Number(c.distinct_asins) || 0,
+              enabled_asins: Number(c.enabled_asins) || 0,
+            };
           }
           setAssignmentCounts(counts);
         }
@@ -883,8 +906,20 @@ export default function RuleBuilder({ onRulesChange, isAdmin }: RuleBuilderProps
                             ⭐ Default
                           </Badge>
                         )}
-                        <Badge variant="outline" className="text-xs">
-                          {assignmentCounts[rule.id] || 0} ASINs
+                        <Badge
+                          variant="outline"
+                          className="text-xs"
+                          title={(() => {
+                            const c = assignmentCounts[rule.id];
+                            if (!c) return "No assignments";
+                            // Assignments are per (asin, marketplace), so this is
+                            // usually a multiple of the ASIN count.
+                            return `${c.distinct_asins} ASINs (${c.enabled_asins} enabled) · `
+                                 + `${c.assignments} assignments across marketplaces `
+                                 + `(${c.enabled_assignments} enabled)`;
+                          })()}
+                        >
+                          {assignmentCounts[rule.id]?.distinct_asins ?? 0} ASINs
                         </Badge>
                         <div className="flex gap-1 mr-2">
                           {rule.marketplaces?.map((mp) => (
@@ -993,8 +1028,20 @@ export default function RuleBuilder({ onRulesChange, isAdmin }: RuleBuilderProps
                             ⭐ Default
                           </Badge>
                         )}
-                        <Badge variant="outline" className="text-xs">
-                          {assignmentCounts[rule.id] || 0} ASINs
+                        <Badge
+                          variant="outline"
+                          className="text-xs"
+                          title={(() => {
+                            const c = assignmentCounts[rule.id];
+                            if (!c) return "No assignments";
+                            // Assignments are per (asin, marketplace), so this is
+                            // usually a multiple of the ASIN count.
+                            return `${c.distinct_asins} ASINs (${c.enabled_asins} enabled) · `
+                                 + `${c.assignments} assignments across marketplaces `
+                                 + `(${c.enabled_assignments} enabled)`;
+                          })()}
+                        >
+                          {assignmentCounts[rule.id]?.distinct_asins ?? 0} ASINs
                         </Badge>
                         <div className="flex gap-1 mr-2">
                           {rule.marketplaces?.map((mp) => (
