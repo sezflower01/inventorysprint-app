@@ -382,6 +382,53 @@ export default function RuleBuilder({ onRulesChange, isAdmin }: RuleBuilderProps
     }
   };
 
+  // Copy one rule's Power Hours window onto every other rule.
+  //
+  // The window lives per rule so different rules CAN differ, but the seller
+  // runs one trading pattern across the whole catalogue and asked for them
+  // unified. Doing it as an explicit action rather than moving the setting to
+  // the account keeps both: one click to make them agree, and the freedom to
+  // diverge afterwards.
+  //
+  // Only the four daypart columns are copied. Nothing else about a rule is
+  // touched -- anchors, undercuts and competitor settings stay as they are.
+  const applyDaypartToAllRules = async (source: RepricerRule) => {
+    const src = source as any;
+    if (!src.daypart_enabled || !src.daypart_start || !src.daypart_end
+        || src.daypart_undercut_amount == null) {
+      toast.error("Set the window on this rule first, then apply it to the others");
+      return;
+    }
+    const others = rules.filter(r => r.id !== source.id);
+    if (others.length === 0) { toast.info("No other rules to update"); return; }
+
+    const ok = window.confirm(
+      `Apply ${src.daypart_start}–${src.daypart_end} at $${Number(src.daypart_undercut_amount).toFixed(2)} ` +
+      `to all ${others.length} other rules?\n\n` +
+      `Inside that window every rule will undercut instead of matching. ` +
+      `Nothing else about the rules changes, and no rule can price below its min price.`
+    );
+    if (!ok) return;
+
+    try {
+      const { error } = await supabase
+        .from("repricer_rules")
+        .update({
+          daypart_enabled: true,
+          daypart_start: src.daypart_start,
+          daypart_end: src.daypart_end,
+          daypart_undercut_amount: src.daypart_undercut_amount,
+        } as any)
+        .in("id", others.map(r => r.id));
+      if (error) throw error;
+      toast.success(`Power Hours applied to ${others.length} rules`);
+      await fetchRules();
+      onRulesChange?.();
+    } catch (e: any) {
+      toast.error("Could not apply to all rules: " + e.message);
+    }
+  };
+
   const openCreateDialog = (type: "standard" | "ai" = "standard", custom = false) => {
     setEditingRule(null);
     setRuleType(type === "standard" ? "ai" : type); // Custom also uses AI type
@@ -921,6 +968,16 @@ export default function RuleBuilder({ onRulesChange, isAdmin }: RuleBuilderProps
                         >
                           {assignmentCounts[rule.id]?.distinct_asins ?? 0} ASINs
                         </Badge>
+                        {(rule as any).daypart_enabled && (
+                          <Badge
+                            variant="outline"
+                            className="text-xs border-amber-500/50 text-amber-600 dark:text-amber-400 cursor-pointer hover:bg-amber-500/10"
+                            title={`Power Hours ${(rule as any).daypart_start}–${(rule as any).daypart_end}, undercut $${Number((rule as any).daypart_undercut_amount ?? 0).toFixed(2)}. Click to apply this window to every other rule.`}
+                            onClick={(e) => { e.stopPropagation(); applyDaypartToAllRules(rule); }}
+                          >
+                            ⏰ {(rule as any).daypart_start}–{(rule as any).daypart_end}
+                          </Badge>
+                        )}
                         <div className="flex gap-1 mr-2">
                           {rule.marketplaces?.map((mp) => (
                             <Badge key={mp} variant="secondary" className="text-xs">
@@ -1043,6 +1100,16 @@ export default function RuleBuilder({ onRulesChange, isAdmin }: RuleBuilderProps
                         >
                           {assignmentCounts[rule.id]?.distinct_asins ?? 0} ASINs
                         </Badge>
+                        {(rule as any).daypart_enabled && (
+                          <Badge
+                            variant="outline"
+                            className="text-xs border-amber-500/50 text-amber-600 dark:text-amber-400 cursor-pointer hover:bg-amber-500/10"
+                            title={`Power Hours ${(rule as any).daypart_start}–${(rule as any).daypart_end}, undercut $${Number((rule as any).daypart_undercut_amount ?? 0).toFixed(2)}. Click to apply this window to every other rule.`}
+                            onClick={(e) => { e.stopPropagation(); applyDaypartToAllRules(rule); }}
+                          >
+                            ⏰ {(rule as any).daypart_start}–{(rule as any).daypart_end}
+                          </Badge>
+                        )}
                         <div className="flex gap-1 mr-2">
                           {rule.marketplaces?.map((mp) => (
                             <Badge key={mp} variant="secondary" className="text-xs">

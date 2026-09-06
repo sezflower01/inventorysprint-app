@@ -997,6 +997,93 @@ export default function AiRuleBuilder({ settings, onChange, hideProfileSelector,
                 )}
               </div>
 
+              {/* Power Hours — a daily window where this rule undercuts
+                  instead of matching.
+
+                  Times are stored on the rule and edited here, so the hours can
+                  change without a deploy. <input type="time"> gives the native
+                  clock picker on every platform, including the phone. */}
+              <div className="space-y-3 mt-4 p-4 rounded-lg border-2 border-amber-500/40 bg-amber-950/20">
+                <div className="flex items-start gap-3">
+                  <Checkbox
+                    id="daypart-enabled"
+                    checked={(settings as any).daypart_enabled === true}
+                    onCheckedChange={(checked) => {
+                      const on = checked === true;
+                      // Seed sensible values so enabling it is never a silent
+                      // no-op -- the DB constraint rejects enabled-without-values.
+                      onChange({
+                        ...settings,
+                        daypart_enabled: on,
+                        daypart_start: (settings as any).daypart_start ?? "06:00",
+                        daypart_end: (settings as any).daypart_end ?? "12:00",
+                        daypart_undercut_amount:
+                          (settings as any).daypart_undercut_amount ?? 0.01,
+                      } as any);
+                    }}
+                  />
+                  <Label htmlFor="daypart-enabled" className="cursor-pointer text-xs text-muted-foreground leading-relaxed">
+                    <span className="font-medium text-foreground">
+                      ⏰ Power Hours — undercut instead of matching, during set hours
+                    </span>
+                    <br />
+                    Inside the window this rule aims at the <strong>same competitor</strong> it
+                    always does and simply lands the amount below it. Outside the window
+                    nothing changes. It can never price below your min price.
+                  </Label>
+                </div>
+
+                {(settings as any).daypart_enabled === true && (
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                    <div className="space-y-1">
+                      <Label htmlFor="daypart-start" className="text-xs font-semibold">From</Label>
+                      <Input
+                        id="daypart-start"
+                        type="time"
+                        value={(settings as any).daypart_start ?? "06:00"}
+                        onChange={(e) => updateSetting("daypart_start" as any, e.target.value as any)}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="daypart-end" className="text-xs font-semibold">To</Label>
+                      <Input
+                        id="daypart-end"
+                        type="time"
+                        value={(settings as any).daypart_end ?? "12:00"}
+                        onChange={(e) => updateSetting("daypart_end" as any, e.target.value as any)}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="daypart-undercut" className="text-xs font-semibold">
+                        Undercut ({homeCurrencySymbol})
+                      </Label>
+                      <Input
+                        id="daypart-undercut"
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        placeholder="0.01"
+                        value={(settings as any).daypart_undercut_amount ?? ""}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          if (raw === "") { updateSetting("daypart_undercut_amount" as any, null as any); return; }
+                          const v = parseFloat(raw);
+                          updateSetting("daypart_undercut_amount" as any, isNaN(v) ? (null as any) : Math.max(0, v));
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {(settings as any).daypart_enabled === true && (
+                  <p className="text-xs text-muted-foreground">
+                    Times use your account timezone (Repricer Settings → schedule timezone),
+                    not UTC. The end time is exclusive, so 06:00–12:00 runs until 11:59.
+                    Setting <em>To</em> earlier than <em>From</em> makes the window cross midnight.
+                  </p>
+                )}
+              </div>
+
               <p className="text-xs text-muted-foreground">
                 Min/Max prices are set per-assignment in the Assignments tab
               </p>

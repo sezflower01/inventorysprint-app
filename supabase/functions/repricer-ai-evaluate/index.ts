@@ -5724,7 +5724,7 @@ Deno.serve(async (req) => {
     // Get global settings for absolute floor + momentum settings
     const { data: settings } = await supabase
       .from('repricer_settings')
-      .select('absolute_min_price_floor, momentum_check_enabled, momentum_threshold_pct')
+      .select('absolute_min_price_floor, momentum_check_enabled, momentum_threshold_pct, schedule_timezone')
       .eq('user_id', userId)
       .maybeSingle();
     
@@ -6063,6 +6063,70 @@ Deno.serve(async (req) => {
     } catch (e) {
       // Non-critical — don't block evaluation if learning lookup fails
       console.warn(`[LEARNING_OVERRIDE] Lookup failed for ${targetAsin}:`, e);
+    }
+
+    // ── DAYPARTING ────────────────────────────────────────────────────
+    //
+    // A daily window where this rule undercuts instead of matching. The seller
+    // sees orders arrive in the morning and slow after midday, and wants to be
+    // sharper while the traffic is there.
+    //
+    // MUTATES rule.undercut_amount ON PURPOSE, and does it HERE rather than
+    // further down. matchExactly is derived immediately below from the fully
+    // resolved undercut_amount, and every downstream guard keys off that. So
+    // setting the value here is what makes $0.01 genuinely override "equal" --
+    // the rule stops being treated as match-exactly at all, instead of getting
+    // a nonzero number with all the match-exactly protections still clamping
+    // it back. Assigning after this point would silently do nothing.
+    //
+    // Deliberately changes ONLY the amount. The anchor (target_anchor) and the
+    // competitor set (fbm_competition_mode) are untouched, so inside the
+    // window the rule aims at exactly the same offer as outside it and simply
+    // lands a little under. And it cannot break the floor: min_price is
+    // clamped downstream, unconditionally, with nothing here to bypass it.
+    try {
+      if ((rule as any)?.daypart_enabled
+          && (rule as any).daypart_start
+          && (rule as any).daypart_end
+          && (rule as any).daypart_undercut_amount != null) {
+        const tz = settings?.schedule_timezone || 'America/Chicago';
+        // Read the wall clock in the seller's timezone, not the server's.
+        const nowLocal = new Date(new Date().toLocaleString('en-US', { timeZone: tz }));
+        const nowMin = nowLocal.getHours() * 60 + nowLocal.getMinutes();
+        const toMin = (hhmm: string): number => {
+          const [h, m] = String(hhmm).split(':').map(Number);
+          return (h || 0) * 60 + (m || 0);
+        };
+        const startMin = toMin((rule as any).daypart_start);
+        const endMin = toMin((rule as any).daypart_end);
+        // End is exclusive. start > end means the window crosses midnight,
+        // same convention as isInScheduleWindow in repricer-unified-dispatch.
+        const inWindow = startMin <= endMin
+          ? (nowMin >= startMin && nowMin < endMin)
+          : (nowMin >= startMin || nowMin < endMin);
+
+        if (inWindow) {
+          const before = Number((rule as any).undercut_amount ?? 0);
+          const dayUndercut = Math.max(0, Number((rule as any).daypart_undercut_amount));
+          (rule as any).undercut_amount = dayUndercut;
+          console.log(
+            `[DAYPART] ACTIVE ${(rule as any).daypart_start}-${(rule as any).daypart_end} ${tz} ` +
+            `| local ${String(nowLocal.getHours()).padStart(2, '0')}:${String(nowLocal.getMinutes()).padStart(2, '0')} ` +
+            `| undercut $${before.toFixed(4)} -> $${dayUndercut.toFixed(4)} | rule="${(rule as any).name}"`
+          );
+        } else {
+          console.log(
+            `[DAYPART] outside window ${(rule as any).daypart_start}-${(rule as any).daypart_end} ${tz} ` +
+            `| local ${String(nowLocal.getHours()).padStart(2, '0')}:${String(nowLocal.getMinutes()).padStart(2, '0')} ` +
+            `| undercut unchanged at $${Number((rule as any).undercut_amount ?? 0).toFixed(4)}`
+          );
+        }
+      }
+    } catch (e) {
+      // Never let a clock or parse problem stop a price evaluation. Falling
+      // through leaves the rule's normal undercut in force, which is the
+      // conservative outcome.
+      console.warn('[DAYPART] skipped:', e instanceof Error ? e.message : String(e));
     }
 
     // Final match-exactly derivation — undercut_amount is the sole source of
