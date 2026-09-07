@@ -278,6 +278,10 @@ function detectIsFba(item: { source?: string | null; fnsku?: string | null; rese
   const hasFnsku = !!item.fnsku && String(item.fnsku).trim().length > 0;
   const reservedOrInbound = (Number(item.reserved) || 0) + (Number(item.inbound) || 0);
   const srcSaysFbm = src === "amazon_sync_fbm" || (src.includes("fbm") && !src.includes("fba"));
+  // An explicit FBM source with no FBA stock outranks an FNSKU, because an
+  // FNSKU survives an FBA -> FBM conversion and therefore proves only what the
+  // listing USED to be. Checked before the FNSKU test for that reason.
+  if (srcSaysFbm && reservedOrInbound === 0) return false;
   if (hasFnsku || reservedOrInbound > 0) return true;
   if (srcSaysFbm) return false;
   return true;
@@ -957,14 +961,29 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
         const srcSaysFba = src === 'amazon_sync' || (src.includes('fba') && !src.includes('fbm'));
         const srcSaysFbm = src === 'amazon_sync_fbm' || (src.includes('fbm') && !src.includes('fba'));
         // Hard FBA evidence — overrides any stored FBM tag from merchant-listings sync
+        // HARD FBM IS CHECKED FIRST, and no longer requires the absence of an
+        // FNSKU.
+        //
+        // An FNSKU does NOT disappear when a listing is converted from FBA to
+        // merchant fulfilment -- Amazon issued it against the FBA offer and it
+        // stays on the record. B001GQ2DB6 / CM-BEP5-6YOO proved it on
+        // 2026-09-07: source amazon_sync_fbm, zero reserved and inbound, all
+        // four assignments storing fulfillment_type FBM, and it still rendered
+        // FBA because `hasFnsku` short-circuited the cascade before hardFbm
+        // was ever evaluated.
+        //
+        // amazon_sync_fbm is a POSITIVE statement from the merchant-listings
+        // sync; a surviving FNSKU is only a fact about the listing's past. The
+        // positive statement wins.
+        //
+        // This does not undo the earlier fix. The 327 rows that were wrongly
+        // showing FBM carry source "live_api", which is not an FBM source, so
+        // hardFbm cannot fire for them and hasFnsku still resolves them to FBA.
+        // Only the 51 rows explicitly synced as merchant offers are affected.
+        const hardFbm = srcSaysFbm && reservedOrInbound === 0;
+        if (hardFbm) return 'FBM';
         const hardFba = hasFnsku || reservedOrInbound > 0 || srcSaysFba;
         if (hardFba) return 'FBA';
-        // Hard FBM evidence — overrides any stored FBA tag from a stale/wrong assignment.
-        // Mirrors how Live Sales trusts Orders-API FulfillmentChannel=MFN regardless of
-        // any other guess. amazon_sync_fbm only writes merchant offers; combined with
-        // no FNSKU and zero FBA reserved/inbound, this is authoritative MFN.
-        const hardFbm = srcSaysFbm && !hasFnsku && reservedOrInbound === 0;
-        if (hardFbm) return 'FBM';
         if (assignment?.fulfillment_type) return assignment.fulfillment_type;
         if (src.includes('fbm')) return 'FBM';
         const bbIsFba = snapshot?.buybox_is_fba === true;
