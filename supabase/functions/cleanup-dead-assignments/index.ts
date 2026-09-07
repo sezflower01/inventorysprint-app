@@ -54,6 +54,7 @@ Deno.serve(async (req) => {
 
     const stats = {
       intl_ineligible_disabled: 0,
+      orphaned_disabled: 0,
       terminal_status_disabled: 0,
       mismatch_zero_stock_disabled: 0,
       users_processed: 0,
@@ -85,7 +86,9 @@ Deno.serve(async (req) => {
           (q) => q
             .eq("user_id", userId)
             .eq("is_enabled", true)
-            .neq("marketplace", "US")
+            // US is no longer excluded. It was, which meant the whole
+            // INACTIVE / NOT_FOUND / UNKNOWN check never ran on the primary
+            // marketplace -- the one with by far the most assignments.
             .in("intl_listing_status", ["UNKNOWN", "NOT_FOUND", "INACTIVE", "[]", ""]),
         );
 
@@ -97,6 +100,9 @@ Deno.serve(async (req) => {
           (q) => q
             .eq("user_id", userId)
             .eq("is_enabled", true)
+            // Still non-US ONLY, deliberately. intl_listing_status is null by
+            // design on US rows, so dropping this filter would disable the
+            // entire US book on the first run.
             .neq("marketplace", "US")
             .is("intl_listing_status", null),
         );
@@ -123,6 +129,69 @@ Deno.serve(async (req) => {
           }
           stats.intl_ineligible_disabled += intlToDisable.length;
           console.log(`[cleanup] ${userId}: disabled ${intlToDisable.length} intl ineligible assignments`);
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // 1b. ORPHANED ASSIGNMENTS — no inventory row for the SKU at all.
+        //
+        // This sweep exists because every other check here starts FROM
+        // inventory and works forward, which makes an assignment whose SKU has
+        // no inventory row structurally invisible. Measured 2026-09-07: 240 of
+        // one account's 344 enabled US assignments were exactly that, and 191
+        // of them were still being evaluated daily — real SP-API and Keepa
+        // quota spent pricing listings with no stock record at all.
+        //
+        // SALES ARE THE VETO. Amazon reports what sold independently of our
+        // inventory sync, so a recent sale is proof of life that no local
+        // table can contradict. Of those 257 orphans, 26 HAD sold within the
+        // year and 1 within 30 days — disabling those would have switched off
+        // real, sellable listings because a sync missed them. So anything with
+        // a sale in the last 365 days is left alone, whatever else is true.
+        // ═══════════════════════════════════════════════════════════════
+        const enabledAssignments = await fetchAllRows(
+          supabase,
+          "repricer_assignments",
+          "id, asin, sku, marketplace",
+          (q) => q.eq("user_id", userId).eq("is_enabled", true),
+        );
+
+        const orphanIds: string[] = [];
+        if ((enabledAssignments || []).length > 0) {
+          const invSkus = new Set(
+            ((await fetchAllRows(supabase, "inventory", "sku",
+              (q) => q.eq("user_id", userId))) || []).map((r: any) => r.sku),
+          );
+          const candidates = (enabledAssignments || []).filter((a: any) => a.sku && !invSkus.has(a.sku));
+
+          if (candidates.length > 0) {
+            // One query for the whole candidate set rather than per ASIN.
+            const since = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10);
+            const soldAsins = new Set<string>();
+            const asins = [...new Set(candidates.map((a: any) => a.asin).filter(Boolean))];
+            for (let b = 0; b < asins.length; b += 200) {
+              const rows = await fetchAllRows(
+                supabase, "sales_orders", "asin",
+                (q) => q.eq("user_id", userId)
+                        .in("asin", asins.slice(b, b + 200))
+                        .gte("order_date", since)
+                        .neq("is_cancelled", true),
+              );
+              for (const r of rows || []) if (r.asin) soldAsins.add(r.asin);
+            }
+            for (const a of candidates) if (!soldAsins.has(a.asin)) orphanIds.push(a.id);
+          }
+        }
+
+        if (orphanIds.length > 0) {
+          for (let b = 0; b < orphanIds.length; b += 200) {
+            await supabase
+              .from("repricer_assignments")
+              .update(disablePayload("Orphaned — no inventory row, no sale in 365 days"))
+              .eq("user_id", userId)
+              .in("id", orphanIds.slice(b, b + 200));
+          }
+          stats.orphaned_disabled += orphanIds.length;
+          console.log(`[cleanup] ${userId}: disabled ${orphanIds.length} orphaned assignments`);
         }
 
         // ═══════════════════════════════════════════════════════════════
