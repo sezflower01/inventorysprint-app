@@ -246,6 +246,14 @@ export const PROFILE_PRESETS: Record<SmartProfile, Partial<AiRuleSettings>> = {
 };
 
 export interface AiRuleSettings {
+  // Power Hours. Optional so older callers that omit them still typecheck,
+  // but they MUST be threaded through RuleBuilder's settings prop and its
+  // saveRule payload -- both are explicit whitelists, and a field missing
+  // from either is silently dropped rather than erroring.
+  daypart_enabled?: boolean;
+  daypart_start?: string | null;
+  daypart_end?: string | null;
+  daypart_undercut_amount?: number | null;
   // Smart Engine Profile
   smart_profile: SmartProfile;
   // Scenario behaviors
@@ -367,6 +375,10 @@ interface AiRuleBuilderProps {
 }
 
 export const defaultAiRuleSettings: AiRuleSettings = {
+  daypart_enabled: false,
+  daypart_start: null,
+  daypart_end: null,
+  daypart_undercut_amount: null,
   smart_profile: 'MOMENTUM_BUILDER',
   when_only_seller: "CUSTOM_PRICE",
   when_not_buybox_eligible: "CUSTOM_PRICE",

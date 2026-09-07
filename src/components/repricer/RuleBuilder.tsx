@@ -564,6 +564,18 @@ export default function RuleBuilder({ onRulesChange, isAdmin }: RuleBuilderProps
         condition_scope: (formData.condition_scope || "New"),
         strategy: isAiRule ? "AI_WIN_SALES_BOOSTER" : (formData.strategy || "MATCH_LOWEST_FBA_MINUS"),
         undercut_amount: formData.undercut_amount ?? 0,
+        // Second whitelist, same trap. Without these the checkbox would toggle
+        // on screen and then vanish on save, which is worse than not working.
+        // Normalised to satisfy the CHECK constraints: enabling the window
+        // without times or an amount is rejected by the database on purpose.
+        daypart_enabled: (formData as any).daypart_enabled === true,
+        daypart_start: (formData as any).daypart_start || null,
+        daypart_end: (formData as any).daypart_end || null,
+        daypart_undercut_amount:
+          ((formData as any).daypart_undercut_amount == null
+            || (formData as any).daypart_undercut_amount === "")
+            ? null
+            : Math.max(0, Number((formData as any).daypart_undercut_amount)),
         fbm_undercut_amount: (formData.fbm_undercut_amount == null || (formData.fbm_undercut_amount as any) === "") ? null : Math.max(0, Number(formData.fbm_undercut_amount)),
         suppressed_bb_undercut: (formData.suppressed_bb_undercut == null || (formData.suppressed_bb_undercut as any) === "") ? null : Math.max(0, Number(formData.suppressed_bb_undercut)),
         min_price: formData.min_price,
@@ -1251,6 +1263,15 @@ export default function RuleBuilder({ onRulesChange, isAdmin }: RuleBuilderProps
                     min_price: formData.min_price ?? null,
                     max_price: formData.max_price ?? null,
                     undercut_amount: formData.undercut_amount ?? 0,
+                    // Power Hours must be listed here explicitly. This prop is a
+                    // whitelist rebuilt on EVERY render, so a field left out is
+                    // read back as undefined -- the checkbox renders unchecked,
+                    // snaps back the instant it is clicked, and looks like a dead
+                    // control rather than a missing mapping.
+                    daypart_enabled: (formData as any).daypart_enabled ?? false,
+                    daypart_start: (formData as any).daypart_start ?? null,
+                    daypart_end: (formData as any).daypart_end ?? null,
+                    daypart_undercut_amount: (formData as any).daypart_undercut_amount ?? null,
                     fbm_undercut_amount: formData.fbm_undercut_amount ?? null,
                     suppressed_bb_undercut: formData.suppressed_bb_undercut ?? null,
                     undercut_mode: ((formData as any).undercut_mode ?? (formData.ai_settings as any)?.undercut_mode ?? 'managed'),
