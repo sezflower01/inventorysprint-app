@@ -261,6 +261,28 @@ const RULE_ITEM_CLASS =
 const normalizeIdentifier = (value?: string | null) =>
   (value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 
+// Decide own fulfilment from evidence, not from the source string alone.
+//
+// The write paths used `source.includes("fba") || source === "amazon_sync"`,
+// which looks reasonable until you check what sources actually exist. Measured
+// 2026-09-06: 416 of 429 inventory rows behind enabled assignments carry source
+// "live_api" -- containing neither "fba" nor matching "amazon_sync" -- so every
+// assignment created from one was stamped FBM and stayed that way. 327 of the
+// 338 FBM-stored assignments carry an FNSKU, which only FBA issues.
+//
+// An FNSKU or real reserved/inbound stock is positive evidence. The source
+// string is consulted only to rule FBA out explicitly; an unrecognised source
+// is not evidence of FBM.
+function detectIsFba(item: { source?: string | null; fnsku?: string | null; reserved?: number | null; inbound?: number | null }): boolean {
+  const src = String(item.source || "").toLowerCase();
+  const hasFnsku = !!item.fnsku && String(item.fnsku).trim().length > 0;
+  const reservedOrInbound = (Number(item.reserved) || 0) + (Number(item.inbound) || 0);
+  const srcSaysFbm = src === "amazon_sync_fbm" || (src.includes("fbm") && !src.includes("fba"));
+  if (hasFnsku || reservedOrInbound > 0) return true;
+  if (srcSaysFbm) return false;
+  return true;
+}
+
 interface AssignmentsTableProps {
   rules: RepricerRule[];
   marketplace?: string; // Selected marketplace filter
@@ -294,7 +316,13 @@ const fetchAllPaged = async (baseQuery: () => any, pageSize = 1000): Promise<any
 // Data fetching function — Phase 1: core data only (fast)
 async function fetchRepricerData(userId: string, targetMarketplace: string): Promise<InventoryWithAssignment[]> {
   const inventorySelect =
-    "id, asin, sku, title, image_url, price, my_price, cost, available, reserved, inbound, unfulfilled, listing_status, listing_created_at, source, fees_json, min_price, max_price, first_received_at, expiration_date";
+    // fnsku IS REQUIRED HERE. The fulfillment_type cascade below treats an
+    // FNSKU as decisive FBA evidence ("FBM listings NEVER have an FNSKU"), but
+    // the column was never fetched, so inv.fnsku was always undefined and that
+    // test could never fire. Measured 2026-09-06: 669 assignment rows have an
+    // FNSKU in the database this query could not see, 327 of them displaying
+    // as FBM.
+    "id, asin, sku, fnsku, title, image_url, price, my_price, cost, available, reserved, inbound, unfulfilled, listing_status, listing_created_at, source, fees_json, min_price, max_price, first_received_at, expiration_date";
 
   // PARALLEL: fetch inventory + assignments at the same time
   const [inventoryData, assignmentsData] = await Promise.all([
@@ -3383,7 +3411,7 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
         }
       }
 
-      const isFba = item.source?.includes("fba") || item.source === "amazon_sync";
+      const isFba = detectIsFba(item as any);
       const skuValue = String(item.sku || "");
       const isUsedSku = skuValue.startsWith('amzn.gr.') || skuValue.toLowerCase().startsWith('used_');
       const inferredCondition = isUsedSku ? 'Used' : 'New';
@@ -3579,7 +3607,7 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
         const key = `${item.sku}|${targetMp}`;
         if (seenSku.has(key)) continue;
         seenSku.add(key);
-        const isFba = item.source?.includes("fba") || item.source === "amazon_sync";
+        const isFba = detectIsFba(item as any);
         upsertRows.push({
           user_id: user.id,
           asin: item.asin,
