@@ -5,6 +5,7 @@ import { exchangeLwaToken } from "../_shared/lwa-token.ts";
 import { getSpApiEndpoint, signRequest } from "../_shared/sp-api-sigv4.ts";
 import { resolveMinRoiEnabled } from "../_shared/min-roi-enabled.ts";
 import { waitForApiToken } from "../_shared/rate-limiter.ts";
+import { detectIsFba } from "../_shared/fulfillment-channel.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -273,7 +274,10 @@ Deno.serve(async (req) => {
     while (true) {
       const { data: page, error: invErr } = await supabase
         .from("inventory")
-        .select("asin, sku, price, my_price, amazon_price, cost, listing_status, source, available, reserved, inbound")
+        // fnsku is here for detectIsFba() in the dedup pass below. Without it
+        // every SKU falls back to "assume FBA" and an FBA/FBM pair on one ASIN
+        // reads as one channel, which is the duplicate the dedup then collapses.
+        .select("asin, sku, price, my_price, amazon_price, cost, listing_status, source, available, reserved, inbound, fnsku")
         .eq("user_id", userId)
         .not("asin", "is", null)
         .not("sku", "is", null)
@@ -1289,7 +1293,7 @@ Deno.serve(async (req) => {
     );
 
     if (allEnabled && allEnabled.length > 0) {
-      const invStatusMap = new Map<string, { available: number; reserved: number; inbound: number; status: string | null }>();
+      const invStatusMap = new Map<string, { available: number; reserved: number; inbound: number; status: string | null; isFba: boolean }>();
       for (const item of (inventoryRows || [])) {
         if (item.asin && item.sku) {
           invStatusMap.set(`${item.asin}:${item.sku}`, {
@@ -1297,6 +1301,7 @@ Deno.serve(async (req) => {
             reserved: (item as any).reserved || 0,
             inbound: (item as any).inbound || 0,
             status: item.listing_status,
+            isFba: detectIsFba(item as any),
           });
         }
       }
@@ -1342,23 +1347,51 @@ Deno.serve(async (req) => {
         if (!isBadStatus) return 2; // active-status but currently no stock
         return 1; // ghost/bad status — worst, but still ranked above "no match"
       };
+
+      // DEDUP KEY IS (asin, fulfilment channel), NOT asin.
+      //
+      // This pass exists for a real bug: a NOT_IN_CATALOG ghost SKU repricing
+      // itself down to its own floor while the real listing sat disabled,
+      // confirmed on B004IH1WSK/BR. Keying on ASIN alone fixed that and also
+      // broke something legitimate -- selling the same ASIN both FBA and FBM is
+      // ordinary practice, not an error state, and the two SKUs are two real
+      // listings with two independent Buy Box competitions.
+      //
+      // Keyed on ASIN, the FBM SKU always loses: it ranks 2 (active, no stock)
+      // against the FBA SKU's 3 (active, in stock), because FBM quantity lives
+      // in the merchant listings report and is not in the FBA inventory feed
+      // that usually creates the row first. Confirmed live on B0G2YNN87D --
+      // D4M-1H7-45IW was created 17:07, assigned 18:45 and disabled 20:45 the
+      // same day, and would have been disabled again after every later run.
+      //
+      // Ghost protection is unchanged WITHIN each channel: two FBA SKUs on one
+      // ASIN still dedup against each other, and so do two FBM SKUs.
+      const channelOf = (a: any): string => {
+        const inv = invStatusMap.get(`${a.asin}:${a.sku}`);
+        // No inventory row means no evidence of channel. Group those together
+        // rather than spreading them across both lanes, so a pair of unmatched
+        // SKUs on one ASIN still dedups the way it did before.
+        if (!inv) return 'unknown';
+        return inv.isFba ? 'FBA' : 'FBM';
+      };
       const bestForAsin = new Map<string, { id: string; sku: string; rank: number; createdAt: string }>();
       for (const a of allEnabled) {
         if (toDisable.includes(a.id)) continue; // already marked for disable
         const rank = rankFor(a);
-        const existing = bestForAsin.get(a.asin);
+        const key = `${a.asin}:${channelOf(a)}`;
+        const existing = bestForAsin.get(key);
         if (!existing) {
-          bestForAsin.set(a.asin, { id: a.id, sku: a.sku, rank, createdAt: a.created_at });
+          bestForAsin.set(key, { id: a.id, sku: a.sku, rank, createdAt: a.created_at });
           continue;
         }
         const thisIsBetter = rank > existing.rank || (rank === existing.rank && a.created_at > existing.createdAt);
         const loserId = thisIsBetter ? existing.id : a.id;
         const loserSku = thisIsBetter ? existing.sku : a.sku;
-        console.log(`[auto-assign-bulk] ⚠️ Dedup: disabling duplicate ${a.asin}/${loserSku} (id=${loserId}, rank=${thisIsBetter ? existing.rank : rank}) in favor of ${thisIsBetter ? a.sku : existing.sku} (rank=${thisIsBetter ? rank : existing.rank})`);
+        console.log(`[auto-assign-bulk] ⚠️ Dedup: disabling duplicate ${key}/${loserSku} (id=${loserId}, rank=${thisIsBetter ? existing.rank : rank}) in favor of ${thisIsBetter ? a.sku : existing.sku} (rank=${thisIsBetter ? rank : existing.rank})`);
         toDisable.push(loserId);
         deduplicatedCount++;
         if (thisIsBetter) {
-          bestForAsin.set(a.asin, { id: a.id, sku: a.sku, rank, createdAt: a.created_at });
+          bestForAsin.set(key, { id: a.id, sku: a.sku, rank, createdAt: a.created_at });
         }
       }
 
