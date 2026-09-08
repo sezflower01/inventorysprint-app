@@ -278,6 +278,7 @@ export default function RuleBuilder({ onRulesChange, isAdmin }: RuleBuilderProps
     enabled_assignments: number;
     distinct_asins: number;
     enabled_asins: number;
+    in_stock_asins: number;
   };
   const [assignmentCounts, setAssignmentCounts] = useState<Record<string, RuleCounts>>({});
 
@@ -369,6 +370,7 @@ export default function RuleBuilder({ onRulesChange, isAdmin }: RuleBuilderProps
               enabled_assignments: Number(c.enabled_assignments) || 0,
               distinct_asins: Number(c.distinct_asins) || 0,
               enabled_asins: Number(c.enabled_asins) || 0,
+              in_stock_asins: Number(c.in_stock_asins) || 0,
             };
           }
           setAssignmentCounts(counts);
@@ -971,14 +973,21 @@ export default function RuleBuilder({ onRulesChange, isAdmin }: RuleBuilderProps
                           title={(() => {
                             const c = assignmentCounts[rule.id];
                             if (!c) return "No assignments";
-                            // Assignments are per (asin, marketplace), so this is
-                            // usually a multiple of the ASIN count.
-                            return `${c.distinct_asins} ASINs (${c.enabled_asins} enabled) · `
-                                 + `${c.assignments} assignments across marketplaces `
-                                 + `(${c.enabled_assignments} enabled)`;
+                            // The badge leads with IN-STOCK because that is what
+                            // the Repricer grid shows -- it hides rows with no
+                            // available stock. Leading with the total made the
+                            // card disagree with the screen underneath it by
+                            // more than 2x (18 against 8 on this rule), which is
+                            // worse than showing no number at all.
+                            //
+                            // Assignments are per (asin, marketplace), so that
+                            // figure is usually a multiple of the ASIN count.
+                            return `${c.in_stock_asins} ASINs with available stock — what the grid shows\n`
+                                 + `${c.enabled_asins} enabled · ${c.distinct_asins} total ASINs\n`
+                                 + `${c.assignments} assignments across marketplaces (${c.enabled_assignments} enabled)`;
                           })()}
                         >
-                          {assignmentCounts[rule.id]?.distinct_asins ?? 0} ASINs
+                          {assignmentCounts[rule.id]?.in_stock_asins ?? 0} ASINs
                         </Badge>
                         {(rule as any).daypart_enabled && (
                           <Badge
@@ -1103,14 +1112,21 @@ export default function RuleBuilder({ onRulesChange, isAdmin }: RuleBuilderProps
                           title={(() => {
                             const c = assignmentCounts[rule.id];
                             if (!c) return "No assignments";
-                            // Assignments are per (asin, marketplace), so this is
-                            // usually a multiple of the ASIN count.
-                            return `${c.distinct_asins} ASINs (${c.enabled_asins} enabled) · `
-                                 + `${c.assignments} assignments across marketplaces `
-                                 + `(${c.enabled_assignments} enabled)`;
+                            // The badge leads with IN-STOCK because that is what
+                            // the Repricer grid shows -- it hides rows with no
+                            // available stock. Leading with the total made the
+                            // card disagree with the screen underneath it by
+                            // more than 2x (18 against 8 on this rule), which is
+                            // worse than showing no number at all.
+                            //
+                            // Assignments are per (asin, marketplace), so that
+                            // figure is usually a multiple of the ASIN count.
+                            return `${c.in_stock_asins} ASINs with available stock — what the grid shows\n`
+                                 + `${c.enabled_asins} enabled · ${c.distinct_asins} total ASINs\n`
+                                 + `${c.assignments} assignments across marketplaces (${c.enabled_assignments} enabled)`;
                           })()}
                         >
-                          {assignmentCounts[rule.id]?.distinct_asins ?? 0} ASINs
+                          {assignmentCounts[rule.id]?.in_stock_asins ?? 0} ASINs
                         </Badge>
                         {(rule as any).daypart_enabled && (
                           <Badge
