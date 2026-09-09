@@ -512,3 +512,6 @@ verify_jwt = false
 
 [functions.broadcast-app-reload]
 verify_jwt = false
+
+[functions.repair-collapsed-orders]
+verify_jwt = false
