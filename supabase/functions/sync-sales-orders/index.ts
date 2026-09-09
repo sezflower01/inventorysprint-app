@@ -229,6 +229,7 @@ import {
   getInventoryUnitCostSafe,
 } from '../_shared/cost-contract.ts';
 import { waitForApiToken, backoffMs } from '../_shared/rate-limiter.ts';
+import { mergeOrderItemsByAsin } from '../_shared/order-items.ts';
 import { HealthSignals } from '../_shared/health-signal.ts';
 import { maybeFirePromoTripwire } from '../_shared/promo-tripwire.ts';
 import { computeBbOwnEstimateFields, makeSellerIdCache } from '../_shared/bbOwnEstimate.ts';
@@ -3741,7 +3742,10 @@ async function handleSyncRequest(req: Request): Promise<Response> {
           }
 
           const itemsData = await itemsRes.json();
-          const items = itemsData?.payload?.OrderItems || [];
+          // Same merge as fetchOrderItems -- this path reads the API inline
+          // rather than through that helper, and without it a repeated ASIN
+          // line here overwrites instead of summing.
+          const items = mergeOrderItemsByAsin(itemsData?.payload?.OrderItems || []);
 
           if (items.length === 0) {
             console.log(`📋 REFRESH_PENDING: No items found for ${order.order_id}`);
@@ -8532,7 +8536,7 @@ async function fetchOrderItems(accessToken: string, orderId: string, retries = 5
       }
 
       const data = await response.json();
-      return data.payload?.OrderItems || [];
+      return mergeOrderItemsByAsin(data.payload?.OrderItems || []);
     } catch (err: any) {
       console.warn(`fetchOrderItems error for ${orderId}:`, err?.message || err);
       if (attempt < retries) {
