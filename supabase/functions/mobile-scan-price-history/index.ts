@@ -1,6 +1,7 @@
 // Mobile Scan – Price History (time-series) + Live Offers via Keepa
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { waitForApiToken } from "../_shared/rate-limiter.ts";
+import { detectIsFba } from "../_shared/fulfillment-channel.ts";
 import {
   acquireKeepaTokensOnly, reportKeepaTokensLeft, recordKeepa429,
   KEEPA_COST, KEEPA_RESERVE, type KeepaSlotOptions,
@@ -451,6 +452,20 @@ async function fetchLiveSpApiOffers(
     row.source === 'amazon_sync_fbm'
     && (Number(row.available || 0) > 0 || Number(row.reserved || 0) > 0),
   );
+  // Does the same ASIN ALSO carry live FBA stock? Added 2026-09-08, when this
+  // became possible: auto-assign-bulk now dedups on (asin, channel) rather than
+  // asin, so a seller can legitimately run an FBA and an FBM offer on one ASIN
+  // and both appear in this list.
+  //
+  // That breaks the override below, which is ASIN-level and cannot tell the two
+  // self-offers apart -- it forced BOTH to FBM the moment any FBM row existed.
+  // Observed live on B0G2YNN87D: two "YOU" offers at $37.74, both labelled FBM,
+  // one of which is 60 units of genuine FBA stock.
+  const hasLiveFbaInventory = (inventoryRows || []).some((row: any) =>
+    detectIsFba(row)
+    && (Number(row.available || 0) > 0 || Number(row.reserved || 0) > 0
+        || Number(row.inbound || 0) > 0),
+  );
   const accessToken = await getLwaAccessToken(sellerAuth.refresh_token);
   const url = `${endpoint}/products/pricing/v0/items/${asin}/offers?MarketplaceId=${marketplaceId}&ItemCondition=New`;
   await waitForApiToken(admin, 'pricing_api');
@@ -468,7 +483,15 @@ async function fetchLiveSpApiOffers(
       const isSelf = selfSellerIds.has(sellerId);
       // Do not infer FBA from local inventory presence. FBM inventory rows are stock truth,
       // and the old fallback turned real FBM self-offers into phantom FBA in the extension.
-      const isFBA = offer.IsFulfilledByAmazon === true && !(isSelf && hasLiveFbmInventory);
+      //
+      // The override is ASIN-level, so it can only be applied when the ASIN is
+      // unambiguously single-channel. With FBM stock and NO FBA stock, every
+      // self-offer must be FBM and forcing it is right -- that is the case this
+      // was written for. With BOTH channels live there are two real self-offers
+      // and no way to tell them apart from this side, so Amazon's own per-offer
+      // IsFulfilledByAmazon is the only thing that knows, and it is trusted.
+      const singleChannelFbm = hasLiveFbmInventory && !hasLiveFbaInventory;
+      const isFBA = offer.IsFulfilledByAmazon === true && !(isSelf && singleChannelFbm);
       return {
         sellerId,
         isFBA,
