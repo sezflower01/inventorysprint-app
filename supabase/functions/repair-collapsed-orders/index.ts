@@ -49,7 +49,23 @@ const MARKETPLACE_ID_MAP: Record<string, string> = {
 
 const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 200;
-const PER_CALL_DELAY_MS = 250;
+
+// Amazon's Orders API allows about 0.5 requests/second with a burst of 30.
+//
+// This started at 250ms -- 4/s, eight times over -- which worked for the first
+// batch because a full burst bucket absorbed it, and then collapsed: batch 2
+// made 60 calls in 19.4 seconds and returned 51 unverifiable out of 60. Those
+// were not missing orders. Every one of the 348 rows still on the shortlist is
+// inside the two-year retention window; they were throttled, and a 429 reads
+// exactly like an order that cannot be found.
+//
+// That matters beyond this function. The Orders API quota is account-wide and
+// shared with sync-sales-orders, so a sweep that overruns it degrades the sales
+// sync for everything else running at the time. Slow is the correct setting.
+const PER_CALL_DELAY_MS = 2100;
+// And wait for a token rather than giving up and firing anyway -- an 8s cap
+// meant the gate silently stopped gating under exactly the load it exists for.
+const TOKEN_WAIT_MS = 20_000;
 // Leave headroom before the platform kills the worker mid-write.
 const TIME_BUDGET_MS = 110_000;
 
@@ -59,6 +75,11 @@ const num = (v: unknown): number => {
 };
 const money = (v: number): number => Math.round(v * 100) / 100;
 
+// Set by fetchOrderItems so the caller can separate "throttled, try later" from
+// "Amazon has no record of this order". Module-level rather than threaded
+// through a return type because each invocation handles one batch serially.
+let lastFetchStatus = 0;
+
 async function fetchOrderItems(
   accessToken: string,
   orderId: string,
@@ -67,16 +88,20 @@ async function fetchOrderItems(
 ): Promise<any[] | null> {
   const endpoint = getSpApiEndpoint(marketplaceId);
   const url = `${endpoint}/orders/v0/orders/${encodeURIComponent(orderId)}/orderItems`;
-  await waitForApiToken(supabase, 'order_items_api', { maxWaitMs: 8000 });
+  await waitForApiToken(supabase, 'order_items_api', { maxWaitMs: TOKEN_WAIT_MS });
   const headers = await signRequest('GET', url, '', accessToken);
   const res = await fetch(url, { method: 'GET', headers });
   const text = await res.text();
   if (!res.ok) {
-    // 404 is normal for an order outside Amazon's retention window; it is not
-    // a failure of this repair, just an order that can no longer be verified.
+    // Distinguish these in the counts. A 404 is an order Amazon no longer
+    // retains and will never be repairable; a 429 is this sweep going too fast
+    // and IS repairable on a later pass. Folding both into "unverifiable" is
+    // what made 51 throttled rows look like 51 missing orders.
+    lastFetchStatus = res.status;
     console.warn(`[repair] ${orderId}: ${res.status} ${text.slice(0, 160)}`);
     return null;
   }
+  lastFetchStatus = 200;
   try {
     return mergeOrderItemsByAsin(JSON.parse(text)?.payload?.OrderItems || []);
   } catch {
@@ -98,7 +123,9 @@ Deno.serve(async (req) => {
   try {
     const body = await req.json().catch(() => ({}));
     const userId = body.user_id as string;
-    const marketplace = (body.marketplace || 'US') as string;
+    // null = every marketplace. Defaulting to US was what hid the BR and MX
+    // rows behind an "unverifiable" count instead of repairing them.
+    const marketplace = (body.marketplace ?? null) as string | null;
     const dryRun = body.dry_run !== false; // default true
     const limit = Math.min(Number(body.limit) || DEFAULT_LIMIT, MAX_LIMIT);
     const orderIds: string[] | null = Array.isArray(body.order_ids) && body.order_ids.length
@@ -110,7 +137,6 @@ Deno.serve(async (req) => {
         status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
-    const marketplaceId = MARKETPLACE_ID_MAP[marketplace] || MARKETPLACE_ID_MAP.US;
 
     // Candidates. With explicit order_ids this checks exactly those; otherwise
     // it uses the fee-ratio shortlist purely to decide WHICH orders are worth
@@ -119,7 +145,7 @@ Deno.serve(async (req) => {
     if (orderIds) {
       const { data, error } = await supabase
         .from('sales_orders')
-        .select('id, order_id, asin, quantity, sold_price, total_sale_amount, unit_cost, total_cost, referral_fee, fba_fee, total_fees, order_date')
+        .select('id, order_id, asin, marketplace, quantity, sold_price, total_sale_amount, unit_cost, total_cost, referral_fee, fba_fee, total_fees, order_date')
         .eq('user_id', userId)
         .in('order_id', orderIds);
       if (error) throw error;
@@ -128,6 +154,12 @@ Deno.serve(async (req) => {
       const { data, error } = await supabase.rpc('collapsed_order_candidates', {
         p_user_id: userId,
         p_limit: limit,
+        // null means every marketplace; the per-row marketplace decides how
+        // each call is signed.
+        p_marketplace: body.marketplace ?? null,
+        // Already-correct rows never leave the shortlist, so a sweep has to
+        // page past them or it re-checks the same head forever.
+        p_offset: Number(body.offset) || 0,
       });
       if (error) throw error;
       candidates = data || [];
@@ -143,16 +175,36 @@ Deno.serve(async (req) => {
       .from('seller_authorizations')
       .select('seller_id, marketplace_id, refresh_token')
       .eq('user_id', userId);
-    const sellerAuth = (authRows || []).find((a: any) => a.marketplace_id === marketplaceId)
-      || (authRows || [])[0];
-    if (!sellerAuth?.refresh_token) {
+    if (!authRows?.length) {
       return new Response(JSON.stringify({ ok: false, error: 'no_seller_auth' }), {
         status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
     }
-    const accessToken = await exchangeLwaToken(sellerAuth.refresh_token, supabase, userId);
 
-    let checked = 0, repaired = 0, unverifiable = 0, alreadyCorrect = 0, fxSkipped = 0;
+    // Resolve the token PER MARKETPLACE. The first version signed every call
+    // with one marketplace, so 6 of the first 12 candidates -- all BR and MX --
+    // came back unverifiable rather than repaired. The shortlist now carries
+    // each row's own marketplace and each call is signed for it.
+    //
+    // Tokens are cached by refresh_token, not by marketplace: several
+    // marketplaces usually share one authorization, and exchanging the same
+    // refresh token four times per batch is wasted round-trips against a rate
+    // limit that is already the tight resource here.
+    const tokenCache = new Map<string, string>();
+    async function authFor(mp: string): Promise<{ token: string; marketplaceId: string } | null> {
+      const mpId = MARKETPLACE_ID_MAP[mp] || MARKETPLACE_ID_MAP.US;
+      const auth = (authRows || []).find((a: any) => a.marketplace_id === mpId)
+        || (authRows || [])[0];
+      if (!auth?.refresh_token) return null;
+      let token = tokenCache.get(auth.refresh_token);
+      if (!token) {
+        token = await exchangeLwaToken(auth.refresh_token, supabase, userId);
+        tokenCache.set(auth.refresh_token, token);
+      }
+      return { token, marketplaceId: mpId };
+    }
+
+    let checked = 0, repaired = 0, unverifiable = 0, alreadyCorrect = 0, fxSkipped = 0, throttled = 0;
     const rows: any[] = [];
 
     for (const row of candidates.slice(0, limit)) {
@@ -162,9 +214,16 @@ Deno.serve(async (req) => {
       }
       checked++;
 
-      const items = await fetchOrderItems(accessToken, row.order_id, marketplaceId, supabase);
+      const rowMp = String(row.marketplace || marketplace || 'US').toUpperCase();
+      const auth = await authFor(rowMp);
+      if (!auth) { unverifiable++; continue; }
+
+      const items = await fetchOrderItems(auth.token, row.order_id, auth.marketplaceId, supabase);
       await new Promise((r) => setTimeout(r, PER_CALL_DELAY_MS));
-      if (!items || items.length === 0) { unverifiable++; continue; }
+      if (!items || items.length === 0) {
+        if (lastFetchStatus === 429) throttled++; else unverifiable++;
+        continue;
+      }
 
       const match = items.find((i: any) => String(i?.ASIN || '') === String(row.asin));
       if (!match) { unverifiable++; continue; }
@@ -225,6 +284,7 @@ Deno.serve(async (req) => {
       rows.push({
         order_id: row.order_id,
         asin: row.asin,
+        mp: rowMp,
         order_date: row.order_date,
         quantity: qtyWrong ? { from: storedQty, to: trueQty } : undefined,
         revenue: revenueWrong ? { from: storedRevenue, to: truePrincipal } : undefined,
@@ -256,6 +316,7 @@ Deno.serve(async (req) => {
       repaired: dryRun ? 0 : repaired,
       already_correct: alreadyCorrect,
       unverifiable,
+      throttled,
       revenue_skipped_non_usd: fxSkipped,
       elapsed_ms: Date.now() - started,
       rows: rows.slice(0, 40),
