@@ -118,7 +118,13 @@ export default function ConnectPrinterSettings() {
       toast({ title: "Printer connected", description: "Print client is already running." });
       return;
     }
+    await downloadPrintClient();
+  };
 
+  /** Download even when this machine is already connected — for setting up another one. */
+  const handleDownloadAgain = () => downloadPrintClient();
+
+  const downloadPrintClient = async () => {
     setIsDownloading(true);
     try {
       const { data, error } = await supabase.storage
@@ -274,11 +280,31 @@ export default function ConnectPrinterSettings() {
                     <CheckCircle2 className="h-4 w-4 mr-2" /> Connected
                   </>
                 ) : (
+                  // "Connect Printer" described something this button does not
+                  // do. It fetches a signed URL and downloads SprintPrint.exe;
+                  // the connection happens later, when the seller RUNS that
+                  // file. Naming it Connect meant a Disconnected pill next to a
+                  // Connect button read as "press this to connect", and pressing
+                  // it appeared to do nothing.
                   <>
-                    <Download className="h-4 w-4 mr-2" /> Connect Printer
+                    <Download className="h-4 w-4 mr-2" /> Download &amp; Connect
                   </>
                 )}
               </Button>
+
+              {/* Downloading is still useful once connected -- setting up a
+                  SECOND machine is the common case, and the old UI had no way
+                  to reach the installer from a machine that already worked. */}
+              {status === "connected" && (
+                <Button
+                  variant="outline"
+                  onClick={handleDownloadAgain}
+                  disabled={isDownloading}
+                  className="bg-white/10 border-white/20 text-white hover:bg-white/20 hover:text-white"
+                >
+                  <Download className="h-4 w-4 mr-2" /> Download again
+                </Button>
+              )}
 
               <Button
                 variant="outline"
@@ -295,11 +321,20 @@ export default function ConnectPrinterSettings() {
               <div className="mt-5 text-xs text-gray-400 space-y-2 bg-black/20 border border-white/10 rounded-md p-3">
                 <p className="font-medium text-gray-300">How it works:</p>
                 <ol className="list-decimal pl-4 space-y-1">
-                  <li>Click <span className="text-white">Connect Printer</span> — your browser will download <code className="text-xs bg-black/40 px-1 rounded">SprintPrint.exe</code>.</li>
-                  <li>Open the downloaded file and keep it running (it lives in your system tray near the clock).</li>
-                  <li>The status above will switch to <span className="text-emerald-400">Printer connected</span> automatically — no need to click again.</li>
+                  <li>Click <span className="text-white">Download &amp; Connect</span> — your browser downloads <code className="text-xs bg-black/40 px-1 rounded">SprintPrint.exe</code>.</li>
+                  <li>Open the downloaded file and leave it running.</li>
+                  <li>The status above switches to <span className="text-emerald-400">Printer connected</span> on its own — no need to click again.</li>
                 </ol>
-                <p className="text-[11px] text-gray-500 pt-1">Browsers cannot launch desktop apps directly for security reasons, so the first launch is a one-time double-click. After that the client auto-starts.</p>
+                {/* This block used to promise "After that the client auto-starts",
+                    which is not true: nothing installs a startup entry, so the
+                    client is gone after every reboot and the pill reads
+                    Disconnected with no explanation. Saying so plainly is worth
+                    more than the reassurance was. */}
+                <p className="text-[11px] text-gray-500 pt-1">
+                  Browsers can&apos;t launch desktop apps, so opening the file is a manual step.
+                  <span className="text-amber-400/90"> It does not start automatically after a restart</span> — reopen it,
+                  or put a shortcut in <code className="bg-black/40 px-1 rounded">shell:startup</code> to launch it on login.
+                </p>
                 <p className="text-[11px] text-gray-500">On macOS? Use your browser's print dialog (⌘P) instead — no install needed.</p>
               </div>
             )}
