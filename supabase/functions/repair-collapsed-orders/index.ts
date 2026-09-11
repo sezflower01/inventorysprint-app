@@ -205,6 +205,16 @@ Deno.serve(async (req) => {
     }
 
     let checked = 0, repaired = 0, unverifiable = 0, alreadyCorrect = 0, fxSkipped = 0, throttled = 0;
+
+    // Final verdicts, written to collapsed_order_checks so the shortlist stops
+    // offering the same rows. Without this the sweep re-verified the same 50
+    // cleared rows every run: 23 runs, 1,149 SP-API calls, 0 repairs. Only
+    // verdicts that cannot change are recorded -- a 429, any other transient
+    // failure, or missing seller auth leaves the row eligible for a later run.
+    const checks: Array<{ sales_order_id: string; user_id: string; outcome: string }> = [];
+    const recordVerdict = (salesOrderId: string, outcome: string) => {
+      if (!dryRun) checks.push({ sales_order_id: salesOrderId, user_id: userId, outcome });
+    };
     const rows: any[] = [];
 
     for (const row of candidates.slice(0, limit)) {
@@ -221,12 +231,20 @@ Deno.serve(async (req) => {
       const items = await fetchOrderItems(auth.token, row.order_id, auth.marketplaceId, supabase);
       await new Promise((r) => setTimeout(r, PER_CALL_DELAY_MS));
       if (!items || items.length === 0) {
-        if (lastFetchStatus === 429) throttled++; else unverifiable++;
+        if (lastFetchStatus === 429) {
+          throttled++;
+        } else {
+          unverifiable++;
+          // Only a 404 is final -- Amazon has no such order and never will.
+          // A 5xx, a parse failure or an empty 200 could be transient, so those
+          // rows stay eligible rather than being dropped from the sweep for good.
+          if (lastFetchStatus === 404) recordVerdict(row.id, 'not_found');
+        }
         continue;
       }
 
       const match = items.find((i: any) => String(i?.ASIN || '') === String(row.asin));
-      if (!match) { unverifiable++; continue; }
+      if (!match) { unverifiable++; recordVerdict(row.id, 'asin_not_in_order'); continue; }
 
       const trueQty = num(match.QuantityOrdered) || 1;
       const truePrincipal = money(num(match.ItemPrice?.Amount));
@@ -264,7 +282,11 @@ Deno.serve(async (req) => {
         && Math.abs(truePrincipal - storedRevenue) >= 0.02;
 
       if (revenueSkippedForFx) fxSkipped++;
-      if (!qtyWrong && !revenueWrong) { alreadyCorrect++; continue; }
+      if (!qtyWrong && !revenueWrong) {
+        alreadyCorrect++;
+        recordVerdict(row.id, 'already_correct');
+        continue;
+      }
 
       const unitCost = num(row.unit_cost);
       const patch: Record<string, unknown> = {};
@@ -301,15 +323,35 @@ Deno.serve(async (req) => {
           .update(patch)
           .eq('id', row.id);
         if (updErr) {
+          // Not recorded: a failed write is exactly the row that must be tried
+          // again, not settled.
           console.warn(`[repair] update failed ${row.order_id}: ${updErr.message}`);
           continue;
         }
       }
+      recordVerdict(row.id, 'repaired');
       repaired++;
+    }
+
+    // Persist every verdict in one write, before the summary. The loop exits
+    // cleanly at its time budget, so this always runs on a normal return. A
+    // worker killed mid-loop loses only this run's verdicts, and those rows are
+    // simply checked again next run -- the safe direction to fail in.
+    let checksRecorded = 0;
+    if (checks.length > 0) {
+      const { error: chkErr } = await supabase
+        .from('collapsed_order_checks')
+        .upsert(checks, { onConflict: 'sales_order_id' });
+      if (chkErr) {
+        console.warn(`[repair] could not record ${checks.length} verdicts: ${chkErr.message}`);
+      } else {
+        checksRecorded = checks.length;
+      }
     }
 
     const summary = {
       ok: true,
+      checks_recorded: checksRecorded,
       dry_run: dryRun,
       checked,
       would_repair: dryRun ? repaired : undefined,
