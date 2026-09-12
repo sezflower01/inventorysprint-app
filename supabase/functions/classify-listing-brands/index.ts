@@ -42,9 +42,10 @@ const corsHeaders = {
 // Per invocation. Detection adds listings in bursts, not floods, so this is
 // sized to clear a burst in one run while staying far inside the timeout.
 const BATCH_SIZE = 100;
-// A digest goes out only when the oldest unsent match is at least this old,
-// so a seller mid-bulk-listing produces one email rather than three.
-const DIGEST_SETTLE_MINUTES = 45;
+// DIGEST_SETTLE_MINUTES (45) lived here to hold a digest until the oldest
+// unsent match had settled, so a seller mid-bulk-listing produced one email
+// rather than three. Removed 2026-09-12 with the email itself -- the navbar
+// panel groups by seller on read, so nothing has to wait for a burst to end.
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -58,7 +59,8 @@ Deno.serve(async (req) => {
 
     const body = await req.json().catch(() => ({}));
     const dryRun = body?.dryRun === true;
-    const skipDigest = body?.skipDigest === true;
+    // `skipDigest` is still accepted in the body and deliberately not read:
+    // existing callers pass it, and there is no longer a digest to skip.
 
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL") ?? "",
@@ -152,69 +154,27 @@ Deno.serve(async (req) => {
       }
     }
 
-    // ── 2. digest of matches not yet sent ─────────────────────────────────
-    let digests: Array<Record<string, unknown>> = [];
-    if (!dryRun && !skipDigest) {
-      const cutoff = new Date(Date.now() - DIGEST_SETTLE_MINUTES * 60_000).toISOString();
-
-      const { data: due } = await supabase
-        .from("seller_watch_new_listings")
-        .select("id, user_id, asin, title, brand, marketplace, amazon_price_cents, detected_at")
-        .eq("brand_match_state", "matched")
-        .is("brand_notified_at", null)
-        .lte("detected_at", cutoff)
-        .order("detected_at", { ascending: true })
-        .limit(500);
-
-      const byUser = new Map<string, any[]>();
-      for (const r of (due ?? []) as any[]) {
-        if (!byUser.has(r.user_id)) byUser.set(r.user_id, []);
-        byUser.get(r.user_id)!.push(r);
-      }
-
-      for (const [uid, items] of byUser) {
-        // Where to send. The seller-analyzer override wins; otherwise the
-        // account address. If neither resolves the matches stay unsent rather
-        // than being marked notified -- losing an alert silently is worse than
-        // sending it late.
-        const { data: cfg } = await supabase
-          .from("auto_source_config")
-          .select("notify_email")
-          .eq("user_id", uid)
-          .maybeSingle();
-        let to = cfg?.notify_email ?? null;
-        if (!to) {
-          const { data: au } = await supabase.auth.admin.getUserById(uid);
-          to = au?.user?.email ?? null;
-        }
-        if (!to) { console.warn(`[classify] no address for ${uid}, ${items.length} match(es) held`); continue; }
-
-        const { error: mailErr } = await supabase.functions.invoke("send-email", {
-          body: {
-            to,
-            name: "there",
-            emailType: "seller-watch-new-listings",
-            sellerWatch: {
-              sellerId: "brand-match",
-              sellerName: `${items.length} new listing${items.length === 1 ? "" : "s"} in your brands`,
-              marketplace: items[0]?.marketplace ?? "US",
-              newAsins: items.slice(0, 25).map((i: any) => i.asin),
-              totalNew: items.length,
-            },
-          },
-        });
-        if (mailErr) { console.warn(`[classify] digest send failed for ${uid}:`, mailErr.message); continue; }
-
-        // Stamped only after the send succeeds, so a failed email is retried
-        // on the next run instead of being silently swallowed.
-        await supabase
-          .from("seller_watch_new_listings")
-          .update({ brand_notified_at: new Date().toISOString() })
-          .in("id", items.map((i: any) => i.id));
-
-        digests.push({ user_id: uid, sent: items.length, to: to.replace(/(.{2}).*(@.*)/, "$1***$2") });
-      }
-    }
+    // ── 2. THE EMAIL DIGEST IS GONE ───────────────────────────────────────
+    //
+    // This block used to gather matched-but-unnotified listings per user and
+    // send them as one Resend message, stamping brand_notified_at on success.
+    //
+    // Removed 2026-09-12. Resend's team quota is 100 messages a day and it is
+    // SHARED with auth-email-hook, which sends password resets and signup
+    // confirmations -- so detection mail was competing with account mail for
+    // the same 100. check-seller-watchlist's per-watch send was the bulk of it
+    // and went at the same time; this digest goes too, so the quota is not
+    // quietly re-consumed from the other side.
+    //
+    // brand_notified_at is deliberately NO LONGER STAMPED HERE. With no email
+    // to record, NULL now means "not yet seen by the user", which is what the
+    // navbar panel (src/components/navbar/SellerListingAlerts.tsx) reads and
+    // what it stamps when opened. Same column, one layer up, no migration.
+    //
+    // `digests` stays in the response, always empty. The shape is what the
+    // cron's observability rows and any dashboard read; removing the key would
+    // break them to say nothing new.
+    const digests: Array<Record<string, unknown>> = [];
 
     return json({ classified, matched, notMine, unknown, pendingSeen: rows.length, digests, dryRun });
   } catch (err) {

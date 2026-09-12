@@ -113,8 +113,6 @@ const KEEPA_DOMAIN: Record<string, number> = {
   US: 1, GB: 2, DE: 3, FR: 4, JP: 5, CA: 6, IT: 8, ES: 9, IN: 10, MX: 11, BR: 12,
 };
 
-const NEW_ASINS_IN_EMAIL = 10;
-
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 }
@@ -382,7 +380,7 @@ Deno.serve(async (req) => {
     // PostgREST cannot express a composite IN cleanly.
     const { data: allWatches, error: fetchErr } = await admin
       .from('seller_watchlist')
-      .select('id, user_id, seller_id, seller_name, marketplace, notify_email, known_asin_list')
+      .select('id, user_id, seller_id, seller_name, marketplace, known_asin_list')
       .eq('status', 'active')
       .in('seller_id', orderedPairs.map((p) => p.sellerId))
       .in('marketplace', Array.from(new Set(orderedPairs.map((p) => p.marketplace))));
@@ -630,10 +628,11 @@ Deno.serve(async (req) => {
       // nothing", silently switching the filter off for a user whose seed rows
       // failed to write.
       const userExclusions: { groups?: Set<string>; brands?: Set<string>; titles?: string[] } = {};
-      // Per-user alert address. NULL means the account email, which is what
-      // seller_watchlist.notify_email already holds -- so the fallback below is
-      // the existing behaviour, unchanged.
-      let notifyOverride: string | null = null;
+      // The per-user alert address that used to be resolved here is gone with
+      // the email send (2026-09-12). auto_source_config.notify_email and
+      // seller_watchlist.notify_email are both LEFT IN PLACE -- the Seller
+      // Analyzer still offers the field, and dropping columns is a separate
+      // destructive migration -- they simply have no reader in this worker now.
 
       // The seller's own brands, for the price-capture filter further down.
       //
@@ -675,12 +674,11 @@ Deno.serve(async (req) => {
         const uid = group[0].user_id;
         const { data: cfg } = await admin
           .from('auto_source_config')
-          .select('search_needs_approval, notify_email')
+          .select('search_needs_approval')
           .eq('user_id', uid)
           .maybeSingle();
         // Absent config means defaults, and the default is to allow.
         allowNeedsApproval = cfg?.search_needs_approval !== false;
-        notifyOverride = cfg?.notify_email?.trim() || null;
 
         // Effective exclusions: the user's own PLUS the shared catalogue,
         // minus anything they muted. Reading source_excluded_terms directly
@@ -971,32 +969,24 @@ Deno.serve(async (req) => {
             .upsert(rows, { onConflict: 'watch_id,asin', ignoreDuplicates: true });
           if (insertErr) console.error(`[check-seller-watchlist] new-listing insert failed for watch ${w.id}`, insertErr.message);
 
-          try {
-            const emailRes = await fetchT(`${SUPABASE_URL}/functions/v1/send-email`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${serviceRoleKey}` },
-              body: JSON.stringify({
-                // Resolved at SEND time, not baked into the watch row. A user
-                // who changes their address gets it applied to all 400+ existing
-                // watches immediately, with no bulk update and nothing to
-                // backfill. Falls back to the per-watch address, which is the
-                // account email the creator functions stamped.
-                to: notifyOverride || w.notify_email,
-                name: 'there',
-                emailType: 'seller-watch-new-listings',
-                sellerWatch: {
-                  sellerId,
-                  sellerName: w.seller_name || currentSellerName,
-                  marketplace,
-                  newAsins: newAsins.slice(0, NEW_ASINS_IN_EMAIL),
-                  totalNew: newAsins.length,
-                },
-              }),
-            });
-            if (!emailRes.ok) console.error(`[check-seller-watchlist] alert email send failed for watch ${w.id}`, await emailRes.text());
-          } catch (e) {
-            console.error(`[check-seller-watchlist] alert email send error for watch ${w.id}`, (e as Error).message);
-          }
+          // ── NO EMAIL IS SENT HERE ────────────────────────────────────────
+          //
+          // This block used to POST send-email once per watch that gained
+          // ASINs. With 400+ active watches that alone exhausted Resend's
+          // 100-messages-a-day team quota on 2026-09-12.
+          //
+          // The quota is shared with auth-email-hook, which sends password
+          // resets and signup confirmations from the same Resend account -- so
+          // spending it on detection alerts took ACCOUNT EMAIL down with it.
+          // That, not the noise, is why this was removed rather than throttled.
+          //
+          // Nothing is lost: the rows were already written to
+          // seller_watch_new_listings immediately above, and the navbar panel
+          // (src/components/navbar/SellerListingAlerts.tsx) reads them with
+          // brand_notified_at IS NULL as the unread marker.
+          //
+          // last_alert_at still advances -- it gates re-alerting on a watch and
+          // is read by the UI, and it now means "an in-app alert was raised".
           patch.last_alert_at = nowIso;
           alertsFired++;
         }
