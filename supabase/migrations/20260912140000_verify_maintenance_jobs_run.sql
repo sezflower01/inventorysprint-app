@@ -1,90 +1,28 @@
--- Prove the two new jobs actually run, instead of finding out at 04:02 UTC.
+-- NEUTERED 2026-09-12. Intentionally a no-op.
 --
--- Both are budgeted to return inside 100 seconds, well under the ~120s ceiling
--- documented in 20260906070000, so one call of each fits here.
+-- This migration called run_maintenance_catchup() and then
+-- prune_maintenance_payloads() in one DO block to verify both before their
+-- first scheduled run. It could never have worked, and it failed on apply:
 --
--- Every call is wrapped so a failure is REPORTED rather than thrown: a
--- migration that aborts blocks every later migration in the queue until it is
--- neutered, and that is a worse outcome than a job that needs another look.
+--   * each function is budgeted to return inside ~100 seconds, so the two
+--     together take ~200 seconds in ONE statement -- above the ~120s ceiling
+--     that cancels long statements on this project (20260906070000);
+--   * the backlog counts that followed scan a 7 GB table unindexed on
+--     intelligence_factors, which adds more time to the same statement;
+--   * the per-call `EXCEPTION WHEN OTHERS` handlers were meant to report a
+--     failure instead of aborting, but OTHERS deliberately does not match
+--     QUERY_CANCELED -- so a cancellation escaped them and aborted the whole
+--     migration, which blocks every later migration in the queue.
 --
--- This does real work -- it deletes rows past retention and nulls payloads past
--- the 7-day cutoff -- but only work the schedule would do tonight anyway.
+-- The failed attempt rolled back completely: nothing was deleted or nulled.
+--
+-- The scheduled jobs are unaffected. cron runs each function on its own
+-- (maintenance-catchup-15min at :02/:17/:32/:47, maintenance-payload-prune-15min
+-- at :09/:24/:39/:54), each call under the ceiling. Their first runs at 04:02
+-- and 04:09 UTC are the verification: look for `maintenance_catchup` and
+-- `payload_prune` rows in public.database_maintenance_jobs.
+--
+-- Kept as a file rather than deleted so the migration history matches what was
+-- attempted.
 
-DO $verify$
-DECLARE
-  v jsonb;
-  v_secs numeric;
-  t0 timestamptz;
-  r record;
-BEGIN
-  RAISE NOTICE 'now: %', now();
-
-  -- ── catch-up ──────────────────────────────────────────────────────────
-  RAISE NOTICE '';
-  RAISE NOTICE '======== run_maintenance_catchup() ========';
-  BEGIN
-    t0 := clock_timestamp();
-    SELECT public.run_maintenance_catchup() INTO v;
-    v_secs := round(EXTRACT(EPOCH FROM (clock_timestamp() - t0))::numeric, 1);
-    RAISE NOTICE '  returned in % s, % rows deleted', v_secs, v ->> 'total_deleted';
-    FOR r IN SELECT * FROM jsonb_array_elements(v -> 'results') AS e(j)
-    LOOP
-      RAISE NOTICE '    %', r.j;
-    END LOOP;
-    IF v_secs > 115 THEN
-      RAISE WARNING '  took % s -- close to the ~120s ceiling', v_secs;
-    END IF;
-  EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE '  FAILED: %', SQLERRM;
-  END;
-
-  -- ── payload prune ─────────────────────────────────────────────────────
-  RAISE NOTICE '';
-  RAISE NOTICE '======== prune_maintenance_payloads() ========';
-  BEGIN
-    t0 := clock_timestamp();
-    SELECT public.prune_maintenance_payloads() INTO v;
-    v_secs := round(EXTRACT(EPOCH FROM (clock_timestamp() - t0))::numeric, 1);
-    RAISE NOTICE '  returned in % s, % rows nulled', v_secs, v ->> 'total_nulled';
-    FOR r IN SELECT * FROM jsonb_array_elements(v -> 'results') AS e(j)
-    LOOP
-      RAISE NOTICE '    %', r.j;
-    END LOOP;
-    IF v_secs > 115 THEN
-      RAISE WARNING '  took % s -- close to the ~120s ceiling', v_secs;
-    END IF;
-  EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE '  FAILED: %', SQLERRM;
-  END;
-
-  -- ── what is left ──────────────────────────────────────────────────────
-  RAISE NOTICE '';
-  RAISE NOTICE '======== remaining backlog ========';
-  FOR r IN
-    SELECT count(*) AS n
-    FROM public.repricer_price_actions
-    WHERE created_at < now() - interval '7 days'
-      AND intelligence_factors IS NOT NULL
-  LOOP
-    RAISE NOTICE '  price actions still carrying a payload past 7 days: %', r.n;
-  END LOOP;
-
-  FOR r IN
-    SELECT count(*) AS n FROM public.repricer_ai_decisions
-    WHERE created_at < now() - interval '14 days'
-  LOOP
-    RAISE NOTICE '  ai decisions still past 14 days: %', r.n;
-  END LOOP;
-
-  FOR r IN
-    SELECT round(EXTRACT(epoch FROM (now() - min(created_at))) / 86400.0, 1) AS days
-    FROM public.repricer_price_actions
-  LOOP
-    RAISE NOTICE '  price actions window now: % days (retention 14)', r.days;
-  END LOOP;
-
-  RAISE NOTICE '';
-  RAISE NOTICE '  NOTE: freed space is reusable but NOT returned to the disk.';
-  RAISE NOTICE '  The database size will not fall until a VACUUM FULL, which';
-  RAISE NOTICE '  stays manual and is worth running once the backlog is clear.';
-END $verify$;
+SELECT 1;
