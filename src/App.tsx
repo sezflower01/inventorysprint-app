@@ -171,6 +171,7 @@ const Sales = lazyWithRetry(() => import("./pages/tools/Sales"));
 const ReportsAccounting = lazyWithRetry(() => import("./pages/tools/ReportsAccounting"));
 const Settlement = lazyWithRetry(() => import("./pages/tools/Settlement"));
 const ProfitLoss = lazyWithRetry(() => import("./pages/tools/ProfitLoss"));
+const CogOnRecord = lazyWithRetry(() => import("./pages/tools/CogOnRecord"));
 const Reimbursements = lazyWithRetry(() => import("./pages/tools/Reimbursements"));
 const Expenses = lazyWithRetry(() => import("./pages/tools/Expenses"));
 const DispositionManagement = lazyWithRetry(() => import("./pages/tools/DispositionManagement"));
@@ -319,6 +320,8 @@ function App() {
                   <Route path="/tools/sales" element={<ProtectedRoute><Sales /></ProtectedRoute>} />
                   <Route path="/tools/reports" element={<ProtectedRoute><ReportsAccounting /></ProtectedRoute>} />
                   <Route path="/tools/profit-loss" element={<ProtectedRoute><ModuleGuard module="profit_loss" redirectTo="/tools" redirectToast="Access restricted: Profit & Loss."><ProfitLoss /></ModuleGuard></ProtectedRoute>} />
+                  {/* Same module as Profit & Loss: a COG on record is accounting data that will drive P&L COGS. */}
+                  <Route path="/tools/cog" element={<ProtectedRoute><ModuleGuard module="profit_loss" redirectTo="/tools" redirectToast="Access restricted: COG on Record."><CogOnRecord /></ModuleGuard></ProtectedRoute>} />
                   
                   <Route path="/tools/settlement" element={<ProtectedRoute><Settlement /></ProtectedRoute>} />
                   <Route path="/tools/reimbursements" element={<ProtectedRoute><Reimbursements /></ProtectedRoute>} />

@@ -28,6 +28,7 @@ export const TOOLS: ToolLink[] = [
   { path: '/tools/suppliers', label: 'Suppliers', ga: 'tool_menu_suppliers' },
   { path: '/tools/reports', label: 'Reports & Accounting', ga: 'tool_menu_reports', adminOnly: true },
   { path: '/tools/profit-loss', label: 'Profit & Loss', ga: 'tool_menu_profit_loss', adminOnly: true },
+  { path: '/tools/cog', label: 'COG on Record', ga: 'tool_menu_cog_on_record', adminOnly: true },
   { path: '/tools/fec-backfill', label: 'FEC Backfill', ga: 'tool_menu_fec_backfill', adminOnly: true },
   { path: '/tools/price-discrepancy-audit', label: 'Price Discrepancy Audit', ga: 'tool_menu_price_discrepancy_audit', adminOnly: true },
   { path: '/tools/fba-eligibility-issues', label: 'FBA Eligibility Issues', ga: 'tool_menu_fba_eligibility_issues' },
