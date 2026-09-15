@@ -380,7 +380,35 @@
   }
 
   // ── Per-ASIN cache (chrome.storage.local, 10 min) ──────────────────
-  const cacheKey = (a, m, r) => `cache:v7:${m}:${a}:r${r}`;
+  //
+  // ⚠️ THIS CACHE USED TO GROW WITHOUT LIMIT.
+  //
+  // One entry per (marketplace, ASIN, range) holding a whole scan -- price
+  // series, offers, stability, dims, fees, product. The 10-minute TTL was only
+  // ever checked on READ, so an expired entry was ignored but never deleted.
+  // chrome.storage.local is capped at 10 MB without the unlimitedStorage
+  // permission, so after enough scanning every write failed with
+  // "Resource::kQuotaBytes quota exceeded" (reported 2026-09-15).
+  //
+  // That is worse than losing the cache. writeCache() is awaited near the end
+  // of loadData(), so the rejection skipped the final `renderAll()` and the
+  // auto-record call after it: the panel kept whatever each row had painted for
+  // itself and never got its last consistent repaint.
+  //
+  // It does NOT strand state.summaryLoading -- that is cleared a few lines
+  // ABOVE the writeCache await, and a harness run against the pre-fix build
+  // confirmed the panel still rendered. The `summary watchdog fired for
+  // B09ZKYVC7L` line in the same report is a SEPARATE, still-undiagnosed path;
+  // do not assume this fix closed it.
+  //
+  // Now: expired entries and everything past the newest MAX_CACHE_ENTRIES are
+  // removed before each write, a quota failure retries once after dropping the
+  // whole cache, and a still-failing write is logged and swallowed -- the scan
+  // is already on screen; only the cache is lost.
+  const CACHE_PREFIX = "cache:v7:";
+  const AUTOREC_PREFIX = "autorec:";
+  const MAX_CACHE_ENTRIES = 25;
+  const cacheKey = (a, m, r) => `${CACHE_PREFIX}${m}:${a}:r${r}`;
   async function readCache(a, m, r) {
     const k = cacheKey(a, m, r);
     const obj = await chrome.storage.local.get(k);
@@ -389,8 +417,50 @@
     if (Date.now() - entry.t > CFG.CACHE_TTL_MS) return null;
     return entry.v;
   }
+  /** Drop expired scans, then any beyond `keepAtMost` newest. Returns keys removed. */
+  async function pruneCache(keepAtMost = MAX_CACHE_ENTRIES) {
+    try {
+      const all = await chrome.storage.local.get(null);
+      const now = Date.now();
+      const scans = [];
+      const remove = [];
+      for (const [k, v] of Object.entries(all)) {
+        if (k.startsWith(CACHE_PREFIX)) {
+          const t = Number(v?.t) || 0;
+          if (!t || now - t > CFG.CACHE_TTL_MS) remove.push(k);
+          else scans.push([k, t]);
+        } else if (k.startsWith(AUTOREC_PREFIX)) {
+          // One tiny timestamp per ASIN, also never cleaned. Its own dedup
+          // window is 6h, so anything older has no effect on behaviour.
+          const t = Number(v) || 0;
+          if (!t || now - t > AUTO_RECORD_TTL_MS) remove.push(k);
+        }
+      }
+      scans.sort((a, b) => b[1] - a[1]);
+      for (const [k] of scans.slice(keepAtMost)) remove.push(k);
+      if (remove.length) await chrome.storage.local.remove(remove);
+      return remove.length;
+    } catch (e) {
+      console.warn("[InvSPRNT] cache prune failed:", e?.message || e);
+      return 0;
+    }
+  }
   async function writeCache(a, m, r, v) {
-    await chrome.storage.local.set({ [cacheKey(a, m, r)]: { t: Date.now(), v } });
+    const key = cacheKey(a, m, r);
+    const entry = { t: Date.now(), v };
+    try {
+      await pruneCache();
+      await chrome.storage.local.set({ [key]: entry });
+    } catch (e) {
+      console.warn("[InvSPRNT] scan cache write failed, clearing cache and retrying:", e?.message || e);
+      try {
+        await pruneCache(0);
+        await chrome.storage.local.set({ [key]: entry });
+      } catch (e2) {
+        // Never let a cache problem break the scan that is already rendered.
+        console.warn("[InvSPRNT] scan cache unavailable this run:", e2?.message || e2);
+      }
+    }
   }
 
   // ── Cost persistence per ASIN (DB-backed, with local cache fallback) ─
@@ -430,7 +500,14 @@
   }
   let saveCostTimer = null;
   async function saveCost(a, v) {
-    await chrome.storage.local.set({ [costKey(a)]: v });
+    // The cost still saves to the database below; a full local cache must not
+    // stop that, and must not reject into the input's change handler.
+    try {
+      await chrome.storage.local.set({ [costKey(a)]: v });
+    } catch (e) {
+      console.warn("[InvSPRNT] local cost cache write failed:", e?.message || e);
+      pruneCache().catch(() => {});
+    }
     if (!state.signedIn) return;
     clearTimeout(saveCostTimer);
     saveCostTimer = setTimeout(() => {
@@ -1434,7 +1511,8 @@
     if (!row.title && !row.image_url) return;
     await new Promise((resolve) =>
       chrome.runtime.sendMessage({ type: "ARBIPRO_SAVE_SCAN", row }, (r) => {
-        if (r?.ok) chrome.storage.local.set({ [key]: Date.now() });
+        // Dedup marker only — losing it just means one extra recorded scan.
+        if (r?.ok) chrome.storage.local.set({ [key]: Date.now() }).catch(() => {});
         resolve(r);
       }),
     );
