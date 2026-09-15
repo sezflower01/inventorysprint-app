@@ -59,6 +59,15 @@
  * default order with "Use" (copies the new price into the box) and "Keep"
  * (dismisses the flag). Saving any COG clears the flag too.
  *
+ * ── WAITING FOR AMAZON (2026-09-15, 20260915070000) ──────────────────────
+ *
+ * Listings appear the moment they are saved, including PENDING_VALIDATION
+ * ones, tagged "Waiting for Amazon" -- validation takes a median 21 minutes
+ * and occasionally hours, and the seller wants to cost a listing straight
+ * away. A cost can be typed while waiting. The AUTOMATIC fill still waits for
+ * Amazon's confirmation, so a rejected listing never gets one; rejected
+ * listings are not shown at all.
+ *
  * ── TYPES ────────────────────────────────────────────────────────────────
  *
  * src/integrations/supabase/types.ts predates these tables and the RPC, so
@@ -127,6 +136,9 @@ interface ProductRow {
   price_change_unit_cost: number | null;
   price_change_units: number | null;
   price_change_detected_at: string | null;
+  /** The product's newest listing is saved but Amazon has not confirmed it yet. */
+  awaiting_amazon: boolean;
+  pending_listing_count: number;
 }
 
 type CogSource = "import" | "manual" | "listing";
@@ -160,7 +172,7 @@ interface HistoryEntry {
   note: string | null;
 }
 
-type View = "all" | "unset" | "has" | "not_reviewed" | "price_changed" | "review" | "manual" | "recent";
+type View = "all" | "unset" | "has" | "not_reviewed" | "price_changed" | "waiting" | "review" | "manual" | "recent";
 type SortKey = "newest" | "oldest" | "review" | "sold" | "difference" | "edited" | "asin";
 
 const PAGE_SIZE = 100;
@@ -389,6 +401,7 @@ export default function CogOnRecord() {
     manual: rows.filter((r) => r.source === "manual").length,
     notReviewed: rows.filter(isNotReviewed).length,
     priceChanged: rows.filter(hasPriceChange).length,
+    waiting: rows.filter((r) => r.awaiting_amazon).length,
   }), [rows, isRecent]);
 
   const filtered = useMemo(() => {
@@ -404,6 +417,7 @@ export default function CogOnRecord() {
       if (view === "recent" && !isRecent(r)) return false;
       if (view === "not_reviewed" && !isNotReviewed(r)) return false;
       if (view === "price_changed" && !hasPriceChange(r)) return false;
+      if (view === "waiting" && !r.awaiting_amazon) return false;
       if (flag !== "any" && !(r.calculation?.flags ?? []).includes(flag)) return false;
       if (!q) return true;
       if (multiAsin) return tokens.includes(r.asin);
@@ -575,6 +589,7 @@ export default function CogOnRecord() {
       cog_id: null, unit_cost: null, source: null, needs_review: null, review_note: null,
       calculated_cost: null, calculation: null, cog_updated_at: null, in_listings: false,
       reviewed_at: null, price_change_unit_cost: null, price_change_units: null, price_change_detected_at: null,
+      awaiting_amazon: false, pending_listing_count: 0,
     };
     setRows((rs) => [...rs, withCog(blank, data as CogRecord)]);
     setNewAsin("");
@@ -595,7 +610,8 @@ export default function CogOnRecord() {
       hint: stats.notReviewed > 0 ? "filled from listings" : undefined },
     { label: "No COG yet", value: stats.unset, view: "unset", warn: stats.recentUnset > 0,
       hint: stats.recentUnset > 0 ? `${stats.recentUnset} listed in the last ${RECENT_DAYS} days` : undefined },
-    { label: `Listed last ${RECENT_DAYS} days`, value: stats.recent, view: "recent" },
+    { label: `Listed last ${RECENT_DAYS} days`, value: stats.recent, view: "recent",
+      hint: stats.waiting > 0 ? `${stats.waiting} waiting for Amazon` : undefined },
   ];
 
   return (
@@ -625,8 +641,9 @@ export default function CogOnRecord() {
             <div className="space-y-1">
               <p>
                 Every product in your <Link to="/tools/created-listings" className="underline underline-offset-2">Product Library</Link>,
-                newest listing first. A new product's COG is filled from its listing's unit cost and marked
-                <span className="font-medium"> From listing</span> until you review it. Restocks never change your COG — a purchase
+                newest listing first — new listings show as soon as you save them, marked
+                <span className="font-medium"> Waiting for Amazon</span> until Amazon confirms. Once confirmed, a new product's COG is
+                filled from its listing's unit cost and marked <span className="font-medium">From listing</span> until you review it. Restocks never change your COG — a purchase
                 more than 25% away is flagged <span className="font-medium">Price changed</span> at the top.
               </p>
               <p className="font-medium">
@@ -670,6 +687,7 @@ export default function CogOnRecord() {
                 <SelectItem value="all">All products</SelectItem>
                 <SelectItem value="price_changed">Price changed</SelectItem>
                 <SelectItem value="not_reviewed">Not reviewed (from listing)</SelectItem>
+                <SelectItem value="waiting">Waiting for Amazon</SelectItem>
                 <SelectItem value="unset">No COG yet</SelectItem>
                 <SelectItem value="has">Has a COG</SelectItem>
                 <SelectItem value="recent">Listed last {RECENT_DAYS} days</SelectItem>
@@ -791,6 +809,15 @@ export default function CogOnRecord() {
                               >
                                 <Copy className="h-3 w-3" />
                               </button>
+                              {r.awaiting_amazon && (
+                                <Badge
+                                  variant="outline"
+                                  className="text-[10px] border-slate-400 text-slate-600 dark:text-slate-300 border-dashed"
+                                  title="Saved, but Amazon hasn't confirmed this listing yet (usually about 20 minutes). You can enter a cost now; the automatic cost only fills in once Amazon confirms."
+                                >
+                                  Waiting for Amazon
+                                </Badge>
+                              )}
                               {recent && (
                                 r.is_restock ? (
                                   <Badge variant="outline" className="text-[10px] border-sky-500/60 text-sky-700 dark:text-sky-400" title="A new purchase of a product you already had">
