@@ -45,6 +45,20 @@
  * created_at) -- what Synced Inventory sorts by -- parsed with the shared
  * parseListingDate so bare dates do not show as the previous day.
  *
+ * ── FILLED FROM LISTINGS (2026-09-15, 20260915050000) ─────────────────────
+ *
+ * At the seller's request, a brand-new product's COG is now filled
+ * automatically from its listing's unit cost (skipping no cost, placeholders
+ * under $0.10/unit, and the unit-price-in-total mix-up). Those rows have
+ * source = 'listing' and stay "Not reviewed" until the seller saves a COG or
+ * presses "Mark reviewed" -- so auto-filled costs remain distinguishable from
+ * checked ones, which is why the seller first wanted no auto-fill at all.
+ *
+ * A restock never changes an existing COG. If its unit cost differs by more
+ * than 25%, the row carries price_change_* and is pinned to the top of the
+ * default order with "Use" (copies the new price into the box) and "Keep"
+ * (dismisses the flag). Saving any COG clears the flag too.
+ *
  * ── TYPES ────────────────────────────────────────────────────────────────
  *
  * src/integrations/supabase/types.ts predates these tables and the RPC, so
@@ -102,26 +116,36 @@ interface ProductRow {
   latest_lot_date: string | null;
   cog_id: string | null;
   unit_cost: number | null;
-  source: "import" | "manual" | null;
+  source: CogSource | null;
   needs_review: boolean | null;
   review_note: string | null;
   calculated_cost: number | null;
   calculation: Calculation | null;
   cog_updated_at: string | null;
   in_listings: boolean;
+  reviewed_at: string | null;
+  price_change_unit_cost: number | null;
+  price_change_units: number | null;
+  price_change_detected_at: string | null;
 }
+
+type CogSource = "import" | "manual" | "listing";
 
 /** The COG table's columns, as returned by insert/update. */
 interface CogRecord {
   id: string;
   unit_cost: number | null;
-  source: "import" | "manual";
+  source: CogSource;
   needs_review: boolean;
   review_note: string | null;
   calculated_cost: number | null;
   calculation: Calculation;
   updated_at: string;
   title: string | null;
+  reviewed_at: string | null;
+  price_change_unit_cost: number | null;
+  price_change_units: number | null;
+  price_change_detected_at: string | null;
 }
 
 interface HistoryEntry {
@@ -136,7 +160,7 @@ interface HistoryEntry {
   note: string | null;
 }
 
-type View = "all" | "unset" | "has" | "review" | "manual" | "recent";
+type View = "all" | "unset" | "has" | "not_reviewed" | "price_changed" | "review" | "manual" | "recent";
 type SortKey = "newest" | "oldest" | "review" | "sold" | "difference" | "edited" | "asin";
 
 const PAGE_SIZE = 100;
@@ -151,7 +175,16 @@ const FLAG_LABELS: Record<string, { label: string; hint: string }> = {
   sold_gt_bought: { label: "History incomplete", hint: "More units sold in 2026 than purchases on record." },
 };
 
-const COG_COLS = "id, unit_cost, source, needs_review, review_note, calculated_cost, calculation, updated_at, title";
+const COG_COLS = "id, unit_cost, source, needs_review, review_note, calculated_cost, calculation, updated_at, title, "
+  + "reviewed_at, price_change_unit_cost, price_change_units, price_change_detected_at";
+
+/** Filled automatically from a listing and not yet confirmed by the seller. */
+const isNotReviewed = (r: { source: CogSource | null; reviewed_at: string | null; unit_cost: number | null }) =>
+  r.source === "listing" && !r.reviewed_at && r.unit_cost != null;
+const hasPriceChange = (r: { price_change_unit_cost: number | null }) => r.price_change_unit_cost != null;
+
+const pctChange = (from: number | null, to: number | null) =>
+  from && to != null ? Math.round(((to - from) / from) * 100) : null;
 const HISTORY_COLS = "id, asin, action, old_unit_cost, new_unit_cost, sales_rows_repriced, changed_by_email, changed_at, note";
 
 const money = (v: number | null | undefined) =>
@@ -184,6 +217,10 @@ const withCog = (row: ProductRow, c: CogRecord): ProductRow => ({
   calculation: c.calculation,
   cog_updated_at: c.updated_at,
   title: row.title ?? c.title,
+  reviewed_at: c.reviewed_at,
+  price_change_unit_cost: c.price_change_unit_cost,
+  price_change_units: c.price_change_units,
+  price_change_detected_at: c.price_change_detected_at,
 });
 
 /** Per-product change log, fetched when opened. */
@@ -350,6 +387,8 @@ export default function CogOnRecord() {
     recent: rows.filter(isRecent).length,
     recentUnset: rows.filter((r) => isRecent(r) && r.unit_cost == null).length,
     manual: rows.filter((r) => r.source === "manual").length,
+    notReviewed: rows.filter(isNotReviewed).length,
+    priceChanged: rows.filter(hasPriceChange).length,
   }), [rows, isRecent]);
 
   const filtered = useMemo(() => {
@@ -363,6 +402,8 @@ export default function CogOnRecord() {
       if (view === "review" && !r.needs_review) return false;
       if (view === "manual" && r.source !== "manual") return false;
       if (view === "recent" && !isRecent(r)) return false;
+      if (view === "not_reviewed" && !isNotReviewed(r)) return false;
+      if (view === "price_changed" && !hasPriceChange(r)) return false;
       if (flag !== "any" && !(r.calculation?.flags ?? []).includes(flag)) return false;
       if (!q) return true;
       if (multiAsin) return tokens.includes(r.asin);
@@ -399,7 +440,12 @@ export default function CogOnRecord() {
         case "difference": return diffOf(b) - diffOf(a);
         case "edited": return (b.cog_updated_at ?? "").localeCompare(a.cog_updated_at ?? "");
         case "asin": return a.asin.localeCompare(b.asin);
-        default: return byDate(a, b, -1);
+        default:
+          // A restock whose price moved >25% is pinned above everything, most
+          // recent first -- the seller asked for these at the top.
+          return Number(hasPriceChange(b)) - Number(hasPriceChange(a))
+            || (b.price_change_detected_at ?? "").localeCompare(a.price_change_detected_at ?? "")
+            || byDate(a, b, -1);
       }
     });
     return out;
@@ -435,13 +481,19 @@ export default function CogOnRecord() {
     setSavingAsin(row.asin);
     // A product without a COG row gets one; one that has a row is updated.
     // Either way the database trigger re-prices its 2026 sales and logs it.
-    // Saving by hand resolves a review flag: saving IS the decision.
+    // Saving by hand resolves every flag -- review, not-reviewed and price
+    // change -- because saving IS the decision.
+    const now = new Date().toISOString();
     const { data, error } = row.cog_id
       ? await cogTable()
-          .update({ unit_cost: parsed, source: "manual", needs_review: false })
+          .update({
+            unit_cost: parsed, source: "manual", needs_review: false, reviewed_at: now,
+            price_change_unit_cost: null, price_change_units: null,
+            price_change_listing_id: null, price_change_detected_at: null,
+          })
           .eq("id", row.cog_id).select(COG_COLS).single()
       : await cogTable()
-          .insert({ user_id: user.id, asin: row.asin, unit_cost: parsed, source: "manual", title: row.title })
+          .insert({ user_id: user.id, asin: row.asin, unit_cost: parsed, source: "manual", title: row.title, reviewed_at: now })
           .select(COG_COLS).single();
     setSavingAsin(null);
     if (error) {
@@ -453,6 +505,34 @@ export default function CogOnRecord() {
     const n = await latestRepriceCount(row.asin);
     toast.success(`${row.asin}: COG ${row.cog_id ? "set" : "added"} at ${money(parsed)}${repricedPhrase(n)}`);
   };
+
+  /**
+   * Confirm an automatically filled COG without changing it, or keep the
+   * current COG after a price change. Neither touches unit_cost, so no sales
+   * are re-priced and nothing is added to the change log.
+   */
+  const updateFlags = async (row: ProductRow, patch: Record<string, unknown>, done: string) => {
+    if (!row.cog_id) return;
+    setSavingAsin(row.asin);
+    const { data, error } = await cogTable().update(patch).eq("id", row.cog_id).select(COG_COLS).single();
+    setSavingAsin(null);
+    if (error) {
+      toast.error(`Couldn't update ${row.asin}: ${error.message}`);
+      return;
+    }
+    setRows((rs) => rs.map((r) => (r.asin === row.asin ? withCog(r, data as CogRecord) : r)));
+    toast.success(done);
+  };
+
+  const markReviewed = (row: ProductRow) =>
+    updateFlags(row, { reviewed_at: new Date().toISOString() }, `${row.asin}: marked reviewed at ${money(row.unit_cost)}`);
+
+  const keepCurrent = (row: ProductRow) =>
+    updateFlags(
+      row,
+      { price_change_unit_cost: null, price_change_units: null, price_change_listing_id: null, price_change_detected_at: null },
+      `${row.asin}: kept COG at ${money(row.unit_cost)}`,
+    );
 
   /** For a product with no listing on record -- everything listed already has a row. */
   const addProduct = async () => {
@@ -481,7 +561,7 @@ export default function CogOnRecord() {
       .not("title", "is", null).limit(1);
     const invRow = (inv as { title: string | null; image_url: string | null }[] | null)?.[0];
     const { data, error } = await cogTable()
-      .insert({ user_id: user.id, asin, unit_cost: parsed, source: "manual", title: invRow?.title ?? null })
+      .insert({ user_id: user.id, asin, unit_cost: parsed, source: "manual", title: invRow?.title ?? null, reviewed_at: new Date().toISOString() })
       .select(COG_COLS).single();
     setAdding(false);
     if (error) {
@@ -494,6 +574,7 @@ export default function CogOnRecord() {
       latest_unit_cost: null, latest_units: null, latest_lot_date: null,
       cog_id: null, unit_cost: null, source: null, needs_review: null, review_note: null,
       calculated_cost: null, calculation: null, cog_updated_at: null, in_listings: false,
+      reviewed_at: null, price_change_unit_cost: null, price_change_units: null, price_change_detected_at: null,
     };
     setRows((rs) => [...rs, withCog(blank, data as CogRecord)]);
     setNewAsin("");
@@ -508,11 +589,13 @@ export default function CogOnRecord() {
   };
 
   const tiles: { label: string; value: number; view: View; hint?: string; warn?: boolean }[] = [
+    { label: "Price changed", value: stats.priceChanged, view: "price_changed", warn: stats.priceChanged > 0,
+      hint: stats.priceChanged > 0 ? "restocks >25% from your COG" : undefined },
+    { label: "Not reviewed", value: stats.notReviewed, view: "not_reviewed", warn: stats.notReviewed > 0,
+      hint: stats.notReviewed > 0 ? "filled from listings" : undefined },
     { label: "No COG yet", value: stats.unset, view: "unset", warn: stats.recentUnset > 0,
       hint: stats.recentUnset > 0 ? `${stats.recentUnset} listed in the last ${RECENT_DAYS} days` : undefined },
     { label: `Listed last ${RECENT_DAYS} days`, value: stats.recent, view: "recent" },
-    { label: "Needs review", value: stats.review, view: "review", warn: stats.review > 0 },
-    { label: "Set by you", value: stats.manual, view: "manual" },
   ];
 
   return (
@@ -542,7 +625,9 @@ export default function CogOnRecord() {
             <div className="space-y-1">
               <p>
                 Every product in your <Link to="/tools/created-listings" className="underline underline-offset-2">Product Library</Link>,
-                newest listing first. Products without a COG show an empty box — their sales use the listing's cost until you enter one.
+                newest listing first. A new product's COG is filled from its listing's unit cost and marked
+                <span className="font-medium"> From listing</span> until you review it. Restocks never change your COG — a purchase
+                more than 25% away is flagged <span className="font-medium">Price changed</span> at the top.
               </p>
               <p className="font-medium">
                 Saving a COG immediately re-prices every 2026 sale of that product in Profit &amp; Loss, Sales Report
@@ -583,6 +668,8 @@ export default function CogOnRecord() {
               <SelectTrigger className="w-full lg:w-[180px]"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All products</SelectItem>
+                <SelectItem value="price_changed">Price changed</SelectItem>
+                <SelectItem value="not_reviewed">Not reviewed (from listing)</SelectItem>
                 <SelectItem value="unset">No COG yet</SelectItem>
                 <SelectItem value="has">Has a COG</SelectItem>
                 <SelectItem value="recent">Listed last {RECENT_DAYS} days</SelectItem>
@@ -723,6 +810,16 @@ export default function CogOnRecord() {
                               {r.source === "manual" && !r.needs_review && (
                                 <Badge variant="secondary" className="text-[10px]">Set by you</Badge>
                               )}
+                              {r.source === "listing" && (
+                                <Badge variant="outline" className="text-[10px]" title="COG filled automatically from the listing's unit cost">
+                                  From listing{isNotReviewed(r) ? " · not reviewed" : ""}
+                                </Badge>
+                              )}
+                              {hasPriceChange(r) && (
+                                <Badge className="text-[10px] bg-orange-600 hover:bg-orange-600 text-white" title="A restock more than 25% away from your COG">
+                                  Price changed
+                                </Badge>
+                              )}
                             </div>
                             <div className="text-sm line-clamp-2 mt-0.5" title={r.title ?? undefined}>
                               {r.title || <span className="text-muted-foreground">Untitled</span>}
@@ -775,6 +872,43 @@ export default function CogOnRecord() {
                               )}
                               {r.cog_id && <HistoryButton asin={r.asin} />}
                             </div>
+                            {isNotReviewed(r) && !dirty && !hasPriceChange(r) && (
+                              <Button
+                                size="sm" variant="outline" className="mt-1.5 h-7 px-2 text-xs gap-1"
+                                onClick={() => markReviewed(r)} disabled={saving}
+                                title="Confirm this cost from the listing without changing it"
+                              >
+                                <Check className="h-3 w-3" /> Mark reviewed
+                              </Button>
+                            )}
+                            {hasPriceChange(r) && (
+                              <div className="mt-1.5 rounded-md border border-orange-500/50 bg-orange-500/5 px-2 py-1.5 text-xs">
+                                <div className="tabular-nums">
+                                  New purchase <span className="font-medium">{money(r.price_change_unit_cost)}</span>
+                                  {pctChange(r.unit_cost, r.price_change_unit_cost) != null && (
+                                    <> ({(pctChange(r.unit_cost, r.price_change_unit_cost) ?? 0) > 0 ? "+" : ""}{pctChange(r.unit_cost, r.price_change_unit_cost)}%)</>
+                                  )}
+                                  {r.price_change_units != null && <span className="text-muted-foreground"> · {Number(r.price_change_units).toLocaleString()} units</span>}
+                                </div>
+                                <div className="mt-1 flex gap-1">
+                                  <Button
+                                    size="sm" className="h-6 px-2 text-xs"
+                                    onClick={() => setDrafts((d) => ({ ...d, [r.asin]: Number(r.price_change_unit_cost).toFixed(2) }))}
+                                    disabled={saving}
+                                    title="Copy the new price into the COG box — press ✓ to save it"
+                                  >
+                                    Use {money(r.price_change_unit_cost)}
+                                  </Button>
+                                  <Button
+                                    size="sm" variant="ghost" className="h-6 px-2 text-xs"
+                                    onClick={() => keepCurrent(r)} disabled={saving}
+                                    title="Keep your COG and dismiss this flag"
+                                  >
+                                    Keep {money(r.unit_cost)}
+                                  </Button>
+                                </div>
+                              </div>
+                            )}
                           </TableCell>
                           <TableCell className="align-top text-right tabular-nums text-sm">
                             {r.latest_unit_cost != null ? (
