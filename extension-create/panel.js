@@ -1549,7 +1549,14 @@ function renderPrintSafety() {
     warn.classList.remove("hidden");
     warn.innerHTML = fbaBlocked
       ? fbaWarningHtml(printState.fbaElig, "FBA action required for this ASIN — review the readiness details below before printing a thermal label.")
-      : `<strong>⛔ ${escapeHtml(localReason)}</strong><div>This listing appears to use manufacturer barcode instead of an Amazon FNSKU. Only X-prefixed Amazon FNSKUs can be printed.</div>`;
+      : `<strong>⛔ ${escapeHtml(localReason)}</strong><div>${
+          // Only claim manufacturer-barcode mode when the evidence says so: the
+          // "FNSKU" IS the ASIN. A merely missing FNSKU used to get this same
+          // sentence, which told the seller something false about the listing.
+          /manufacturer barcode/i.test(localReason)
+            ? "This listing uses the manufacturer barcode instead of an Amazon FNSKU. Only X-prefixed Amazon FNSKUs can be printed."
+            : "No Amazon FNSKU (X00…) is stored for this listing yet. If Seller Central shows one, type it in the FNSKU box below — or press Find again in a minute once Amazon has synced."
+        }</div>`;
     if (selected) selected.classList.add("hidden");
   } else {
     warn.classList.add("hidden");
@@ -1660,6 +1667,36 @@ async function loadFnskuOptionsLikeWeb(asin, allowAutoSync = true) {
       const condition = (r?.condition || "NEW").toString().toUpperCase();
       merged.set(`${fnsku}|${condition}`, { fnsku, condition, sku, isLive: !!(sku && liveSkus.has(sku)) });
     }
+
+    // ── FNSKUs WE ALREADY STORE, NOT ONLY fnsku_map (2026-09-15) ───────────
+    //
+    // Options used to come from fnsku_map alone. created_listings and
+    // inventory were read only to classify SKUs as live or dead -- their own
+    // fnsku columns were ignored. fnsku_map is filled lazily by get-fnsku, so
+    // an ASIN never looked up there had no options at all, and the picker said
+    // "no valid Amazon FNSKU" while the FNSKU sat in two other tables.
+    //
+    // Reported 2026-09-15 on B00LFXMBKI: X0059SGQQL was on both created
+    // listings (since 09-03) and the live inventory row; fnsku_map had nothing
+    // until get-fnsku seeded it seconds AFTER the refusal. Seller Central
+    // printed the label without complaint.
+    //
+    // Same ghost rules as above: createdListingRows come from
+    // active_created_listings (validation + ghost gate), inventory rows are
+    // dropped when their SKU is dead. These carry no condition, so NEW -- the
+    // Create Listing tool's condition -- and only when fnsku_map has not
+    // already offered that FNSKU under a real condition.
+    const offered = new Set(Array.from(merged.values()).map((o) => o.fnsku));
+    const addStored = (fnskuRaw, skuRaw) => {
+      const fnsku = normalizeFnsku(fnskuRaw);
+      if (!isValidFnsku(fnsku) || offered.has(fnsku)) return;
+      const sku = normalizeSku(skuRaw);
+      if (sku && deadSkus.has(sku)) return;
+      offered.add(fnsku);
+      merged.set(`${fnsku}|NEW`, { fnsku, condition: "NEW", sku, isLive: !!(sku && liveSkus.has(sku)) });
+    };
+    for (const r of createdListingRows) addStored(r?.fnsku, r?.sku);
+    for (const r of inventoryRows) addStored(r?.fnsku, r?.sku);
 
     // Known-good first, so selectedOptionIndex = 0 lands on a live SKU.
     return Array.from(merged.values()).sort((a, b) => Number(b.isLive) - Number(a.isLive));
@@ -1842,9 +1879,23 @@ $("apx-l-find").addEventListener("click", async () => {
     loadFnskuOptionsLikeWeb(asin, true).catch(() => []),
   ]);
   printState.fbaElig = elig;
+  // The listing row comes from ARBIPRO_FIND_LISTING, i.e. live, ghost-filtered
+  // inventory, and often already carries the FNSKU. With no options this used
+  // to REPLACE it with null -- the card read "FNSKU: missing" for a listing
+  // whose own row held a valid X-FNSKU (B00LFXMBKI, 2026-09-15). Keep it.
+  // Keep the row's own FNSKU when it is printable, and ALSO when it is the
+  // ASIN itself: that is the manufacturer-barcode signal, and dropping it left
+  // fnskuBlockReason() reporting a plain "missing" instead of naming the real
+  // cause. Anything else (blank, malformed) stays null.
+  const ownFnsku = (row) => {
+    const f = normalizeFnsku(row?.fnsku);
+    if (!f) return null;
+    if (isValidFnsku(f)) return f;
+    return f === normalizeFnsku(row?.asin || listing?.asin) ? f : null;
+  };
   // Pick the FNSKU option matching the chosen SKU when possible.
   const pickForSku = (skuPref) => {
-    if (!options.length) return { ...listing, fnsku: null, condition: listing.condition || "NEW", sku: skuPref || listing.sku };
+    if (!options.length) return { ...listing, fnsku: ownFnsku(listing), condition: listing.condition || "NEW", sku: skuPref || listing.sku };
     const match = options.find((o) => o.sku && skuPref && o.sku === skuPref) || options[0];
     printState.selectedOptionIndex = options.indexOf(match);
     return { ...listing, fnsku: match.fnsku, condition: match.condition || listing.condition || "NEW", sku: match.sku || skuPref || listing.sku };
@@ -1861,14 +1912,16 @@ $("apx-l-find").addEventListener("click", async () => {
   } else {
     listing = options.length
       ? { ...listing, fnsku: options[0].fnsku, condition: options[0].condition || listing.condition || "NEW", sku: options[0].sku || listing.sku }
-      : { ...listing, fnsku: null, condition: listing.condition || "NEW" };
+      : { ...listing, fnsku: ownFnsku(listing), condition: listing.condition || "NEW" };
     renderPrintCard(listing);
     renderFnskuOptions(options);
   }
   const reason = fnskuBlockReason(listing.fnsku, asin);
   const blocked = elig && elig.eligible === false;
   const ready = !blocked && !reason && isValidFnsku(listing.fnsku);
-  setStatus("apx-l-find-status", ready ? "FNSKU ready ✓" : (blocked ? "Blocked: ASIN is using manufacturer barcode, not Amazon FNSKU" : "Not safe to print — no valid Amazon FNSKU found."), ready ? "ok" : "err");
+  // `blocked` is the FBA eligibility result, which can fail for many reasons --
+  // it is not evidence of manufacturer-barcode mode, so do not say so.
+  setStatus("apx-l-find-status", ready ? "FNSKU ready ✓" : (blocked ? "Blocked: FBA action required for this ASIN — see the readiness details" : (reason || "Not safe to print — no valid Amazon FNSKU found.")), ready ? "ok" : "err");
   void checkPrintClient();
 });
 

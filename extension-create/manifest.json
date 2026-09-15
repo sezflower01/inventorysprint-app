@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "InventorySprint — Create Listing",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Floating Create Listing form for Amazon pages — mirrors the InventorySprint Create Listing page (fetch product, validate, create on Amazon, save to Product Library, and print FNSKU thermal labels).",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
