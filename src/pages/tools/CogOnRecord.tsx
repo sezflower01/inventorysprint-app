@@ -16,13 +16,21 @@
  * import's own figure is kept in `calculated_cost` beside the COG so an edited
  * value can always be compared with what purchase history says.
  *
- * ── NOT YET APPLIED TO SALES ─────────────────────────────────────────────
+ * ── APPLIED TO 2026 SALES, IMMEDIATELY ────────────────────────────────────
  *
- * Nothing reads this table for COGS yet: P&L, Live Sales, mobile and Excel
- * still use the cost stored on each sale. Switching 2026 sales onto it is a
- * separate step, taken once the seller has reviewed these numbers. The banner
- * says so, because a page that looks like it changes profit when it does not
- * is how edits get made on a false belief.
+ * Switched on in migration 20260915010000, at the seller's instruction: like
+ * InventoryLab, saving a COG re-prices EVERY sale of that product dated
+ * 2026-01-01 onward, at once, with no "apply from which date" prompt. 2025 is
+ * never touched. The COG is written into the cost columns P&L, Sales Report,
+ * Live Sales, mobile and Excel already read, so they all agree.
+ *
+ * Every change is logged by a database trigger into
+ * asin_cog_on_record_history (who, from, to, when, how many sales re-priced).
+ * The browser can read that log but cannot write or edit it.
+ *
+ * Clearing a COG is not offered: sales would keep the last applied cost while
+ * the page showed "not set", which is exactly the kind of silent disagreement
+ * this feature exists to remove.
  *
  * ── TYPES ────────────────────────────────────────────────────────────────
  *
@@ -35,8 +43,9 @@ import { Helmet } from "react-helmet-async";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import {
-  AlertTriangle, Check, Copy, Info, Loader2, Plus, RefreshCw, RotateCcw, Search, Tag,
+  AlertTriangle, Check, Copy, History, Info, Loader2, Plus, RefreshCw, RotateCcw, Search, Tag,
 } from "lucide-react";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
 import { Button } from "@/components/ui/button";
@@ -77,6 +86,18 @@ interface CogRow {
   updated_at: string;
 }
 
+interface HistoryEntry {
+  id: number;
+  asin: string;
+  action: "added" | "changed" | "cleared" | "removed";
+  old_unit_cost: number | null;
+  new_unit_cost: number | null;
+  sales_rows_repriced: number;
+  changed_by_email: string | null;
+  changed_at: string;
+  note: string | null;
+}
+
 type View = "all" | "review" | "unset" | "manual" | "import";
 type SortKey = "sold" | "difference" | "asin" | "edited";
 
@@ -95,6 +116,82 @@ const money = (v: number | null | undefined) =>
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const cogTable = () => (supabase as any).from("asin_cog_on_record");
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const historyTable = () => (supabase as any).from("asin_cog_on_record_history");
+
+const HISTORY_COLS = "id, asin, action, old_unit_cost, new_unit_cost, sales_rows_repriced, changed_by_email, changed_at, note";
+
+const fmtWhen = (iso: string) =>
+  new Date(iso).toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
+/** Per-product change log, fetched when opened. */
+function HistoryButton({ asin }: { asin: string }) {
+  const [open, setOpen] = useState(false);
+  const [entries, setEntries] = useState<HistoryEntry[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    (async () => {
+      setError(null);
+      const { data, error: e } = await historyTable()
+        .select(HISTORY_COLS).eq("asin", asin).order("changed_at", { ascending: false }).limit(50);
+      if (cancelled) return;
+      if (e) setError(e.message);
+      else setEntries((data ?? []) as HistoryEntry[]);
+    })();
+    return () => { cancelled = true; };
+  }, [open, asin]);
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button size="icon" variant="ghost" className="h-8 w-8" aria-label={`Change history for ${asin}`} title="Change history">
+          <History className="h-3.5 w-3.5" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-80 p-0">
+        <div className="border-b px-3 py-2 text-sm font-medium">Changes to {asin}</div>
+        <div className="max-h-72 overflow-y-auto">
+          {error ? (
+            <p className="p-3 text-sm text-destructive">Couldn't load history: {error}</p>
+          ) : entries === null ? (
+            <p className="p-3 text-sm text-muted-foreground flex items-center gap-2"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…</p>
+          ) : entries.length === 0 ? (
+            <p className="p-3 text-sm text-muted-foreground">No changes since the import.</p>
+          ) : (
+            <ul className="divide-y">
+              {entries.map((h) => (
+                <li key={h.id} className="px-3 py-2 text-sm">
+                  <div className="tabular-nums">
+                    {h.old_unit_cost == null ? "not set" : money(h.old_unit_cost)} → <span className="font-medium">{h.new_unit_cost == null ? "not set" : money(h.new_unit_cost)}</span>
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    {fmtWhen(h.changed_at)} · {h.sales_rows_repriced.toLocaleString()} sale{h.sales_rows_repriced === 1 ? "" : "s"} re-priced
+                    {h.changed_by_email ? ` · ${h.changed_by_email}` : ""}
+                  </div>
+                  {h.note && <div className="text-xs text-muted-foreground mt-0.5">{h.note}</div>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** How many sales the save just re-priced, read from the log the trigger wrote. */
+async function latestRepriceCount(asin: string): Promise<number | null> {
+  const { data } = await historyTable()
+    .select("sales_rows_repriced").eq("asin", asin).order("id", { ascending: false }).limit(1);
+  const n = (data as { sales_rows_repriced: number }[] | null)?.[0]?.sales_rows_repriced;
+  return typeof n === "number" ? n : null;
+}
+
+const repricedPhrase = (n: number | null) =>
+  n == null ? "" : n === 0 ? " — no 2026 sales to re-price" : ` — ${n.toLocaleString()} 2026 sale${n === 1 ? "" : "s"} re-priced`;
 
 export default function CogOnRecord() {
   const { user } = useAuth();
@@ -203,8 +300,12 @@ export default function CogOnRecord() {
 
   const saveCost = async (row: CogRow, raw: string) => {
     const parsed = parseCost(raw);
-    if (parsed === "invalid") {
-      toast.error("Enter a cost of $0 or more, or leave it empty to clear.");
+    if (parsed === "invalid" || (parsed == null && row.unit_cost != null)) {
+      toast.error("Enter a cost of $0 or more. A COG can be changed but not cleared, because 2026 sales already use it.");
+      return;
+    }
+    if (parsed == null) {
+      setDrafts((d) => { const n = { ...d }; delete n[row.id]; return n; });
       return;
     }
     if (parsed === row.unit_cost) {
@@ -227,7 +328,8 @@ export default function CogOnRecord() {
     }
     setRows((rs) => rs.map((r) => (r.id === row.id ? (data as CogRow) : r)));
     setDrafts((d) => { const n = { ...d }; delete n[row.id]; return n; });
-    toast.success(parsed == null ? `${row.asin}: COG cleared` : `${row.asin}: COG set to ${money(parsed)}`);
+    const n = await latestRepriceCount(row.asin);
+    toast.success(`${row.asin}: COG set to ${money(parsed)}${repricedPhrase(n)}`);
   };
 
   const addProduct = async () => {
@@ -276,7 +378,8 @@ export default function CogOnRecord() {
     setRows((rs) => [...rs, data as CogRow]);
     setNewAsin("");
     setNewCost("");
-    toast.success(`${asin} added at ${money(parsed)}`);
+    const n = await latestRepriceCount(asin);
+    toast.success(`${asin} added at ${money(parsed)}${repricedPhrase(n)}`);
   };
 
   const copyAsin = async (asin: string) => {
@@ -315,7 +418,8 @@ export default function CogOnRecord() {
                 the calculated figure stays beside each COG for comparison.
               </p>
               <p className="font-medium">
-                Not applied to sales yet — Profit &amp; Loss and the sales reports still use each sale's current cost.
+                Saving a COG immediately re-prices every 2026 sale of that product in Profit &amp; Loss, Sales Report
+                and Live Sales. 2025 is never changed. Every change is logged — open <History className="inline h-3.5 w-3.5 align-text-bottom" /> on a row to see it.
               </p>
             </div>
           </div>
@@ -429,7 +533,7 @@ export default function CogOnRecord() {
                   <TableHeader>
                     <TableRow>
                       <TableHead className="min-w-[280px]">Product</TableHead>
-                      <TableHead className="w-[190px]">COG on record</TableHead>
+                      <TableHead className="w-[230px]">COG on record</TableHead>
                       <TableHead className="text-right">Calculated</TableHead>
                       <TableHead className="text-right">Purchases</TableHead>
                       <TableHead className="text-right">2026 sales</TableHead>
@@ -511,6 +615,7 @@ export default function CogOnRecord() {
                                   <RotateCcw className="h-3.5 w-3.5" />
                                 </Button>
                               )}
+                              <HistoryButton asin={r.asin} />
                             </div>
                           </TableCell>
                           <TableCell className="align-top text-right tabular-nums text-sm">

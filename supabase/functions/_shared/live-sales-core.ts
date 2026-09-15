@@ -747,7 +747,13 @@ async function fetchSalesOrders(admin: any, userId: string, startISO: string, en
   let from = 0;
   for (;;) {
     const { data, error } = await admin.from("sales_orders")
-      .select("id, order_id, asin, sku, seller_sku, title, quantity, sold_price, total_sale_amount, estimated_price, locked_est_price, marketplace, is_cancelled, order_status, order_type, price_source, price_calc_mode, price_confidence, needs_price_enrich, price_enrich_status, referral_fee, fba_fee, closing_fee, total_fees, shipping_label_fee, unit_cost, total_cost, fulfillment_channel, order_date, fees_invalid, promotion_discount, promotion_discount_native, promotion_discount_currency")
+      // unit_cost_at_sale + cost_locked are REQUIRED by the COGS resolver's
+      // step 1. They were missing until 2026-09-15, so resolve() never saw a
+      // locked snapshot and re-derived every sale's cost from purchase history
+      // -- the server summaries silently disagreed with P&L and the browser
+      // resolver, which both honour locked costs. It became unmissable with
+      // COG on Record, which is written into exactly these columns.
+      .select("id, order_id, asin, sku, seller_sku, title, quantity, sold_price, total_sale_amount, estimated_price, locked_est_price, marketplace, is_cancelled, order_status, order_type, price_source, price_calc_mode, price_confidence, needs_price_enrich, price_enrich_status, referral_fee, fba_fee, closing_fee, total_fees, shipping_label_fee, unit_cost, unit_cost_at_sale, cost_locked, total_cost, fulfillment_channel, order_date, fees_invalid, promotion_discount, promotion_discount_native, promotion_discount_currency")
       .eq("user_id", userId)
       .gte("order_date", startISO).lte("order_date", endISO)
       .not("order_id", "like", "%-REFUND")
@@ -964,6 +970,8 @@ export async function computeLiveSalesSummary(opts: {
       sku: String(row.sku || row.seller_sku || "").trim(),
       order_date: row.order_date || null,
       unit_cost: num(row.unit_cost),
+      unit_cost_at_sale: row.unit_cost_at_sale ?? null,
+      cost_locked: row.cost_locked ?? null,
     });
     const lineCost = unitCost * qty;
     const feesUsd = computeFeesUsdLikeUi(row, qty);
@@ -1083,6 +1091,8 @@ export async function computeLiveSalesSummary(opts: {
       sku: String(row.sku || row.seller_sku || "").trim(),
       order_date: row.order_date || null,
       unit_cost: num(row.unit_cost),
+      unit_cost_at_sale: row.unit_cost_at_sale ?? null,
+      cost_locked: row.cost_locked ?? null,
     });
     cur.fees_with_fallback += computeFeesUsdLikeUi(row, qty);
     cur.cost_with_fallback += unitCost * qty;
