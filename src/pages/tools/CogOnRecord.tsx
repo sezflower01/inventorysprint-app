@@ -50,7 +50,7 @@
  * src/integrations/supabase/types.ts predates these tables and the RPC, so
  * calls go through an untyped client and rows are typed locally.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Helmet } from "react-helmet-async";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
@@ -271,10 +271,22 @@ export default function CogOnRecord() {
   const [newCost, setNewCost] = useState("");
   const [adding, setAdding] = useState(false);
 
-  const load = useCallback(async () => {
-    if (!user) return;
-    setLoading(true);
-    setLoadError(null);
+  const lastLoadedAt = useRef(0);
+  const inFlight = useRef(false);
+
+  /**
+   * Fetch every product. `silent` keeps the current table on screen while it
+   * reloads -- used when the tab regains focus, so a returning seller does not
+   * see the table blank out, and a failure is a toast rather than an error
+   * panel replacing rows that are still valid.
+   */
+  const load = useCallback(async (silent = false) => {
+    if (!user || inFlight.current) return;
+    inFlight.current = true;
+    if (!silent) {
+      setLoading(true);
+      setLoadError(null);
+    }
     try {
       const all: ProductRow[] = [];
       for (let from = 0; ; from += FETCH_CHUNK) {
@@ -285,18 +297,45 @@ export default function CogOnRecord() {
         if (chunk.length < FETCH_CHUNK) break;
       }
       setRows(all);
+      lastLoadedAt.current = Date.now();
     } catch (e) {
       // Shown, not swallowed: an empty table must never be mistaken for
       // "no products".
       const msg = e instanceof Error ? e.message : String(e);
       console.error("[CogOnRecord] load failed", e);
-      setLoadError(msg);
+      if (silent) toast.error(`Couldn't refresh products: ${msg}`);
+      else setLoadError(msg);
     } finally {
-      setLoading(false);
+      inFlight.current = false;
+      if (!silent) setLoading(false);
     }
   }, [user]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Refresh when the seller comes back to this tab.
+  //
+  // The workflow this page serves is "create a listing elsewhere, return here,
+  // enter its cost". The list loaded once on open, so a listing created after
+  // that stayed missing until a manual refresh -- reported 2026-09-15 for
+  // B01A0LTJBO, which the database already returned second from the top.
+  // Drafts are separate state keyed by ASIN, so typed-but-unsaved costs
+  // survive the reload. Throttled so flicking between tabs is not a query each
+  // time.
+  useEffect(() => {
+    const MIN_GAP_MS = 20_000;
+    const onReturn = () => {
+      if (document.visibilityState !== "visible") return;
+      if (Date.now() - lastLoadedAt.current < MIN_GAP_MS) return;
+      load(true);
+    };
+    document.addEventListener("visibilitychange", onReturn);
+    window.addEventListener("focus", onReturn);
+    return () => {
+      document.removeEventListener("visibilitychange", onReturn);
+      window.removeEventListener("focus", onReturn);
+    };
+  }, [load]);
 
   const cutoff = useMemo(recentCutoff, [rows]);
   const isRecent = useCallback(
@@ -492,7 +531,7 @@ export default function CogOnRecord() {
                 <span className="text-sm text-muted-foreground">({stats.total.toLocaleString()} products)</span>
               )}
             </div>
-            <Button variant="outline" size="sm" onClick={load} disabled={loading} className="gap-1.5">
+            <Button variant="outline" size="sm" onClick={() => load()} disabled={loading} className="gap-1.5">
               <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
               Refresh
             </Button>
