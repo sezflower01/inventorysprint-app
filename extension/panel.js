@@ -20,6 +20,12 @@
     return Number.isFinite(bsr) && bsr > 0 ? Math.max(1, Math.round(100000 * Math.pow(bsr, -0.6))) : null;
   };
 
+  // The five lookups loadData() runs per scan, by the name each task marks
+  // ready. renderSellerAmpSummary() fills a row as soon as ITS inputs are in,
+  // rather than holding every row until the slowest lookup settles. Declared
+  // at the top so no early call can hit it before initialisation.
+  const SUMMARY_SOURCES = ["snapshot", "history", "stability", "dims", "fbaElig"];
+
   let state = {
     asin: null, marketplace: "US", currency: "USD",
     fees: null, feesRefPrice: null, eligibility: null, stability: null, history: null,
@@ -34,6 +40,8 @@
     // and renderSellerAmpSkeleton(). Starts true so nothing renders a real
     // (and possibly false-alarm) verdict before the first scan even starts.
     summaryLoading: true,
+    // Lookups of the current scan still outstanding; see SUMMARY_SOURCES.
+    pendingSources: new Set(SUMMARY_SOURCES),
     range: "90", // '90' (3M) | '180' (6M) | '365' (1Y)
     sellerMode: "FBA", // 'FBA' | 'FBM' — picks correct competitor lane
     // USD -> marketplace currency map (e.g. { CAD: 1.3872, MXN: 17.9, BRL: 5.37 }).
@@ -1137,6 +1145,9 @@
     // history are slower) would briefly mix stale-previous-product data
     // with new-product data and flash false "red alert" rows.
     state.summaryLoading = true;
+    // Each task below removes its name as it settles (with or without data),
+    // so the summary can fill row by row -- see renderSellerAmpSummary().
+    state.pendingSources = new Set(SUMMARY_SOURCES);
     renderSellerAmpSummary();
 
     // Safety net. Every task settles on its own (withTimeout resolves rather
@@ -1264,6 +1275,7 @@
         if (prod?.title && prod.title !== "Product not found on Amazon") state.product.title = prod.title;
         if (prod?.imageUrl) state.product.image = prod.imageUrl;
         renderMeta(); renderEligibility(); renderFbaEligibility(); renderFbaCompliance(); renderRoiAndSignal();
+        markSummarySourceReady("snapshot");
         // Not approved yet on this first check? Amazon's restrictions API and
         // our own seller-account override (see fetch-listing-snapshot)
         // both have a brief eventual-consistency window right after a real
@@ -1304,16 +1316,19 @@
           state.currency = state.history?.offers?.list?.[0]?.currency || state.currency || "USD";
         }
         renderHistory(); renderHistoryChart(); renderSellers();
+        markSummarySourceReady("history");
       }),
       safeInvoke("mobile-scan-price-stability", { asin: a, marketplace: m, range: r }, 30000).then((stab) => {
         if (!stillCurrent()) return;
         state.stability = stab || null;
         renderStability(); renderRoiAndSignal();
+        markSummarySourceReady("stability");
       }),
       safeInvoke("asin-dimensions", { asin: a, marketplace: m }, 25000).then((dims) => {
         if (!stillCurrent()) return;
         state.dims = (dims && (dims.found || dims.cached || dims.source)) ? dims : null;
         renderDims();
+        markSummarySourceReady("dims");
       }),
       safeInvoke("check-fba-listing-eligibility", { asin: a, marketplace: m, marketplaceId: MARKETPLACES[m]?.id, condition: "new_new", force }, 15000).then((res) => {
         if (!stillCurrent()) return;
@@ -1326,7 +1341,7 @@
               : "Amazon SP-API check did not return a result.");
         renderFbaEligibility();
         renderFbaCompliance();
-        renderSellerAmpSummary();
+        markSummarySourceReady("fbaElig");
       }),
     ];
 
@@ -1552,6 +1567,16 @@
     return Math.max(0, (sale - unitFees) / 1.30);
   }
 
+  /** Mark one lookup of the current scan as settled (with or without data) and repaint. */
+  function markSummarySourceReady(name) {
+    state.pendingSources?.delete(name);
+    try {
+      renderSellerAmpSummary();
+    } catch (e) {
+      console.error(`[InvSPRNT] renderSellerAmpSummary failed after ${name}`, e);
+    }
+  }
+
   // Same k labels as the real diag grid (extension/panel.js renderSellerAmpSummary)
   // — kept as a small static list purely for the loading skeleton, since the
   // real labels are computed from live classify functions we don't want to
@@ -1599,12 +1624,28 @@
 
   let __saMounted = false;
   function renderSellerAmpSummary() {
-    // Data for this scan isn't fully consistent yet (see loadData()) — show
-    // a skeleton instead of computing from a mix of stale-previous-product
-    // and partial-new-product state, which used to flash false "red alert"
-    // rows (e.g. a leftover gating/PL status from the last ASIN) until every
-    // fetch settled.
-    if (state.summaryLoading) { renderSellerAmpSkeleton(); return; }
+    // ── PER-ROW READINESS (2026-09-15) ────────────────────────────────────
+    //
+    // This used to render the whole summary as a skeleton until EVERY lookup
+    // in loadData() settled. The reason was sound: rows computed from data
+    // that has not arrived read as problems -- Private-Label Risk is "Not
+    // enough data" (a "bad" level) until price history lands -- which flashed
+    // false red alerts. But it made "Eligible to list", which needs only the
+    // fast SP-API snapshot, wait for the slowest Keepa call: 25-30 s of
+    // skeleton per product whenever Keepa was slow, and the seller reported
+    // the three rows "still showing skeleton".
+    //
+    // Now each row waits only for its own inputs. A row that is not ready
+    // shows its skeleton bar -- never an "unknown"/"bad" value -- so the false
+    // alert cannot happen. Active alerts lists real flags as they are found
+    // and only says "None" once every check is in. The weighted verdict and
+    // renderDecisionMatrix (which records the decision) still wait for all.
+    const pend = state.summaryLoading
+      ? (state.pendingSources || new Set(SUMMARY_SOURCES))
+      : new Set();
+    const ready = (...names) => names.every((n) => !pend.has(n));
+    if (pend.size >= SUMMARY_SOURCES.length) { renderSellerAmpSkeleton(); return; }
+    const skelChip = (el, cls) => { if (el) { el.className = `${cls} apx-skel-bar`; el.textContent = ""; } };
     if (!__saMounted) { console.log("[InventorySprint] Analyzer summary mounted"); __saMounted = true; }
     console.log("[InventorySprint] Analyzer summary data loaded", { asin: state.asin, hasIntel: !!state.stability?.intel, hasOffers: !!state.history?.offers?.list?.length, hasDims: !!state.dims });
     const intel = state.stability?.intel || {};
@@ -1630,8 +1671,9 @@
       : elig.level === "caution"
       ? "Amazon requires brand/category approval before you can list this ASIN under your seller account. Apply for approval, or check an existing application, before sourcing this."
       : "Eligibility hasn't been checked yet for this marketplace.";
-    { const _el = $("apx-sa-eligible-info"); if (_el) _el.title = eligInfo; }
-    setChip($("apx-sa-eligible"), elig.level, elig.text);
+    { const _el = $("apx-sa-eligible-info"); if (_el) _el.title = ready("snapshot") ? eligInfo : "Checking with Amazon…"; }
+    if (ready("snapshot")) setChip($("apx-sa-eligible"), elig.level, elig.text);
+    else skelChip($("apx-sa-eligible"), "apx-sa-chip");
     // Reconciled seller count from actual offer list (single source of truth
     // shared with the competitor table below).
     const _reconciledFba = offers.filter(o => o?.isFBA).length;
@@ -1669,11 +1711,14 @@
     const plCaption = plResult.state === "insufficient"
       ? "Not enough historical data yet to determine Private-Label Risk reliably."
       : plResult.text;
-    setChip($("apx-sa-pl"), plRowLevel, plDisplayText);
+    // PL needs price history (series) and stability (product age). Until both
+    // are in, "Not enough data" would be a false "bad" -- show the skeleton.
+    if (ready("history", "stability")) setChip($("apx-sa-pl"), plRowLevel, plDisplayText);
+    else skelChip($("apx-sa-pl"), "apx-sa-chip");
     // Human-readable "why" for every possible state (High/Medium/Low risk,
     // limited history, or insufficient data) — plCaption/plResult.text is
     // always populated by computePrivateLabelRisk(), never blank.
-    { const _el = $("apx-sa-pl-info"); if (_el) _el.title = plCaption; }
+    { const _el = $("apx-sa-pl-info"); if (_el) _el.title = ready("history", "stability") ? plCaption : "Loading price history…"; }
 
     const bsr = intel.bsr_current;
     $("apx-sa-bsr").textContent = bsr ? "#" + bsr.toLocaleString() : "—";
@@ -1703,23 +1748,31 @@
     const historicalText = sellerHist?.sufficient
       ? `${sellerHist.avg.toFixed(1)} avg over ${sellerHist.windowDays}d (${sellerHist.trend})`
       : "Not enough history";
+    // `src` names the lookups each row is computed from (SUMMARY_SOURCES).
     const diag = [
-      { k: "Eligibility", ...elig, tip: "From SP-API restrictions check for your seller account." },
+      { k: "Eligibility", ...elig, tip: "From SP-API restrictions check for your seller account.", src: ["snapshot"] },
       // Amazon presence is an important sourcing warning on its own, but it is
       // NOT evidence of private-label status — kept as its own separate risk,
       // never added into the Private-Label Risk score below.
-      { k: "Amazon Competition Risk", level: amzRisk.level, text: amzRisk.text, tip: amzRisk.detail },
-      { k: "Private-Label Risk", level: plRowLevel, text: plDisplayText, tip: plCaption, caption: plCaption },
-      { k: "Current Active Offers", level: "unknown", text: currentActiveOffers != null ? String(currentActiveOffers) : "—", tip: "Live count right now — can dip temporarily from restocking/out-of-stock lag, so it only slightly influences Private-Label Risk." },
-      { k: "Historical Active Offers", level: sellerHist?.sufficient ? "good" : "unknown", text: historicalText, tip: "Active new-condition offers approximate seller participation — one seller can occasionally hold multiple offers. Trend is informational only in this phase." },
-      { k: "Hazmat / Dangerous Goods", ...haz, tip: "Is this ASIN under Amazon's Dangerous Goods program? From the FBA compliance stage check." },
-      { k: "IP Analysis", level: "good", text: "No known issues", tip: "No internal IP risk database matches." },
-      { k: "Size Tier", ...sz, tip: "Estimated from package dimensions/weight." },
-      { k: "Variations", ...vars, tip: "Number of child ASINs from Keepa." },
+      { k: "Amazon Competition Risk", level: amzRisk.level, text: amzRisk.text, tip: amzRisk.detail, src: ["stability"] },
+      { k: "Private-Label Risk", level: plRowLevel, text: plDisplayText, tip: plCaption, caption: plCaption, src: ["history", "stability"] },
+      { k: "Current Active Offers", level: "unknown", text: currentActiveOffers != null ? String(currentActiveOffers) : "—", tip: "Live count right now — can dip temporarily from restocking/out-of-stock lag, so it only slightly influences Private-Label Risk.", src: ["history"] },
+      { k: "Historical Active Offers", level: sellerHist?.sufficient ? "good" : "unknown", text: historicalText, tip: "Active new-condition offers approximate seller participation — one seller can occasionally hold multiple offers. Trend is informational only in this phase.", src: ["history"] },
+      { k: "Hazmat / Dangerous Goods", ...haz, tip: "Is this ASIN under Amazon's Dangerous Goods program? From the FBA compliance stage check.", src: ["fbaElig"] },
+      { k: "IP Analysis", level: "good", text: "No known issues", tip: "No internal IP risk database matches.", src: [] },
+      { k: "Size Tier", ...sz, tip: "Estimated from package dimensions/weight.", src: ["dims"] },
+      { k: "Variations", ...vars, tip: "Number of child ASINs from Keepa.", src: ["stability"] },
     ];
     const grid = $("apx-diag-grid");
     grid.innerHTML = "";
     diag.forEach(d => {
+      if (!ready(...d.src)) {
+        const row = document.createElement("div");
+        row.className = "apx-diag-row apx-skel-row";
+        row.innerHTML = `<span class="apx-diag-k">${d.k}</span><span class="apx-diag-v"><span class="apx-skel-bar"></span></span>`;
+        grid.appendChild(row);
+        return;
+      }
       const row = document.createElement("div");
       row.className = "apx-diag-row " + d.level;
       row.title = d.tip || "";
@@ -1737,24 +1790,58 @@
       }
     });
 
-    const flagged = diag.filter(d => d.level === "caution" || d.level === "bad");
+    // Only rows whose data is in can raise or clear an alert.
+    const readyDiag = diag.filter(d => ready(...d.src));
+    const waitingOn = diag.filter(d => !ready(...d.src)).map(d => d.k);
+    const flagged = readyDiag.filter(d => d.level === "caution" || d.level === "bad");
     const aBadge = $("apx-sa-alerts");
-    aBadge.textContent = flagged.length ? flagged.map(d => d.k).join(", ") : "None";
     // "each alert: its own plain-English reason" (same tip text the
     // detailed diagnostics grid shows) — including the "no alerts" case,
     // which used to leave the tooltip empty.
-    const alertsInfo = flagged.length
+    const alertsInfo = (flagged.length
       ? flagged.map(d => `${d.k}: ${d.tip || d.text}`).join(" • ")
-      : "No risk factors flagged — Eligibility, Private-Label Risk, and every other check below came back clean.";
-    aBadge.title = alertsInfo;
-    { const _el = $("apx-sa-alerts-info"); if (_el) _el.title = alertsInfo; }
+      : "No risk factors flagged — Eligibility, Private-Label Risk, and every other check below came back clean.")
+      + (waitingOn.length ? ` • Still checking: ${waitingOn.join(", ")}` : "");
+    { const _el = $("apx-sa-alerts-info"); if (_el) _el.title = waitingOn.length && !flagged.length ? `Still checking: ${waitingOn.join(", ")}` : alertsInfo; }
     // Red should mean "real problem" (at least one "bad" item, e.g. Hazmat
     // blocked, Ineligible, Insufficient PL data). A caution-only mix (e.g.
     // just a Medium Private-Label Risk) is a milder heads-up, not an
     // emergency — showing it in the same red as a hard block was confusing
     // users into thinking something was actually wrong.
     const hasBad = flagged.some(d => d.level === "bad");
-    aBadge.className = "apx-sa-badge" + (flagged.length === 0 ? " zero" : hasBad ? "" : " caution");
+    if (flagged.length) {
+      // Real flags are shown as soon as they are found, with a hint that
+      // more checks are still running.
+      aBadge.textContent = flagged.map(d => d.k).join(", ") + (waitingOn.length ? " …" : "");
+      aBadge.title = alertsInfo;
+      aBadge.className = "apx-sa-badge" + (hasBad ? "" : " caution");
+    } else if (waitingOn.length) {
+      // "None" is a claim about every check -- never make it early.
+      aBadge.className = "apx-sa-badge apx-skel-bar";
+      aBadge.textContent = "";
+      aBadge.title = `Still checking: ${waitingOn.join(", ")}`;
+    } else {
+      aBadge.textContent = "None";
+      aBadge.title = alertsInfo;
+      aBadge.className = "apx-sa-badge zero";
+    }
+
+    // The weighted verdict and renderDecisionMatrix() -- which records the
+    // decision -- must only ever see a complete scan. Hold the verdict area
+    // on "Analyzing…" until every lookup is in.
+    if (pend.size) {
+      const act = $("apx-dm-action");
+      if (act) { act.className = "apx-fd-action"; act.textContent = "Analyzing…"; }
+      const emojiEl = $("apx-fd-emoji");
+      if (emojiEl) emojiEl.textContent = "⏳";
+      const conf = $("apx-fd-confidence");
+      if (conf) { conf.className = "apx-skel-bar"; conf.textContent = ""; }
+      const why = $("apx-dm-why");
+      if (why) why.textContent = "";
+      const scoreEl = $("apx-sa-verdict-score");
+      if (scoreEl) scoreEl.textContent = "";
+      return;
+    }
 
     // Weighted verdict
     let score = 0, max = 0;
