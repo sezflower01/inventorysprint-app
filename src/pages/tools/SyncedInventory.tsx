@@ -25,6 +25,7 @@ import { CreatePurchaseFromCostButton } from "@/components/inventory/CreatePurch
 
 import { useAsinPurchaseRecords } from "@/hooks/use-asin-purchase-records";
 import { calculateReplenishQty } from "@/lib/replenishment";
+import { parseListingDate } from "@/lib/listingDate";
 import { usePageFavicon } from "@/hooks/use-page-favicon";
 import { useSubscription } from "@/hooks/use-subscription";
 import { Button } from "@/components/ui/button";
@@ -89,33 +90,9 @@ const MARKETPLACE_ID_TO_CODE: Record<string, 'US' | 'CA' | 'MX' | 'BR'> = {
   A2Q3Y263D00KWC: 'BR',
 };
 
-/**
- * Parse a listing date that may be a bare DATE rather than a timestamp.
- *
- * `listing_created_at` is fed from `created_listings.date_created`, which is a
- * Postgres DATE and arrives as "2026-08-23" with no time and no zone. Passing
- * that to `new Date()` does NOT give local midnight: ECMAScript specifies that
- * date-only ISO forms are parsed as UTC, while date-TIME forms without a zone
- * are parsed as local. So the bare form lands on UTC midnight, and every
- * viewer west of UTC renders the PREVIOUS day.
- *
- *   new Date("2026-08-23").toLocaleDateString()  // "Aug 22" in Pacific
- *
- * Reported 2026-08-28: a listing created on the 23rd displayed as "Aug 22, 26".
- * It affected every created-listing row, silently, for anyone not on UTC or
- * east of it.
- *
- * Appending "T00:00:00" opts into the local-time branch of the same spec, which
- * is what a calendar date from Amazon actually means. Timestamps that already
- * carry a zone are passed through untouched.
- */
-function parseListingDate(value: string | null | undefined): Date | null {
-  if (!value) return null;
-  const d = /^\d{4}-\d{2}-\d{2}$/.test(value)
-    ? new Date(`${value}T00:00:00`)
-    : new Date(value);
-  return Number.isNaN(d.getTime()) ? null : d;
-}
+// parseListingDate lives in @/lib/listingDate (imported above), shared with the
+// COG on Record page. Its header documents the bare-DATE off-by-one-day bug it
+// exists to prevent.
 
 function getPhysicalWarehouseUnits(item: Pick<InventoryItem, 'available' | 'reserved' | 'inbound' | 'unfulfilled'>) {
   return (item.available ?? 0) + (item.reserved ?? 0) + (item.inbound ?? 0) + (item.unfulfilled ?? 0);

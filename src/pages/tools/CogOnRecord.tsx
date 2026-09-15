@@ -6,37 +6,49 @@
  * The seller's original design (stated 2026-09-14), modelled on InventoryLab:
  * keep ONE average COG per product and let COGS read it, instead of deriving a
  * cost from every Created Listings lot (total / units) and freezing it on each
- * sale. Most restocks of a product cost about the same, so one typed average
- * is both simpler to maintain and closer to how the seller thinks about cost.
- * Created Listings cost stays as purchase history, for reference.
+ * sale. Created Listings cost stays as purchase history, for reference.
  *
- * Rows were seeded once by migration 20260914030000 from purchase lots, using
- * the rule the seller reviewed (placeholder, inverted and outlier lots dropped;
- * last-12-months average when 10+ units were bought, else all-time). The
- * import's own figure is kept in `calculated_cost` beside the COG so an edited
- * value can always be compared with what purchase history says.
+ * COGs were seeded once by migration 20260914030000 from purchase lots, using
+ * the rule the seller reviewed. The import's own figure is kept in
+ * `calculated_cost` beside the COG so an edited value can always be compared.
  *
  * ── APPLIED TO 2026 SALES, IMMEDIATELY ────────────────────────────────────
  *
- * Switched on in migration 20260915010000, at the seller's instruction: like
+ * Switched on in 20260915010000, at the seller's instruction: like
  * InventoryLab, saving a COG re-prices EVERY sale of that product dated
  * 2026-01-01 onward, at once, with no "apply from which date" prompt. 2025 is
  * never touched. The COG is written into the cost columns P&L, Sales Report,
  * Live Sales, mobile and Excel already read, so they all agree.
  *
  * Every change is logged by a database trigger into
- * asin_cog_on_record_history (who, from, to, when, how many sales re-priced).
- * The browser can read that log but cannot write or edit it.
+ * asin_cog_on_record_history. The browser can read that log, not write it.
  *
  * Clearing a COG is not offered: sales would keep the last applied cost while
- * the page showed "not set", which is exactly the kind of silent disagreement
- * this feature exists to remove.
+ * the page showed "not set", which is the silent disagreement this removes.
+ *
+ * ── LISTED LIKE SYNCED INVENTORY, NEWEST FIRST (2026-09-15) ───────────────
+ *
+ * Rows come from get_cog_page_products() (20260915031000): one per product
+ * with a valid Created Listing, plus products given a COG by hand -- NOT from
+ * the COG table alone. The seller creates a listing and expects to find it at
+ * the top here to enter its cost; 1,463 products had no COG row and so never
+ * appeared while the page listed that table.
+ *
+ * A product with no COG shows an EMPTY cost box. It is deliberately not
+ * pre-filled from the listing's cost: the seller types the average after
+ * reviewing, and a pre-filled number would hide which products were actually
+ * reviewed. "Use" beside the latest purchase copies that cost into the box,
+ * but only saving makes it the COG. Until then the product's sales keep their
+ * Created Listings cost.
+ *
+ * "Date created" is the newest listing's date_created (falling back to
+ * created_at) -- what Synced Inventory sorts by -- parsed with the shared
+ * parseListingDate so bare dates do not show as the previous day.
  *
  * ── TYPES ────────────────────────────────────────────────────────────────
  *
- * src/integrations/supabase/types.ts predates this table, so queries go
- * through an untyped client and rows are typed locally. Regenerating types is
- * a repo-wide change, deliberately not bundled with this page.
+ * src/integrations/supabase/types.ts predates these tables and the RPC, so
+ * calls go through an untyped client and rows are typed locally.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Helmet } from "react-helmet-async";
@@ -45,16 +57,17 @@ import { toast } from "sonner";
 import {
   AlertTriangle, Check, Copy, History, Info, Loader2, Plus, RefreshCw, RotateCcw, Search, Tag,
 } from "lucide-react";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
+import { formatListingDate, parseListingDate } from "@/lib/listingDate";
 
 interface Calculation {
   basis?: "last_12m" | "all_time";
@@ -73,10 +86,34 @@ interface Calculation {
   flags?: string[];
 }
 
-interface CogRow {
-  id: string;
+/** One product, as returned by get_cog_page_products(). COG fields are null when no COG row exists. */
+interface ProductRow {
   asin: string;
   title: string | null;
+  image_url: string | null;
+  sku: string | null;
+  date_created: string | null;
+  last_created_at: string | null;
+  first_listed: string | null;
+  listing_count: number;
+  is_restock: boolean;
+  latest_unit_cost: number | null;
+  latest_units: number | null;
+  latest_lot_date: string | null;
+  cog_id: string | null;
+  unit_cost: number | null;
+  source: "import" | "manual" | null;
+  needs_review: boolean | null;
+  review_note: string | null;
+  calculated_cost: number | null;
+  calculation: Calculation | null;
+  cog_updated_at: string | null;
+  in_listings: boolean;
+}
+
+/** The COG table's columns, as returned by insert/update. */
+interface CogRecord {
+  id: string;
   unit_cost: number | null;
   source: "import" | "manual";
   needs_review: boolean;
@@ -84,6 +121,7 @@ interface CogRow {
   calculated_cost: number | null;
   calculation: Calculation;
   updated_at: string;
+  title: string | null;
 }
 
 interface HistoryEntry {
@@ -98,31 +136,55 @@ interface HistoryEntry {
   note: string | null;
 }
 
-type View = "all" | "review" | "unset" | "manual" | "import";
-type SortKey = "sold" | "difference" | "asin" | "edited";
+type View = "all" | "unset" | "has" | "review" | "manual" | "recent";
+type SortKey = "newest" | "oldest" | "review" | "sold" | "difference" | "edited" | "asin";
 
 const PAGE_SIZE = 100;
 const FETCH_CHUNK = 1000; // PostgREST's default row cap per request
+/** New / Restock tags only mean something for recent listings. */
+const RECENT_DAYS = 30;
 
 const FLAG_LABELS: Record<string, { label: string; hint: string }> = {
-  differs_from_sales: { label: "Differs from sales", hint: "More than 30% away from the cost your 2026 sales currently carry." },
-  drift: { label: "Price moved", hint: "Your latest purchase differs from this average by more than 25%." },
+  differs_from_sales: { label: "Differs from sales", hint: "More than 30% away from the cost your 2026 sales carried before COG on Record." },
+  drift: { label: "Price moved", hint: "Your latest purchase differs from the calculated average by more than 25%." },
   one_lot: { label: "One purchase", hint: "Calculated from a single purchase lot." },
   sold_gt_bought: { label: "History incomplete", hint: "More units sold in 2026 than purchases on record." },
 };
 
+const COG_COLS = "id, unit_cost, source, needs_review, review_note, calculated_cost, calculation, updated_at, title";
+const HISTORY_COLS = "id, asin, action, old_unit_cost, new_unit_cost, sales_rows_repriced, changed_by_email, changed_at, note";
+
 const money = (v: number | null | undefined) =>
   v == null || Number.isNaN(Number(v)) ? "—" : `$${Number(v).toFixed(2)}`;
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const cogTable = () => (supabase as any).from("asin_cog_on_record");
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const historyTable = () => (supabase as any).from("asin_cog_on_record_history");
-
-const HISTORY_COLS = "id, asin, action, old_unit_cost, new_unit_cost, sales_rows_repriced, changed_by_email, changed_at, note";
-
 const fmtWhen = (iso: string) =>
   new Date(iso).toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const db = supabase as any;
+const cogTable = () => db.from("asin_cog_on_record");
+const historyTable = () => db.from("asin_cog_on_record_history");
+
+const recentCutoff = () => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - RECENT_DAYS);
+  return d.getTime();
+};
+
+/** Merge a saved COG record back into its product row. */
+const withCog = (row: ProductRow, c: CogRecord): ProductRow => ({
+  ...row,
+  cog_id: c.id,
+  unit_cost: c.unit_cost,
+  source: c.source,
+  needs_review: c.needs_review,
+  review_note: c.review_note,
+  calculated_cost: c.calculated_cost,
+  calculation: c.calculation,
+  cog_updated_at: c.updated_at,
+  title: row.title ?? c.title,
+});
 
 /** Per-product change log, fetched when opened. */
 function HistoryButton({ asin }: { asin: string }) {
@@ -159,7 +221,7 @@ function HistoryButton({ asin }: { asin: string }) {
           ) : entries === null ? (
             <p className="p-3 text-sm text-muted-foreground flex items-center gap-2"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…</p>
           ) : entries.length === 0 ? (
-            <p className="p-3 text-sm text-muted-foreground">No changes since the import.</p>
+            <p className="p-3 text-sm text-muted-foreground">No changes recorded.</p>
           ) : (
             <ul className="divide-y">
               {entries.map((h) => (
@@ -195,16 +257,16 @@ const repricedPhrase = (n: number | null) =>
 
 export default function CogOnRecord() {
   const { user } = useAuth();
-  const [rows, setRows] = useState<CogRow[]>([]);
+  const [rows, setRows] = useState<ProductRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [view, setView] = useState<View>("all");
   const [flag, setFlag] = useState<string>("any");
-  const [sort, setSort] = useState<SortKey>("sold");
+  const [sort, setSort] = useState<SortKey>("newest");
   const [page, setPage] = useState(0);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [savingId, setSavingId] = useState<string | null>(null);
+  const [savingAsin, setSavingAsin] = useState<string | null>(null);
   const [newAsin, setNewAsin] = useState("");
   const [newCost, setNewCost] = useState("");
   const [adding, setAdding] = useState(false);
@@ -214,22 +276,18 @@ export default function CogOnRecord() {
     setLoading(true);
     setLoadError(null);
     try {
-      const all: CogRow[] = [];
+      const all: ProductRow[] = [];
       for (let from = 0; ; from += FETCH_CHUNK) {
-        const { data, error } = await cogTable()
-          .select("id, asin, title, unit_cost, source, needs_review, review_note, calculated_cost, calculation, updated_at")
-          .eq("user_id", user.id)
-          .order("asin", { ascending: true })
-          .range(from, from + FETCH_CHUNK - 1);
+        const { data, error } = await db.rpc("get_cog_page_products").range(from, from + FETCH_CHUNK - 1);
         if (error) throw error;
-        const chunk = (data ?? []) as CogRow[];
+        const chunk = (data ?? []) as ProductRow[];
         all.push(...chunk);
         if (chunk.length < FETCH_CHUNK) break;
       }
       setRows(all);
     } catch (e) {
       // Shown, not swallowed: an empty table must never be mistaken for
-      // "no COGs on record".
+      // "no products".
       const msg = e instanceof Error ? e.message : String(e);
       console.error("[CogOnRecord] load failed", e);
       setLoadError(msg);
@@ -240,13 +298,20 @@ export default function CogOnRecord() {
 
   useEffect(() => { load(); }, [load]);
 
+  const cutoff = useMemo(recentCutoff, [rows]);
+  const isRecent = useCallback(
+    (r: ProductRow) => (parseListingDate(r.date_created)?.getTime() ?? 0) >= cutoff,
+    [cutoff],
+  );
+
   const stats = useMemo(() => ({
     total: rows.length,
-    set: rows.filter((r) => r.unit_cost != null).length,
-    review: rows.filter((r) => r.needs_review).length,
     unset: rows.filter((r) => r.unit_cost == null).length,
+    review: rows.filter((r) => r.needs_review).length,
+    recent: rows.filter(isRecent).length,
+    recentUnset: rows.filter((r) => isRecent(r) && r.unit_cost == null).length,
     manual: rows.filter((r) => r.source === "manual").length,
-  }), [rows]);
+  }), [rows, isRecent]);
 
   const filtered = useMemo(() => {
     const tokens = search.toUpperCase().split(/[\s,]+/).filter(Boolean);
@@ -254,41 +319,60 @@ export default function CogOnRecord() {
     const q = search.trim().toLowerCase();
 
     const out = rows.filter((r) => {
-      if (view === "review" && !r.needs_review) return false;
       if (view === "unset" && r.unit_cost != null) return false;
+      if (view === "has" && r.unit_cost == null) return false;
+      if (view === "review" && !r.needs_review) return false;
       if (view === "manual" && r.source !== "manual") return false;
-      if (view === "import" && r.source !== "import") return false;
+      if (view === "recent" && !isRecent(r)) return false;
       if (flag !== "any" && !(r.calculation?.flags ?? []).includes(flag)) return false;
       if (!q) return true;
       if (multiAsin) return tokens.includes(r.asin);
-      return r.asin.toLowerCase().includes(q) || (r.title ?? "").toLowerCase().includes(q);
+      return r.asin.toLowerCase().includes(q)
+        || (r.title ?? "").toLowerCase().includes(q)
+        || (r.sku ?? "").toLowerCase().includes(q);
     });
 
-    const soldOf = (r: CogRow) => Number(r.calculation?.units_sold_2026 ?? 0);
-    const diffOf = (r: CogRow) => {
+    const dateOf = (r: ProductRow) => parseListingDate(r.date_created)?.getTime() ?? null;
+    const createdOf = (r: ProductRow) => (r.last_created_at ? Date.parse(r.last_created_at) : 0);
+    const soldOf = (r: ProductRow) => Number(r.calculation?.units_sold_2026 ?? 0);
+    const diffOf = (r: ProductRow) => {
       const sales = Number(r.calculation?.sales_unit_cost_2026 ?? 0);
       const cog = Number(r.unit_cost ?? r.calculated_cost ?? 0);
       return sales > 0 && cog > 0 ? Math.abs(cog - sales) * soldOf(r) : 0;
     };
+    // Newest first, with undated products (COG added by hand, no listing)
+    // always last in either direction.
+    const byDate = (a: ProductRow, b: ProductRow, dir: 1 | -1) => {
+      const da = dateOf(a);
+      const dbb = dateOf(b);
+      if (da == null || dbb == null) return (da == null ? 1 : 0) - (dbb == null ? 1 : 0);
+      return dir * (da - dbb) || dir * (createdOf(a) - createdOf(b)) || a.asin.localeCompare(b.asin);
+    };
 
-    // Anything needing attention always sorts first, whatever the chosen order.
     out.sort((a, b) => {
-      const attention = Number(b.needs_review) - Number(a.needs_review);
-      if (attention !== 0) return attention;
       switch (sort) {
+        case "oldest": return byDate(a, b, 1);
+        case "review":
+          return Number(!!b.needs_review) - Number(!!a.needs_review)
+            || Number(a.unit_cost != null) - Number(b.unit_cost != null)
+            || byDate(a, b, -1);
+        case "sold": return soldOf(b) - soldOf(a) || a.asin.localeCompare(b.asin);
         case "difference": return diffOf(b) - diffOf(a);
+        case "edited": return (b.cog_updated_at ?? "").localeCompare(a.cog_updated_at ?? "");
         case "asin": return a.asin.localeCompare(b.asin);
-        case "edited": return b.updated_at.localeCompare(a.updated_at);
-        default: return soldOf(b) - soldOf(a) || a.asin.localeCompare(b.asin);
+        default: return byDate(a, b, -1);
       }
     });
     return out;
-  }, [rows, search, view, flag, sort]);
+  }, [rows, search, view, flag, sort, isRecent]);
 
   useEffect(() => { setPage(0); }, [search, view, flag, sort]);
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const visible = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+
+  const clearDraft = (asin: string) =>
+    setDrafts((d) => { const n = { ...d }; delete n[asin]; return n; });
 
   const parseCost = (raw: string): number | null | "invalid" => {
     const s = raw.trim().replace(/^\$/, "");
@@ -298,40 +382,40 @@ export default function CogOnRecord() {
     return Math.round(n * 100) / 100;
   };
 
-  const saveCost = async (row: CogRow, raw: string) => {
+  const saveCost = async (row: ProductRow, raw: string) => {
+    if (!user) return;
     const parsed = parseCost(raw);
     if (parsed === "invalid" || (parsed == null && row.unit_cost != null)) {
       toast.error("Enter a cost of $0 or more. A COG can be changed but not cleared, because 2026 sales already use it.");
       return;
     }
-    if (parsed == null) {
-      setDrafts((d) => { const n = { ...d }; delete n[row.id]; return n; });
+    if (parsed == null || parsed === row.unit_cost) {
+      clearDraft(row.asin);
       return;
     }
-    if (parsed === row.unit_cost) {
-      setDrafts((d) => { const n = { ...d }; delete n[row.id]; return n; });
-      return;
-    }
-    setSavingId(row.id);
-    // Setting a COG by hand resolves the review flag: the flag exists to say
-    // "decide this yourself", and saving is that decision.
-    const patch = { unit_cost: parsed, source: "manual", needs_review: false };
-    const { data, error } = await cogTable()
-      .update(patch)
-      .eq("id", row.id)
-      .select("id, asin, title, unit_cost, source, needs_review, review_note, calculated_cost, calculation, updated_at")
-      .single();
-    setSavingId(null);
+    setSavingAsin(row.asin);
+    // A product without a COG row gets one; one that has a row is updated.
+    // Either way the database trigger re-prices its 2026 sales and logs it.
+    // Saving by hand resolves a review flag: saving IS the decision.
+    const { data, error } = row.cog_id
+      ? await cogTable()
+          .update({ unit_cost: parsed, source: "manual", needs_review: false })
+          .eq("id", row.cog_id).select(COG_COLS).single()
+      : await cogTable()
+          .insert({ user_id: user.id, asin: row.asin, unit_cost: parsed, source: "manual", title: row.title })
+          .select(COG_COLS).single();
+    setSavingAsin(null);
     if (error) {
       toast.error(`Couldn't save ${row.asin}: ${error.message}`);
       return;
     }
-    setRows((rs) => rs.map((r) => (r.id === row.id ? (data as CogRow) : r)));
-    setDrafts((d) => { const n = { ...d }; delete n[row.id]; return n; });
+    setRows((rs) => rs.map((r) => (r.asin === row.asin ? withCog(r, data as CogRecord) : r)));
+    clearDraft(row.asin);
     const n = await latestRepriceCount(row.asin);
-    toast.success(`${row.asin}: COG set to ${money(parsed)}${repricedPhrase(n)}`);
+    toast.success(`${row.asin}: COG ${row.cog_id ? "set" : "added"} at ${money(parsed)}${repricedPhrase(n)}`);
   };
 
+  /** For a product with no listing on record -- everything listed already has a row. */
   const addProduct = async () => {
     if (!user) return;
     const asin = newAsin.trim().toUpperCase();
@@ -339,43 +423,40 @@ export default function CogOnRecord() {
       toast.error("An ASIN is 10 letters and digits, e.g. B0G4BQ42W3.");
       return;
     }
-    const parsed = parseCost(newCost);
-    if (parsed === "invalid" || parsed == null) {
-      toast.error("Enter the COG for this product.");
-      return;
-    }
     const existing = rows.find((r) => r.asin === asin);
     if (existing) {
       setView("all");
       setFlag("any");
       setSearch(asin);
-      toast.info(`${asin} is already on record — it's shown below to edit.`);
+      toast.info(`${asin} is already listed below — enter its COG there.`);
+      return;
+    }
+    const parsed = parseCost(newCost);
+    if (parsed === "invalid" || parsed == null) {
+      toast.error("Enter the COG for this product.");
       return;
     }
     setAdding(true);
-    // Borrow a title from purchase history or inventory so the row is
-    // recognisable; the COG itself never comes from there.
-    let title: string | null = null;
-    const { data: cl } = await supabase
-      .from("created_listings").select("title").eq("user_id", user.id).eq("asin", asin)
-      .not("title", "is", null).order("created_at", { ascending: false }).limit(1);
-    title = (cl as { title: string | null }[] | null)?.[0]?.title ?? null;
-    if (!title) {
-      const { data: inv } = await supabase
-        .from("inventory").select("title").eq("user_id", user.id).eq("asin", asin)
-        .not("title", "is", null).limit(1);
-      title = (inv as { title: string | null }[] | null)?.[0]?.title ?? null;
-    }
+    const { data: inv } = await supabase
+      .from("inventory").select("title, image_url").eq("user_id", user.id).eq("asin", asin)
+      .not("title", "is", null).limit(1);
+    const invRow = (inv as { title: string | null; image_url: string | null }[] | null)?.[0];
     const { data, error } = await cogTable()
-      .insert({ user_id: user.id, asin, unit_cost: parsed, source: "manual", title })
-      .select("id, asin, title, unit_cost, source, needs_review, review_note, calculated_cost, calculation, updated_at")
-      .single();
+      .insert({ user_id: user.id, asin, unit_cost: parsed, source: "manual", title: invRow?.title ?? null })
+      .select(COG_COLS).single();
     setAdding(false);
     if (error) {
       toast.error(`Couldn't add ${asin}: ${error.message}`);
       return;
     }
-    setRows((rs) => [...rs, data as CogRow]);
+    const blank: ProductRow = {
+      asin, title: invRow?.title ?? null, image_url: invRow?.image_url ?? null, sku: null,
+      date_created: null, last_created_at: null, first_listed: null, listing_count: 0, is_restock: false,
+      latest_unit_cost: null, latest_units: null, latest_lot_date: null,
+      cog_id: null, unit_cost: null, source: null, needs_review: null, review_note: null,
+      calculated_cost: null, calculation: null, cog_updated_at: null, in_listings: false,
+    };
+    setRows((rs) => [...rs, withCog(blank, data as CogRecord)]);
     setNewAsin("");
     setNewCost("");
     const n = await latestRepriceCount(asin);
@@ -386,6 +467,14 @@ export default function CogOnRecord() {
     try { await navigator.clipboard.writeText(asin); toast.success("ASIN copied"); }
     catch { toast.error("Copy failed"); }
   };
+
+  const tiles: { label: string; value: number; view: View; hint?: string; warn?: boolean }[] = [
+    { label: "No COG yet", value: stats.unset, view: "unset", warn: stats.recentUnset > 0,
+      hint: stats.recentUnset > 0 ? `${stats.recentUnset} listed in the last ${RECENT_DAYS} days` : undefined },
+    { label: `Listed last ${RECENT_DAYS} days`, value: stats.recent, view: "recent" },
+    { label: "Needs review", value: stats.review, view: "review", warn: stats.review > 0 },
+    { label: "Set by you", value: stats.manual, view: "manual" },
+  ];
 
   return (
     <>
@@ -413,9 +502,8 @@ export default function CogOnRecord() {
             <Info className="h-4 w-4 mt-0.5 shrink-0 text-primary" />
             <div className="space-y-1">
               <p>
-                One average cost per product, used as its COG. Starting values were calculated from your
-                purchase lots in the <Link to="/tools/created-listings" className="underline underline-offset-2">Product Library</Link>;
-                the calculated figure stays beside each COG for comparison.
+                Every product in your <Link to="/tools/created-listings" className="underline underline-offset-2">Product Library</Link>,
+                newest listing first. Products without a COG show an empty box — their sales use the listing's cost until you enter one.
               </p>
               <p className="font-medium">
                 Saving a COG immediately re-prices every 2026 sale of that product in Profit &amp; Loss, Sales Report
@@ -425,36 +513,71 @@ export default function CogOnRecord() {
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
-            {[
-              { label: "COG set", value: stats.set, onClick: () => setView("all") },
-              { label: "Needs review", value: stats.review, onClick: () => setView("review"), warn: stats.review > 0 },
-              { label: "No COG yet", value: stats.unset, onClick: () => setView("unset") },
-              { label: "Set by you", value: stats.manual, onClick: () => setView("manual") },
-            ].map((s) => (
+            {tiles.map((s) => (
               <button
                 key={s.label}
                 type="button"
-                onClick={s.onClick}
+                onClick={() => setView(view === s.view ? "all" : s.view)}
+                aria-pressed={view === s.view}
                 className={`rounded-lg border p-3 text-left transition-colors hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                  s.warn ? "border-amber-500/60 bg-amber-500/5" : "border-border"
+                  view === s.view ? "border-primary ring-1 ring-primary" : s.warn ? "border-amber-500/60 bg-amber-500/5" : "border-border"
                 }`}
               >
                 <div className="text-xs uppercase tracking-wide text-muted-foreground">{s.label}</div>
                 <div className="text-2xl font-semibold tabular-nums">{loading ? "—" : s.value.toLocaleString()}</div>
+                {s.hint && !loading && <div className="text-xs text-amber-700 dark:text-amber-400">{s.hint}</div>}
               </button>
             ))}
           </div>
 
-          <div className="mb-4 rounded-lg border border-border p-3">
-            <div className="text-sm font-medium mb-2">Add a product</div>
-            <div className="flex flex-col sm:flex-row gap-2">
+          <div className="flex flex-col lg:flex-row gap-2 mb-3">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="ASIN"
-                value={newAsin}
-                onChange={(e) => setNewAsin(e.target.value)}
-                className="sm:w-48 font-mono"
-                maxLength={10}
+                placeholder="Search by ASIN, title or SKU — or paste several ASINs"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-9"
               />
+            </div>
+            <Select value={view} onValueChange={(v) => setView(v as View)}>
+              <SelectTrigger className="w-full lg:w-[180px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All products</SelectItem>
+                <SelectItem value="unset">No COG yet</SelectItem>
+                <SelectItem value="has">Has a COG</SelectItem>
+                <SelectItem value="recent">Listed last {RECENT_DAYS} days</SelectItem>
+                <SelectItem value="review">Needs review</SelectItem>
+                <SelectItem value="manual">Set by you</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={flag} onValueChange={setFlag}>
+              <SelectTrigger className="w-full lg:w-[180px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="any">Any flag</SelectItem>
+                {Object.entries(FLAG_LABELS).map(([k, v]) => (
+                  <SelectItem key={k} value={k}>{v.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
+              <SelectTrigger className="w-full lg:w-[210px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="newest">Date created: newest</SelectItem>
+                <SelectItem value="oldest">Date created: oldest</SelectItem>
+                <SelectItem value="review">Needs review first</SelectItem>
+                <SelectItem value="sold">Most sold in 2026</SelectItem>
+                <SelectItem value="difference">Biggest $ gap vs sales</SelectItem>
+                <SelectItem value="edited">Recently edited</SelectItem>
+                <SelectItem value="asin">ASIN</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+
+          <details className="mb-4 rounded-lg border border-border px-3 py-2">
+            <summary className="cursor-pointer text-sm font-medium">Add a product that isn't listed</summary>
+            <div className="flex flex-col sm:flex-row gap-2 pt-2">
+              <Input placeholder="ASIN" value={newAsin} onChange={(e) => setNewAsin(e.target.value)} className="sm:w-48 font-mono" maxLength={10} />
               <Input
                 placeholder="COG, e.g. 12.50"
                 value={newCost}
@@ -468,59 +591,19 @@ export default function CogOnRecord() {
                 Add
               </Button>
             </div>
-          </div>
-
-          <div className="flex flex-col lg:flex-row gap-2 mb-3">
-            <div className="relative flex-1">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder="Search by ASIN or title — or paste several ASINs"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="pl-9"
-              />
-            </div>
-            <Select value={view} onValueChange={(v) => setView(v as View)}>
-              <SelectTrigger className="w-full lg:w-[170px]"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All products</SelectItem>
-                <SelectItem value="review">Needs review</SelectItem>
-                <SelectItem value="unset">No COG yet</SelectItem>
-                <SelectItem value="manual">Set by you</SelectItem>
-                <SelectItem value="import">From import</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select value={flag} onValueChange={setFlag}>
-              <SelectTrigger className="w-full lg:w-[190px]"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="any">Any flag</SelectItem>
-                {Object.entries(FLAG_LABELS).map(([k, v]) => (
-                  <SelectItem key={k} value={k}>{v.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select value={sort} onValueChange={(v) => setSort(v as SortKey)}>
-              <SelectTrigger className="w-full lg:w-[220px]"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="sold">Most sold in 2026</SelectItem>
-                <SelectItem value="difference">Biggest $ gap vs sales</SelectItem>
-                <SelectItem value="edited">Recently edited</SelectItem>
-                <SelectItem value="asin">ASIN</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+          </details>
 
           {loadError ? (
             <div className="rounded-lg border border-destructive/50 bg-destructive/5 p-4 text-sm flex gap-2">
               <AlertTriangle className="h-4 w-4 mt-0.5 text-destructive" />
               <div>
-                <p className="font-medium">COGs couldn't be loaded.</p>
+                <p className="font-medium">Products couldn't be loaded.</p>
                 <p className="text-muted-foreground">{loadError}</p>
               </div>
             </div>
           ) : loading ? (
             <div className="flex items-center justify-center py-16 text-muted-foreground gap-2">
-              <Loader2 className="h-5 w-5 animate-spin" /> Loading COGs…
+              <Loader2 className="h-5 w-5 animate-spin" /> Loading products…
             </div>
           ) : (
             <>
@@ -532,32 +615,47 @@ export default function CogOnRecord() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead className="min-w-[280px]">Product</TableHead>
+                      <TableHead className="w-[64px]">Image</TableHead>
+                      <TableHead className="min-w-[260px]">Product</TableHead>
+                      <TableHead className="whitespace-nowrap">Date created</TableHead>
                       <TableHead className="w-[230px]">COG on record</TableHead>
+                      <TableHead className="text-right whitespace-nowrap">Latest purchase</TableHead>
                       <TableHead className="text-right">Calculated</TableHead>
-                      <TableHead className="text-right">Purchases</TableHead>
-                      <TableHead className="text-right">2026 sales</TableHead>
+                      <TableHead className="text-right whitespace-nowrap">2026 sales</TableHead>
                       <TableHead>Flags</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {visible.length === 0 && (
                       <TableRow>
-                        <TableCell colSpan={6} className="text-center text-muted-foreground py-10">
+                        <TableCell colSpan={8} className="text-center text-muted-foreground py-10">
                           No products match these filters.
                         </TableCell>
                       </TableRow>
                     )}
                     {visible.map((r) => {
                       const c = r.calculation ?? {};
-                      const draft = drafts[r.id];
+                      const draft = drafts[r.asin];
                       const shown = draft ?? (r.unit_cost == null ? "" : Number(r.unit_cost).toFixed(2));
-                      const dirty = draft !== undefined && parseCost(draft) !== r.unit_cost;
-                      const saving = savingId === r.id;
+                      const parsedDraft = draft === undefined ? undefined : parseCost(draft);
+                      const dirty = draft !== undefined && parsedDraft !== r.unit_cost && !(parsedDraft == null && r.unit_cost == null);
+                      const saving = savingAsin === r.asin;
+                      const recent = isRecent(r);
+                      const created = formatListingDate(r.date_created);
+                      const firstListed = r.is_restock ? formatListingDate(r.first_listed) : null;
                       return (
-                        <TableRow key={r.id} className={r.needs_review ? "bg-amber-500/5" : undefined}>
+                        <TableRow key={r.asin} className={r.needs_review ? "bg-amber-500/5" : undefined}>
                           <TableCell className="align-top">
-                            <div className="flex items-center gap-1.5">
+                            {r.image_url ? (
+                              <img src={r.image_url} alt="" loading="lazy" className="w-12 h-12 object-cover rounded" />
+                            ) : (
+                              <div className="w-12 h-12 bg-muted rounded flex items-center justify-center text-[10px] text-muted-foreground text-center">
+                                No Image
+                              </div>
+                            )}
+                          </TableCell>
+                          <TableCell className="align-top">
+                            <div className="flex flex-wrap items-center gap-1.5">
                               <span className="font-mono text-xs">{r.asin}</span>
                               <button
                                 type="button"
@@ -567,6 +665,17 @@ export default function CogOnRecord() {
                               >
                                 <Copy className="h-3 w-3" />
                               </button>
+                              {recent && (
+                                r.is_restock ? (
+                                  <Badge variant="outline" className="text-[10px] border-sky-500/60 text-sky-700 dark:text-sky-400" title="A new purchase of a product you already had">
+                                    Restock
+                                  </Badge>
+                                ) : (
+                                  <Badge className="text-[10px] bg-emerald-600 hover:bg-emerald-600 text-white" title="First listing for this product">
+                                    New
+                                  </Badge>
+                                )
+                              )}
                               {r.needs_review && (
                                 <Badge variant="outline" className="border-amber-500/70 text-amber-700 dark:text-amber-400 text-[10px]">
                                   Needs review
@@ -579,9 +688,19 @@ export default function CogOnRecord() {
                             <div className="text-sm line-clamp-2 mt-0.5" title={r.title ?? undefined}>
                               {r.title || <span className="text-muted-foreground">Untitled</span>}
                             </div>
+                            {r.sku && <div className="text-xs text-muted-foreground font-mono mt-0.5">{r.sku}</div>}
                             {r.needs_review && r.review_note && (
                               <div className="text-xs text-amber-700 dark:text-amber-400 mt-1">{r.review_note}</div>
                             )}
+                          </TableCell>
+                          <TableCell className="align-top text-xs whitespace-nowrap tabular-nums">
+                            {created ? (
+                              <>
+                                <div className="text-sm">{created}</div>
+                                {firstListed && <div className="text-muted-foreground">first {firstListed}</div>}
+                                {r.listing_count > 1 && <div className="text-muted-foreground">{r.listing_count} listings</div>}
+                              </>
+                            ) : <span className="text-muted-foreground">Not listed</span>}
                           </TableCell>
                           <TableCell className="align-top">
                             <div className="flex items-center gap-1">
@@ -590,12 +709,12 @@ export default function CogOnRecord() {
                                 <Input
                                   value={shown}
                                   placeholder="Not set"
-                                  onChange={(e) => setDrafts((d) => ({ ...d, [r.id]: e.target.value }))}
+                                  onChange={(e) => setDrafts((d) => ({ ...d, [r.asin]: e.target.value }))}
                                   onKeyDown={(e) => {
                                     if (e.key === "Enter") saveCost(r, shown);
-                                    if (e.key === "Escape") setDrafts((d) => { const n = { ...d }; delete n[r.id]; return n; });
+                                    if (e.key === "Escape") clearDraft(r.asin);
                                   }}
-                                  className="h-8 w-24 pl-5 tabular-nums"
+                                  className={`h-8 w-24 pl-5 tabular-nums ${r.unit_cost == null && draft === undefined ? "border-dashed" : ""}`}
                                   inputMode="decimal"
                                   aria-label={`COG for ${r.asin}`}
                                 />
@@ -608,15 +727,37 @@ export default function CogOnRecord() {
                               {!dirty && r.calculated_cost != null && r.unit_cost !== r.calculated_cost && (
                                 <Button
                                   size="icon" variant="ghost" className="h-8 w-8"
-                                  onClick={() => setDrafts((d) => ({ ...d, [r.id]: Number(r.calculated_cost).toFixed(2) }))}
+                                  onClick={() => setDrafts((d) => ({ ...d, [r.asin]: Number(r.calculated_cost).toFixed(2) }))}
                                   title={`Use the calculated ${money(r.calculated_cost)}`}
                                   aria-label="Use calculated cost"
                                 >
                                   <RotateCcw className="h-3.5 w-3.5" />
                                 </Button>
                               )}
-                              <HistoryButton asin={r.asin} />
+                              {r.cog_id && <HistoryButton asin={r.asin} />}
                             </div>
+                          </TableCell>
+                          <TableCell className="align-top text-right tabular-nums text-sm">
+                            {r.latest_unit_cost != null ? (
+                              <>
+                                <div className="flex items-center justify-end gap-1">
+                                  <span>{money(r.latest_unit_cost)}</span>
+                                  {r.unit_cost !== r.latest_unit_cost && (
+                                    <Button
+                                      size="sm" variant="ghost" className="h-6 px-1.5 text-xs"
+                                      onClick={() => setDrafts((d) => ({ ...d, [r.asin]: Number(r.latest_unit_cost).toFixed(2) }))}
+                                      title="Copy into the COG box — nothing is saved until you press ✓"
+                                    >
+                                      Use
+                                    </Button>
+                                  )}
+                                </div>
+                                <div className="text-xs text-muted-foreground">
+                                  {Number(r.latest_units).toLocaleString()} unit{Number(r.latest_units) === 1 ? "" : "s"}
+                                  {r.latest_lot_date ? ` · ${formatListingDate(r.latest_lot_date)}` : ""}
+                                </div>
+                              </>
+                            ) : <span className="text-muted-foreground">—</span>}
                           </TableCell>
                           <TableCell className="align-top text-right tabular-nums text-sm">
                             <div>{money(r.calculated_cost)}</div>
@@ -632,24 +773,10 @@ export default function CogOnRecord() {
                             )}
                           </TableCell>
                           <TableCell className="align-top text-right tabular-nums text-sm">
-                            {c.units_bought_all != null ? (
-                              <>
-                                <div>{Number(c.units_bought_all).toLocaleString()} units</div>
-                                <div className="text-xs text-muted-foreground">
-                                  {c.lots_used} lot{c.lots_used === 1 ? "" : "s"}
-                                  {c.last_purchase ? ` · last ${c.last_purchase}` : ""}
-                                </div>
-                                {c.latest_lot_unit != null && (
-                                  <div className="text-xs text-muted-foreground">latest {money(c.latest_lot_unit)}</div>
-                                )}
-                              </>
-                            ) : <span className="text-muted-foreground">—</span>}
-                          </TableCell>
-                          <TableCell className="align-top text-right tabular-nums text-sm">
                             {Number(c.units_sold_2026 ?? 0) > 0 ? (
                               <>
                                 <div>{Number(c.units_sold_2026).toLocaleString()} sold</div>
-                                <div className="text-xs text-muted-foreground">costed at {money(c.sales_unit_cost_2026)}</div>
+                                <div className="text-xs text-muted-foreground">was costed {money(c.sales_unit_cost_2026)}</div>
                               </>
                             ) : <span className="text-muted-foreground">—</span>}
                           </TableCell>
