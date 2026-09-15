@@ -78,8 +78,9 @@ import { Helmet } from "react-helmet-async";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import {
-  AlertTriangle, Check, Copy, History, Info, Loader2, Plus, RefreshCw, RotateCcw, Search, Tag,
+  AlertTriangle, Check, Copy, ExternalLink, History, Info, Loader2, Plus, RefreshCw, RotateCcw, Search, Tag,
 } from "lucide-react";
+import { amazonListingUrl } from "@/components/seller-analyzer/amazonUrls";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
 import { Button } from "@/components/ui/button";
@@ -800,7 +801,18 @@ export default function CogOnRecord() {
                           </TableCell>
                           <TableCell className="align-top">
                             <div className="flex flex-wrap items-center gap-1.5">
-                              <span className="font-mono text-xs">{r.asin}</span>
+                              {/* COG on Record is per ASIN across the one US-led inventory pool, so the
+                                  listing link goes to amazon.com, via the helper the Seller Analyzer uses. */}
+                              <a
+                                href={amazonListingUrl(r.asin, "US")}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-0.5 font-mono text-xs text-primary hover:underline"
+                                title={`Open ${r.asin} on Amazon`}
+                              >
+                                {r.asin}
+                                <ExternalLink className="h-3 w-3" aria-hidden="true" />
+                              </a>
                               <button
                                 type="button"
                                 onClick={() => copyAsin(r.asin)}
