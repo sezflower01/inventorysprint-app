@@ -79,6 +79,7 @@ import { withCronLock } from "../_shared/cron-lock.ts";
 import { getUsdToRate } from "../_shared/fx-utils.ts";
 import { marketplaceCurrency } from "../_shared/marketplace-map.ts";
 import { roiAtPrice, priceForRoi, mergeFeeSources } from "../_shared/roi-floor.ts";
+import { loadRepricerCostMap, repricerCostKey } from "../_shared/cog-for-repricer.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -139,6 +140,9 @@ interface Decision {
   fx_rate?: number;
   /** Which fee source backed the ROI maths: asin_fee_cache or inventory. */
   fee_source?: string;
+  /** Unit cost the ROI floor was computed from, and where it came from. */
+  unit_cost?: number;
+  cost_source?: "cost_override" | "cog_on_record" | "inventory";
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -207,6 +211,23 @@ Deno.serve(async (req) => {
       .limit(20000);
     const invBy = new Map<string, Record<string, unknown>>();
     for (const r of invRows ?? []) invBy.set(`${r.user_id}::${r.sku}`, r);
+
+    // ── 2b. Unit cost: cost override -> COG on record -> inventory.cost ────
+    //
+    // Changed 2026-09-16. This worker used to read inventory.cost only, which
+    // was empty on 233 of its 650 US rows (all skipped as no_cost) and wrong on
+    // others -- B09R8YZX39 at $237.49 (a lot total; COG $5.94), B07VXRVZHH at
+    // $0.11, which made break-even look like ~$1 and would have let a floor
+    // fall far below the real cost. The ROI floor is the one thing standing
+    // between this worker and a loss-making min, so it now uses the seller's
+    // COG on record, same precedence as Inventory Valuation.
+    //
+    // Placeholder COGs ($1.00 import lots, unreviewed) are excluded by the
+    // asin_cog_for_repricer view: those rows fall through to inventory.cost
+    // and, when that is empty too, are skipped exactly as before.
+    // A failed cost read throws: deciding floors on a partial cost map would
+    // silently revert some ASINs to inventory.cost.
+    const costBy = await loadRepricerCostMap(admin, userIds, asins);
 
     // ── 3. Latest competitor snapshot per (asin, marketplace) ──────────────
     // Time-series table: order newest-first and keep the first key seen.
@@ -279,7 +300,13 @@ Deno.serve(async (req) => {
 
       if (currentMin == null || !(Number(currentMin) > 0)) { push("no_min_set"); continue; }
       if (!inv) { push("no_inventory_row"); continue; }
-      if (!inv.cost || Number(inv.cost) <= 0) { push("no_cost"); continue; }
+      const resolvedCost = costBy.get(repricerCostKey(a.user_id, a.asin));
+      const unitCost = resolvedCost
+        ? resolvedCost.unitCost
+        : (inv.cost != null && Number(inv.cost) > 0 ? Number(inv.cost) : null);
+      if (unitCost == null) { push("no_cost"); continue; }
+      d.unit_cost = unitCost;
+      d.cost_source = resolvedCost ? resolvedCost.source : "inventory";
 
       // RULE 1 — exhausted by drop count.
       const drops = Number(a.auto_floor_drop_count ?? 0);
@@ -354,7 +381,7 @@ Deno.serve(async (req) => {
       const fees = mergeFeeSources(inv.fees_json, feeCache, mp);
       d.fee_source = feeCache ? String(feeCache.fee_source ?? "asin_fee_cache") : "inventory";
 
-      const floorPrice = priceForRoi(Number(inv.cost), fees, roiFloor, fx, mp);
+      const floorPrice = priceForRoi(unitCost, fees, roiFloor, fx, mp);
       if (floorPrice == null) { push("fees_unresolvable"); continue; }
 
       // Target: undercut the lowest by one cent.
@@ -391,7 +418,7 @@ Deno.serve(async (req) => {
       // Independent re-verification after rounding. The entire point of this
       // worker is that a floor is never set below its ROI limit — so prove it
       // from the final number rather than trusting the algebra that produced it.
-      const verifyRoi = roiAtPrice(Number(inv.cost), fees, newMin, fx, mp);
+      const verifyRoi = roiAtPrice(unitCost, fees, newMin, fx, mp);
       if (verifyRoi == null) { push("roi_verify_unavailable"); continue; }
       if (verifyRoi < roiFloor - ROI_VERIFY_TOLERANCE) {
         d.roi_at_new_min = verifyRoi;
