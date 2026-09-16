@@ -5055,6 +5055,41 @@ Deno.serve(async (req) => {
       console.warn(`[repricer-ai-evaluate] resolve_cog_for_date failed for ${targetAsin}:`, (e as Error).message);
     }
 
+    // === COG ON RECORD (since 2026-09-16) ===
+    // Precedence: cost override (above) -> COG on record -> inventory.cost ->
+    // created_listings (below). Same as Inventory Valuation, the Repricer page
+    // and repricer-auto-lower-min (_shared/cog-for-repricer.ts), so the unit
+    // cost in this trace, the suggested min and the Action Log match the one
+    // number the seller maintains on the COG page.
+    //
+    // Read through asin_cog_for_repricer, which excludes COGs flagged
+    // needs_review and unreviewed placeholder COGs under $2 (119 imported
+    // $1.00 lots); those ASINs fall through to the old sources.
+    //
+    // With min ROI off on every rule (measured 2026-09-16) this cost does not
+    // gate live prices here -- the manual min is the floor -- but it becomes
+    // live the moment min ROI is turned on, so it must already be right.
+    // A lookup failure degrades to the old sources rather than failing the
+    // evaluation.
+    if (!unitCost || unitCost <= 0) {
+      try {
+        const { data: cogRow, error: cogErr } = await supabase
+          .from('asin_cog_for_repricer')
+          .select('unit_cost')
+          .eq('user_id', userId)
+          .eq('asin', targetAsin)
+          .maybeSingle();
+        if (cogErr) {
+          console.warn(`[repricer-ai-evaluate] COG on record lookup failed for ${targetAsin}: ${cogErr.message}`);
+        } else if (cogRow?.unit_cost != null && Number(cogRow.unit_cost) > 0) {
+          unitCost = Number(cogRow.unit_cost);
+          costSource = `COG on record (asin: ${targetAsin})`;
+        }
+      } catch (e) {
+        console.warn(`[repricer-ai-evaluate] COG on record lookup threw for ${targetAsin}:`, (e as Error).message);
+      }
+    }
+
     if (targetCurrentPrice === undefined || targetCurrentPrice === null) {
       const { data: inventoryItemRaw, error: invError } = await buildInventoryQuery('price, my_price, cost, fees_json, sku, available, reserved, inbound, fnsku, source');
       const inventoryItem = inventoryItemRaw as any;

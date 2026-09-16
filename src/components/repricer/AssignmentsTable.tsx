@@ -651,13 +651,79 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
     return createdListingMap;
   };
 
-  const [rulesMap, snapshotsMap, marketplacePricesMap, initialFxRate, feeCacheMap, createdListingMap] = await Promise.all([
+  // ============================================================
+  // Unit cost for the repricer (since 2026-09-16):
+  //   asin_cost_overrides -> COG on record -> created_listings -> inventory.cost
+  //
+  // Same precedence as Inventory Valuation and every repricer edge function
+  // (_shared/cog-for-repricer.ts), so the COG column, the ROI range and the
+  // floors the server computes all agree on one number the seller maintains on
+  // the COG page. COG is read through the view asin_cog_for_repricer, which
+  // drops COGs flagged needs_review and unreviewed placeholder COGs under $2
+  // (119 imported $1.00 lots) -- those rows keep showing the old cost until
+  // the seller fixes or confirms them.
+  //
+  // Paginated per batch for the same reason as fetchCreatedListingMap: the
+  // project's PostgREST row cap silently truncates anything over 1,000.
+  // ============================================================
+  const fetchRepricerCostMap = async (): Promise<Record<string, number>> => {
+    const costMap: Record<string, number> = {};
+    if (asins.length === 0) return costMap;
+    const PAGE = 1000;
+    const pagedByBatch = async (table: string, columns: string, extra?: (q: any) => any) => {
+      const batches: string[][] = [];
+      for (let i = 0; i < asins.length; i += BATCH_IN_SIZE) batches.push(asins.slice(i, i + BATCH_IN_SIZE));
+      const results = await Promise.all(batches.map(async (batch) => {
+        const rows: any[] = [];
+        for (let from = 0; ; from += PAGE) {
+          let q = supabase.from(table as any).select(columns).eq("user_id", userId).in("asin", batch);
+          if (extra) q = extra(q);
+          const { data, error } = await q.range(from, from + PAGE - 1);
+          if (error) throw error;
+          rows.push(...(data || []));
+          if (!data || data.length < PAGE) break;
+        }
+        return rows;
+      }));
+      return results.flat();
+    };
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const [cogRows, overrideRows] = await Promise.all([
+        pagedByBatch("asin_cog_for_repricer", "asin, unit_cost"),
+        pagedByBatch("asin_cost_overrides", "asin, unit_cost, effective_from, created_at",
+          (q) => q.lte("effective_from", today).gt("unit_cost", 0)),
+      ]);
+      for (const c of cogRows) {
+        const v = Number(c.unit_cost);
+        if (c.asin && Number.isFinite(v) && v > 0) costMap[c.asin] = v;
+      }
+      // Overrides win; latest effective_from, then latest created_at (same as
+      // resolve_cog_for_date).
+      const best: Record<string, { eff: string; created: string; cost: number }> = {};
+      for (const o of overrideRows) {
+        const v = Number(o.unit_cost);
+        if (!o.asin || !Number.isFinite(v) || v <= 0) continue;
+        const eff = String(o.effective_from ?? ""), created = String(o.created_at ?? "");
+        const prev = best[o.asin];
+        if (!prev || eff > prev.eff || (eff === prev.eff && created > prev.created)) best[o.asin] = { eff, created, cost: v };
+      }
+      for (const [asin, o] of Object.entries(best)) costMap[asin] = o.cost;
+    } catch (e) {
+      // Non-fatal for the table, but loud: rows fall back to the old cost.
+      console.error("[Repricer] COG on record / cost override load failed; showing created_listings cost:", e);
+    }
+    return costMap;
+  };
+
+  const [rulesMap, snapshotsMap, marketplacePricesMap, initialFxRate, feeCacheMap, createdListingMap, repricerCostMap] = await Promise.all([
     fetchRulesMap(),
     fetchSnapshotsMap(),
     fetchMarketplacePricesMap(),
     fetchFxRate(),
     fetchFeeCacheMap(),
     fetchCreatedListingMap(),
+    fetchRepricerCostMap(),
   ]);
 
   // ============================================================
@@ -675,6 +741,14 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
     // Enrich title/image from fallback sources, with created_listings as a
     // first-class fallback for both image and (further down) COG.
     const clEnrich = createdListingMap[inv.asin];
+    // One unit cost per row, used by the COG column, cost_converted and both
+    // ROI-range figures: override -> COG on record -> created_listings ->
+    // inventory.cost. See fetchRepricerCostMap.
+    const effectiveUnitCost: number | null = repricerCostMap[inv.asin] != null
+      ? repricerCostMap[inv.asin]
+      : (clEnrich?.unitCost != null && clEnrich.unitCost > 0)
+        ? clEnrich.unitCost
+        : ((inv.cost != null && inv.cost > 0) ? inv.cost : null);
     const enrichment = titleImageMap[inv.asin];
     const enrichedTitle = (!inv.title || inv.title === '' || inv.title.toLowerCase().includes('unknown') || inv.title.toLowerCase().includes('untitled'))
       ? (clEnrich?.title || enrichment?.title || inv.title)
@@ -822,22 +896,13 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
       image_url: enrichedImage,
       price: displayPrice,
       my_price: displayMyPrice,
-      // COG resolution: NEWEST created_listings row wins (mirrors Live Sales /
-      // resolveUnitCost). Inventory.cost is only used when no created_listings
-      // unit cost is available. This guarantees a freshly-recorded purchase
-      // cost shows up immediately in the repricer instead of the stale
-      // inventory value.
-      cost: (clEnrich?.unitCost != null && clEnrich.unitCost > 0)
-        ? clEnrich.unitCost
-        : ((inv.cost != null && inv.cost > 0) ? inv.cost : null),
-      cost_converted: (() => {
-        const effectiveCost = (clEnrich?.unitCost != null && clEnrich.unitCost > 0)
-          ? clEnrich.unitCost
-          : ((inv.cost != null && inv.cost > 0) ? inv.cost : null);
-        return (targetMarketplace !== "US" && effectiveCost != null && initialFxRate != null)
-          ? effectiveCost * initialFxRate
-          : null;
-      })(),
+      // COG resolution: override -> COG on record -> newest created_listings
+      // row -> inventory.cost (effectiveUnitCost above). Before 2026-09-16 the
+      // newest created_listings row won outright.
+      cost: effectiveUnitCost,
+      cost_converted: (targetMarketplace !== "US" && effectiveUnitCost != null && initialFxRate != null)
+        ? effectiveUnitCost * initialFxRate
+        : null,
       // NA FBA shares a unified inventory pool – always show US qty
       available: inv.available,
       reserved: inv.reserved,
@@ -922,22 +987,16 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
       })(),
       // ROI Range — ALWAYS recompute client-side from current cost+fees+min/max when
       // possible (cached roi_at_min_percent/roi_at_max_percent can be stale after
-      // cost/fee updates). Uses the same created_listings-first cost as the COG
-      // column so the displayed ROI matches the displayed COG.
+      // cost/fee updates). Uses the same effectiveUnitCost as the COG column so
+      // the displayed ROI matches the displayed COG.
       roi_at_min_percent: (() => {
-        const effCost = (clEnrich?.unitCost != null && clEnrich.unitCost > 0)
-          ? clEnrich.unitCost
-          : ((inv.cost != null && inv.cost > 0) ? inv.cost : null);
         const mp = assignment?.min_price_override ?? (targetMarketplace === "US" ? inv.min_price : null);
-        const live = mp != null ? calcRoiAtPrice(effCost, effectiveFeesJson, Number(mp), initialFxRate ?? 1, targetMarketplace) : null;
+        const live = mp != null ? calcRoiAtPrice(effectiveUnitCost, effectiveFeesJson, Number(mp), initialFxRate ?? 1, targetMarketplace) : null;
         return live ?? assignment?.roi_at_min_percent ?? null;
       })(),
       roi_at_max_percent: (() => {
-        const effCost = (clEnrich?.unitCost != null && clEnrich.unitCost > 0)
-          ? clEnrich.unitCost
-          : ((inv.cost != null && inv.cost > 0) ? inv.cost : null);
         const mp = assignment?.max_price_override ?? (targetMarketplace === "US" ? inv.max_price : null);
-        const live = mp != null ? calcRoiAtPrice(effCost, effectiveFeesJson, Number(mp), initialFxRate ?? 1, targetMarketplace) : null;
+        const live = mp != null ? calcRoiAtPrice(effectiveUnitCost, effectiveFeesJson, Number(mp), initialFxRate ?? 1, targetMarketplace) : null;
         return live ?? assignment?.roi_at_max_percent ?? null;
       })(),
       roi_range_updated_at: assignment?.roi_range_updated_at || null,
@@ -1046,6 +1105,31 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
       const createdBySku: Record<string, any> = {};
       for (const r of createdRows) createdBySku[r.sku] = r;
 
+      // Orphan ASINs are not in `asins` (that list comes from inventory), so
+      // repricerCostMap has no entry for them. Load COG on record for these few
+      // directly, through the same view, so an FBM-only row shows the same COG
+      // as it would on the COG page. Overrides are rare enough on FBM orphans
+      // that the created_listings fallback below covers the rest.
+      const orphanCog: Record<string, number> = {};
+      const orphanAsins = [...new Set(orphanAssignments.map(a => a.asin).filter(Boolean))];
+      if (orphanAsins.length > 0) {
+        try {
+          const cogRows = await batchInQuery(
+            "asin_cog_for_repricer",
+            "asin, unit_cost",
+            "asin",
+            orphanAsins,
+            (q: any) => q.eq("user_id", userId),
+          );
+          for (const c of cogRows) {
+            const v = Number(c.unit_cost);
+            if (c.asin && Number.isFinite(v) && v > 0) orphanCog[c.asin] = v;
+          }
+        } catch (e) {
+          console.error("[Repricer] COG load for FBM orphan rows failed; using created_listings cost:", e);
+        }
+      }
+
       let injected = 0;
       for (const a of orphanAssignments) {
         const cl = createdBySku[a.sku];
@@ -1066,7 +1150,7 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
           image_url: cl.image_url || null,
           price: Number(cl.price) || a.last_applied_price || null,
           my_price: Number(cl.price) || a.last_applied_price || null,
-          cost: perUnitCost || null,
+          cost: orphanCog[a.asin] ?? repricerCostMap[a.asin] ?? (perUnitCost || null),
           cost_converted: null,
           available: 0,
           reserved: 0,
