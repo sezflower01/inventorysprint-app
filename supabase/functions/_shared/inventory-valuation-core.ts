@@ -67,6 +67,36 @@ async function fetchAsinCostOverrides(supabase: any, userId: string): Promise<Ma
   return map;
 }
 
+/**
+ * COG on record — the seller's single typed average unit cost per ASIN, and
+ * the source stock is valued at. See the precedence note in
+ * computeInventoryValuation.
+ *
+ * Paginated deliberately: ~3,100 rows, and PostgREST caps an un-ranged select
+ * at 1,000, which would silently drop two thirds of the costs and write an
+ * undervalued summary row that every client then trusts.
+ */
+async function fetchCogOnRecord(supabase: any, userId: string): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  const PAGE = 1000;
+  for (let from = 0; from < 50 * PAGE; from += PAGE) {
+    const { data, error } = await supabase
+      .from("asin_cog_on_record")
+      .select("asin, unit_cost")
+      .eq("user_id", userId)
+      .not("unit_cost", "is", null)
+      .range(from, from + PAGE - 1);
+    if (error) throw error;
+    if (!data) break;
+    for (const row of data as { asin: string; unit_cost: number }[]) {
+      const cost = Number(row.unit_cost);
+      if (row.asin && Number.isFinite(cost) && cost > 0) map.set(row.asin, cost);
+    }
+    if (data.length < PAGE) break;
+  }
+  return map;
+}
+
 export interface InventoryValuationTotals {
   value: number;
   units: number;
@@ -156,7 +186,7 @@ async function fetchAllKeyset<T extends { id: string; created_at: string | null 
 }
 
 export async function computeInventoryValuation(supabase: any, userId: string): Promise<InventoryValuationTotals> {
-  const [inventoryRows, listingRows, overridesByAsin] = await Promise.all([
+  const [inventoryRows, listingRows, overridesByAsin, cogByAsin] = await Promise.all([
     fetchAllKeyset<InventoryRow>(
       supabase,
       "inventory",
@@ -170,6 +200,7 @@ export async function computeInventoryValuation(supabase: any, userId: string): 
       userId,
     ),
     fetchAsinCostOverrides(supabase, userId),
+    fetchCogOnRecord(supabase, userId),
   ]);
 
   const costBySku = new Map<string, CostEntry>();
@@ -195,9 +226,27 @@ export async function computeInventoryValuation(supabase: any, userId: string): 
 
     const costEntry = costBySku.get(row.sku) ?? costByAsin.get(row.asin);
     const override = overridesByAsin.get(row.asin);
+    const cog = cogByAsin.get(row.asin);
+    // ---- Unit-cost precedence (changed 2026-09-15) ----------------------
+    //
+    // Stock is valued at the COG on record -- the single average the seller
+    // types on the COG page -- not at the newest created_listings lot. COG
+    // already drives COGS on 2026 sales, so valuing stock the same way keeps
+    // this summary, the Synced Inventory page and P&L on one number.
+    //
+    // COG outranks inventory.unit_cost_manual (the inline editor on Synced
+    // Inventory). Measured over 421 stocked rows: 81 disagreed, and on all 76
+    // that carried both dates the COG was the newer edit, the inline value on
+    // none. asin_cost_overrides stays above COG -- a separate, maintained
+    // escape hatch shared with P&L's resolve_unit_cost_v1.
+    //
+    // This block must stay identical to src/lib/inventory-valuation.ts and
+    // src/pages/tools/SyncedInventory.tsx.
     let unitCost: number;
     if (override !== undefined) {
       unitCost = override;
+    } else if (cog !== undefined) {
+      unitCost = cog;
     } else if (row.unit_cost_manual && row.cost !== null && row.cost !== undefined) {
       unitCost = Number(row.cost);
     } else {

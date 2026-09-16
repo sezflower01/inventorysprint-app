@@ -458,6 +458,11 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
   // Valuation Block and P&L agree on one number per ASIN instead of drifting.
   const overridesByAsin = new Map<string, number>();
 
+  // COG on record -- the seller's single typed average per ASIN, and the
+  // source this page values stock at. See the precedence note on
+  // finalUnitCost below.
+  const cogByAsin = new Map<string, number>();
+
   try {
     // Paginate created_listings — Supabase defaults to 1000 rows max
     let clData: any[] = [];
@@ -495,6 +500,30 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
         // year's override when nothing exists yet this year.
         if (eff && eff <= todayStr && eff.slice(0, 4) === thisYear && cost > 0) overridesByAsin.set(row.asin, cost);
       }
+    }
+
+    // COG on record. MUST paginate: there are ~3,100 rows and PostgREST caps
+    // an un-ranged select at 1,000, which would silently drop two thirds of
+    // the seller's costs and undervalue the page.
+    let cogFrom = 0;
+    const cogBatchSize = 1000;
+    let hasMoreCog = true;
+    while (hasMoreCog) {
+      const { data: cogBatch, error: cogError } = await supabase
+        .from("asin_cog_on_record")
+        .select("asin, unit_cost")
+        .eq("user_id", userId)
+        .not("unit_cost", "is", null)
+        .range(cogFrom, cogFrom + cogBatchSize - 1);
+      if (cogError) {
+        console.error("Error fetching COG on record:", cogError);
+        break;
+      }
+      for (const row of (cogBatch || []) as { asin: string; unit_cost: number }[]) {
+        const cost = Number(row.unit_cost);
+        if (row.asin && Number.isFinite(cost) && cost > 0) cogByAsin.set(row.asin, cost);
+      }
+      if ((cogBatch?.length || 0) < cogBatchSize) { hasMoreCog = false; } else { cogFrom += cogBatchSize; }
     }
 
     if (clData.length > 0) {
@@ -778,15 +807,43 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
     const costEntry = costMapBySku.get(item.sku) ?? costMapByAsin.get(item.asin);
     const override = overridesByAsin.get(item.asin);
 
+    const cog = cogByAsin.get(item.asin);
+
+    // ---- Unit-cost precedence (changed 2026-09-15) -----------------------
+    //
+    // Stock is now valued at the COG on record -- the single average the
+    // seller types on the COG page -- not at whatever the newest
+    // created_listings lot happened to cost. That was the whole point of COG
+    // on Record: one number per ASIN to maintain, and one that already drives
+    // COGS on 2026 sales, so the page and P&L cannot drift apart.
+    //
+    // COG also outranks this page's own inline cost editor
+    // (`unit_cost_manual`). Measured 2026-09-15 across 421 stocked rows: 141
+    // read the inline editor, 81 of those disagreed with the COG, and in
+    // every one of the 76 that carried both dates the COG was the more recent
+    // edit -- the inline value on 0 of them. B0G4BQ42W3 still held $8.00
+    // inline against the $10.00 the seller had typed on the COG page. Leaving
+    // the inline editor on top would mean a third of stocked rows silently
+    // ignored a COG edit.
+    //
+    // asin_cost_overrides stays ABOVE COG. It is a separate, still-maintained
+    // feature with its own dialog (CostOverrideDialog), shared with P&L's
+    // resolve_unit_cost_v1, and it is the seller's deliberate "this ASIN is
+    // different" escape hatch -- 18 stocked rows, worth $2,089.
+    //
+    // created_listings survives only as a fallback, for a product with no COG
+    // yet (9 stocked rows at the time of the change, 1 of which needed it).
     let finalUnitCost: number | null;
     if (override !== undefined) {
       finalUnitCost = override;
+    } else if (cog !== undefined) {
+      finalUnitCost = cog;
     } else if (item.unit_cost_manual && item.cost !== null && item.cost !== undefined) {
       // Manually edited → inventory.cost is already per-unit
       finalUnitCost = Number(item.cost);
     } else {
-      // Primary: created_listings unit cost (cost/units) matched by SKU then ASIN
-      // Fallback: inventory.cost (already per-unit after sync writes it)
+      // Fallback: created_listings unit cost (cost/units) by SKU then ASIN,
+      // then inventory.cost (already per-unit after sync writes it).
       finalUnitCost = costEntry?.unitCost
         ?? (item.cost !== null && item.cost !== undefined ? Number(item.cost) : null);
     }

@@ -86,6 +86,38 @@ async function fetchAsinCostOverrides(userId: string): Promise<Map<string, numbe
   return map;
 }
 
+/**
+ * COG on record — the seller's single typed average unit cost per ASIN, and
+ * the source stock is valued at. See the precedence note in
+ * getInventoryValuationTotalsLive.
+ *
+ * Paginated deliberately: ~3,100 rows, and PostgREST caps an un-ranged select
+ * at 1,000, which would silently drop two thirds of the costs.
+ */
+async function fetchCogOnRecord(userId: string): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  const PAGE = 1000;
+  for (let from = 0; from < 50 * PAGE; from += PAGE) {
+    const { data, error } = await supabase
+      .from("asin_cog_on_record")
+      .select("asin, unit_cost")
+      .eq("user_id", userId)
+      .not("unit_cost", "is", null)
+      .range(from, from + PAGE - 1);
+    // Throw rather than return a partial map: a short read here silently
+    // undervalues stock, which is worse than showing the caller an error.
+    // Matches fetchAllKeyset above.
+    if (error) throw error;
+    if (!data) break;
+    for (const row of data as { asin: string; unit_cost: number }[]) {
+      const cost = Number(row.unit_cost);
+      if (row.asin && Number.isFinite(cost) && cost > 0) map.set(row.asin, cost);
+    }
+    if (data.length < PAGE) break;
+  }
+  return map;
+}
+
 async function fetchAllKeyset<T extends { id: string; created_at: string | null }>(table: string, columns: string, userId: string): Promise<T[]> {
   const PAGE = 1000;
   const out: T[] = [];
@@ -197,7 +229,7 @@ export async function getInventoryValuationTotals(
 }
 
 async function getInventoryValuationTotalsLive(userId: string): Promise<InventoryValuationTotals> {
-  const [inventoryRows, listingRows, overridesByAsin] = await Promise.all([
+  const [inventoryRows, listingRows, overridesByAsin, cogByAsin] = await Promise.all([
     fetchAllKeyset<InventoryRow>(
       "inventory",
       "id,available,reserved,inbound,unfulfilled,cost,amount,units,unit_cost_manual,last_summaries_at,listing_status,asin,sku,created_at",
@@ -209,6 +241,7 @@ async function getInventoryValuationTotalsLive(userId: string): Promise<Inventor
       userId,
     ),
     fetchAsinCostOverrides(userId),
+    fetchCogOnRecord(userId),
   ]);
 
   // Build cost maps EXACTLY like SyncedInventory desktop:
@@ -242,9 +275,16 @@ async function getInventoryValuationTotalsLive(userId: string): Promise<Inventor
     //   else → costEntry.unitCost ?? item.cost (already per-unit) ?? compute
     const costEntry = costBySku.get(row.sku) ?? costByAsin.get(row.asin);
     const override = overridesByAsin.get(row.asin);
+    const cog = cogByAsin.get(row.asin);
+    // Precedence (changed 2026-09-15): asin_cost_overrides → COG on record →
+    // the Synced Inventory inline editor → created_listings → inventory.cost.
+    // Must stay identical to SyncedInventory.tsx and to the server-side
+    // computeInventoryValuation, or the implementations disagree on one number.
     let unitCost: number;
     if (override !== undefined) {
       unitCost = override;
+    } else if (cog !== undefined) {
+      unitCost = cog;
     } else if (row.unit_cost_manual && row.cost !== null && row.cost !== undefined) {
       unitCost = Number(row.cost);
     } else {
@@ -390,7 +430,7 @@ async function fetchFeeCacheMap(userId: string): Promise<Map<string, { fba_fee_f
 }
 
 export async function getProjectedValuationMetrics(userId: string): Promise<ProjectedValuationMetrics> {
-  const [inventoryRows, listingRows, overridesByAsin, feeCacheByAsin] = await Promise.all([
+  const [inventoryRows, listingRows, overridesByAsin, feeCacheByAsin, cogByAsin] = await Promise.all([
     fetchAllKeyset<InventoryRow & { price: number | null; fees_json: any }>(
       "inventory",
       "id,available,reserved,inbound,unfulfilled,cost,amount,units,unit_cost_manual,listing_status,asin,sku,created_at,price,fees_json",
@@ -403,6 +443,7 @@ export async function getProjectedValuationMetrics(userId: string): Promise<Proj
     ),
     fetchAsinCostOverrides(userId),
     fetchFeeCacheMap(userId),
+    fetchCogOnRecord(userId),
   ]);
 
   // Same cost-map + resolution precedence as getInventoryValuationTotalsLive,
@@ -430,9 +471,16 @@ export async function getProjectedValuationMetrics(userId: string): Promise<Proj
 
     const costEntry = costBySku.get(row.sku) ?? costByAsin.get(row.asin);
     const override = overridesByAsin.get(row.asin);
+    const cog = cogByAsin.get(row.asin);
+    // Precedence (changed 2026-09-15): asin_cost_overrides → COG on record →
+    // the Synced Inventory inline editor → created_listings → inventory.cost.
+    // Must stay identical to SyncedInventory.tsx and to the server-side
+    // computeInventoryValuation, or the implementations disagree on one number.
     let unitCost: number;
     if (override !== undefined) {
       unitCost = override;
+    } else if (cog !== undefined) {
+      unitCost = cog;
     } else if (row.unit_cost_manual && row.cost !== null && row.cost !== undefined) {
       unitCost = Number(row.cost);
     } else {
