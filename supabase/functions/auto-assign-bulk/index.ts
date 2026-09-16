@@ -1,6 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { checkModuleAccess } from "../_shared/module-access-guard.ts";
 import { getListingUnitCost } from "../_shared/cost-contract.ts";
+import { loadRepricerCostMap, repricerCostKey } from "../_shared/cog-for-repricer.ts";
 import { exchangeLwaToken } from "../_shared/lwa-token.ts";
 import { getSpApiEndpoint, signRequest } from "../_shared/sp-api-sigv4.ts";
 import { resolveMinRoiEnabled } from "../_shared/min-roi-enabled.ts";
@@ -579,6 +580,20 @@ Deno.serve(async (req) => {
     const assignmentsToInsert: any[] = [];
     const assignmentsToBackfill: any[] = [];
 
+    // Unit cost precedence (since 2026-09-16), same as every other repricer
+    // path: asin_cost_overrides -> COG on record -> inventory.cost ->
+    // created_listings. This function sets the STARTING min/max of new and
+    // incomplete assignments from that cost, so it must start from the number
+    // the seller maintains on the COG page. Placeholder COGs ($1.00 import
+    // lots, unreviewed) are excluded by the asin_cog_for_repricer view.
+    // A failed read throws, like the other cost loaders: a partial map would
+    // quietly seed some floors from a different cost basis.
+    const repricerCostMap = await loadRepricerCostMap(
+      supabase,
+      [userId],
+      (inventory as Array<{ asin?: string | null }>).map((i) => i.asin).filter(Boolean) as string[],
+    );
+
     for (const item of inventory) {
       const { asin, sku } = item;
       if (!asin || !sku) { skip(asin || "", sku || "", "missing_asin_or_sku"); continue; }
@@ -611,8 +626,9 @@ Deno.serve(async (req) => {
       );
       if (existingAssignment && !needsExistingBackfill) { skip(asin, sku, "already_assigned"); continue; }
 
-      // Resolve unit cost
-      let unitCost = item.cost || 0;
+      // Resolve unit cost: override -> COG on record -> inventory.cost -> created_listings
+      let unitCost = repricerCostMap.get(repricerCostKey(userId, asin))?.unitCost || 0;
+      if (unitCost <= 0) unitCost = item.cost || 0;
       if (unitCost <= 0) unitCost = costMap.get(asin) || 0;
 
       // Convert USD cost to local currency for non-US marketplaces

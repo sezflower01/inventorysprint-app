@@ -539,8 +539,18 @@ export default function CogOnRecord() {
     toast.success(done);
   };
 
+  // Confirms the COG as it stands. Also clears needs_review: since 2026-09-16
+  // the repricer ignores flagged COGs and unreviewed ones under $2 (the view
+  // asin_cog_for_repricer), and 119 imported $1.00 placeholders were flagged.
+  // A product that genuinely costs $1.00 needs a way to say so -- re-typing the
+  // same value is a no-op in saveCog -- and this is it. Setting reviewed_at is
+  // what makes the repricer start using the cost.
   const markReviewed = (row: ProductRow) =>
-    updateFlags(row, { reviewed_at: new Date().toISOString() }, `${row.asin}: marked reviewed at ${money(row.unit_cost)}`);
+    updateFlags(
+      row,
+      { reviewed_at: new Date().toISOString(), needs_review: false },
+      `${row.asin}: confirmed at ${money(row.unit_cost)}`,
+    );
 
   const keepCurrent = (row: ProductRow) =>
     updateFlags(
@@ -911,13 +921,16 @@ export default function CogOnRecord() {
                               )}
                               {r.cog_id && <HistoryButton asin={r.asin} />}
                             </div>
-                            {isNotReviewed(r) && !dirty && !hasPriceChange(r) && (
+                            {(isNotReviewed(r) || (r.needs_review && r.unit_cost != null)) && !dirty && !hasPriceChange(r) && (
                               <Button
                                 size="sm" variant="outline" className="mt-1.5 h-7 px-2 text-xs gap-1"
                                 onClick={() => markReviewed(r)} disabled={saving}
-                                title="Confirm this cost from the listing without changing it"
+                                title={r.needs_review
+                                  ? "This cost is correct as it is. Clears the flag; the repricer starts using it."
+                                  : "Confirm this cost from the listing without changing it"}
                               >
-                                <Check className="h-3 w-3" /> Mark reviewed
+                                <Check className="h-3 w-3" />
+                                {r.needs_review ? `Confirm ${money(r.unit_cost)}` : "Mark reviewed"}
                               </Button>
                             )}
                             {hasPriceChange(r) && (

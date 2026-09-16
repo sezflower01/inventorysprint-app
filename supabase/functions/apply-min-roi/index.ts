@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
 import { isInternalCaller } from '../_shared/require-internal.ts';
+import { loadRepricerCostMap, repricerCostKey } from '../_shared/cog-for-repricer.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -138,6 +139,15 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Unit cost precedence (since 2026-09-16), same as the Repricer page, the
+    // AI evaluator and repricer-auto-lower-min: asin_cost_overrides -> COG on
+    // record -> newest created_listings -> inventory.cost. This function WRITES
+    // min prices from that cost, so it must use the number the seller maintains
+    // on the COG page -- not whichever purchase lot happened to be newest.
+    // Placeholder COGs ($1.00 import lots, unreviewed) are excluded by the
+    // asin_cog_for_repricer view and fall through to the old sources.
+    const repricerCostMap = await loadRepricerCostMap(supabase, [userId], uniqueAsins);
+
     // Map by SKU (not ASIN) for marketplace-safe cost resolution
     const costBySkuMap: Record<string, number> = {};
     const priceBySkuMap: Record<string, number> = {};
@@ -168,7 +178,11 @@ Deno.serve(async (req) => {
 
     for (const [asin, asinGroup] of Object.entries(asinAssignments)) {
       // Resolve cost per-SKU (marketplace-safe) to prevent cross-marketplace contamination
-      let costUsd: number | undefined = createdCostByAsinMap[asin];
+      const recorded = repricerCostMap.get(repricerCostKey(userId, asin));
+      let costUsd: number | undefined = recorded?.unitCost ?? createdCostByAsinMap[asin];
+      const costSourceLabel = recorded
+        ? recorded.source
+        : (createdCostByAsinMap[asin] ? 'created_listings' : 'inventory');
       for (const a of asinGroup) {
         if (costUsd) break;
         if (costBySkuMap[a.sku]) { costUsd = costBySkuMap[a.sku]; break; }
@@ -187,7 +201,7 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      console.log(`[apply-min-roi] COST ${asin}: using ${createdCostByAsinMap[asin] ? 'created_listings' : 'inventory'} unit cost ${costUsd}`);
+      console.log(`[apply-min-roi] COST ${asin}: using ${costSourceLabel} unit cost ${costUsd}`);
 
       // Call calculate-roi-floor with live SP-API fees
       let floorResult: { min_price: number; actual_roi: number } | null = null;

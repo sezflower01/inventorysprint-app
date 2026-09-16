@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
 import { checkModuleAccess } from '../_shared/module-access-guard.ts';
+import { loadRepricerCostMap, repricerCostKey } from '../_shared/cog-for-repricer.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -133,6 +134,19 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Unit cost precedence (since 2026-09-16), same as every other repricer
+    // path: asin_cost_overrides -> COG on record -> the inventory-derived cost
+    // below. This function WRITES min prices, so it starts from the number the
+    // seller maintains on the COG page. Placeholder COGs ($1.00 import lots,
+    // unreviewed) are excluded by the asin_cog_for_repricer view.
+    //
+    // The inventory fallback below is kept as it was, but note it divides
+    // inventory.cost by units -- inventory.cost is already a UNIT cost under
+    // the cost contract (inventory and created_listings swap cost/amount), so
+    // that path under-states cost whenever units > 1. COG-first bypasses it
+    // for every ASIN with a usable COG.
+    const repricerCostMap = await loadRepricerCostMap(supabase, [user.id], asins);
+
     const invMap = new Map<string, InventoryRow>();
     for (const row of allInventory) {
       invMap.set(`${row.asin}::${row.sku}`, row);
@@ -161,8 +175,8 @@ Deno.serve(async (req) => {
     for (const assignment of allAssignments) {
       const inv = invMap.get(`${assignment.asin}::${assignment.sku}`) || invMap.get(assignment.asin);
 
-      let unitCost: number | null = null;
-      if (inv) {
+      let unitCost: number | null = repricerCostMap.get(repricerCostKey(user.id, assignment.asin))?.unitCost ?? null;
+      if (unitCost == null && inv) {
         if (pickPositive(inv.cost) && pickPositive(inv.units)) {
           unitCost = inv.cost! / inv.units!;
         } else if (pickPositive(inv.amount) && (inv.amount ?? 0) < 500) {
