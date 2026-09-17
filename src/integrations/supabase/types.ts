@@ -14102,6 +14102,17 @@ export type Database = {
       }
     }
     Views: {
+      asin_cog_for_repricer: {
+        Row: {
+          asin: string | null
+          reviewed_at: string | null
+          source: string | null
+          unit_cost: number | null
+          updated_at: string | null
+          user_id: string | null
+        }
+        Relationships: []
+      }
       active_created_listings: {
         Row: {
           amount: number | null

@@ -87,19 +87,54 @@ export default function AsinShipmentHistoryTab({ shipments }: Props) {
     let cancelled = false;
     (async () => {
       setLoadingCost(true);
-      const { data, error } = await supabase
-        .from("created_listings")
-        .select("asin, amount, cost, units, updated_at")
-        .eq("asin", asin)
-        .order("updated_at", { ascending: false })
-        .limit(1);
-      if (cancelled) return;
+      // Unit-cost precedence (since 2026-09-17), matching the Shipment Builder,
+      // Inventory Valuation and the repricer:
+      //   asin_cost_overrides -> COG on record -> created_listings
+      // Reading the newest created_listings row alone valued a repeat-purchase
+      // product at whatever the last lot cost.
       let unit = 0;
-      if (!error && data && data.length > 0) {
-        const r = data[0] as { amount: number | null; cost: number | null; units: number | null };
-        if (typeof r.amount === "number" && r.amount >= 0) unit = r.amount;
-        else if ((r.cost ?? 0) > 0 && (r.units ?? 0) > 0) unit = (r.cost as number) / (r.units as number);
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const { data: ovr } = await supabase
+          .from("asin_cost_overrides")
+          .select("unit_cost, effective_from, created_at")
+          .eq("asin", asin)
+          .lte("effective_from", today)
+          .gt("unit_cost", 0)
+          .order("effective_from", { ascending: false })
+          .order("created_at", { ascending: false })
+          .limit(1);
+        if (cancelled) return;
+        if (ovr && ovr.length > 0) unit = Number((ovr[0] as { unit_cost: number }).unit_cost) || 0;
+
+        if (unit <= 0) {
+          const { data: cog } = await supabase
+            .from("asin_cog_for_repricer")
+            .select("unit_cost")
+            .eq("asin", asin)
+            .limit(1);
+          if (cancelled) return;
+          if (cog && cog.length > 0) unit = Number((cog[0] as { unit_cost: number }).unit_cost) || 0;
+        }
+
+        if (unit <= 0) {
+          const { data, error } = await supabase
+            .from("created_listings")
+            .select("asin, amount, cost, units, updated_at")
+            .eq("asin", asin)
+            .order("updated_at", { ascending: false })
+            .limit(1);
+          if (cancelled) return;
+          if (!error && data && data.length > 0) {
+            const r = data[0] as { amount: number | null; cost: number | null; units: number | null };
+            if (typeof r.amount === "number" && r.amount >= 0) unit = r.amount;
+            else if ((r.cost ?? 0) > 0 && (r.units ?? 0) > 0) unit = (r.cost as number) / (r.units as number);
+          }
+        }
+      } catch (e) {
+        console.error("[AsinShipmentHistory] unit cost lookup failed:", e);
       }
+      if (cancelled) return;
       setCostByAsin((prev) => ({ ...prev, [asin]: unit }));
       setLoadingCost(false);
     })();

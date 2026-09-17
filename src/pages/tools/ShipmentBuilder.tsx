@@ -1990,21 +1990,99 @@ export default function ShipmentBuilder() {
     if (missing.length === 0) return;
     let cancelled = false;
     (async () => {
-      const { data, error } = await supabase
-        .from("created_listings")
-        .select("asin, amount, cost, units, updated_at")
-        .in("asin", missing)
-        .order("updated_at", { ascending: false });
-      if (cancelled || error || !data) return;
+      // Unit-cost precedence (since 2026-09-17), the same chain Inventory
+      // Valuation and the repricer use:
+      //   asin_cost_overrides -> COG on record -> created_listings -> inventory.cost
+      //
+      // This page used the newest created_listings row alone, so a shipment of
+      // a repeat-purchase product was valued at whatever the last lot cost.
+      // Measured over the seller's 95 saved drafts (1,017 item rows, 31,643
+      // units): 488 rows change and the total moves $316,211.51 -> $302,983.69.
+      // The largest were the shared-lot Funko costs the COG exists to correct
+      // (B0G4B3117X $14.56 -> $7.75).
+      //
+      // COG is read through asin_cog_for_repricer, which drops COGs flagged
+      // needs_review and unreviewed placeholder COGs under $2, so a $1.00
+      // import lot can never undervalue a shipment.
+      //
+      // Chunked: `in()` on a few hundred ASINs is fine, but a large library
+      // would blow the URL length, and PostgREST caps any response at 1,000
+      // rows however many ASINs were asked for.
+      const CHUNK = 150;
+      const chunks: string[][] = [];
+      for (let i = 0; i < missing.length; i += CHUNK) chunks.push(missing.slice(i, i + CHUNK));
+      const today = new Date().toISOString().slice(0, 10);
+
       const next: Record<string, number> = {};
-      for (const row of data as Array<{ asin: string | null; amount: number | null; cost: number | null; units: number | null }>) {
-        const asin = (row.asin ?? "").trim();
-        if (!asin || next[asin] !== undefined) continue; // first row wins (latest updated_at)
-        let unit = 0;
-        if (typeof row.amount === "number" && row.amount >= 0) unit = row.amount;
-        else if ((row.cost ?? 0) > 0 && (row.units ?? 0) > 0) unit = (row.cost as number) / (row.units as number);
-        next[asin] = unit;
+      const setIfAbsent = (asin: string, unit: number) => {
+        const key = asin.trim();
+        if (key && next[key] === undefined && Number.isFinite(unit) && unit > 0) next[key] = unit;
+      };
+
+      try {
+        for (const chunk of chunks) {
+          // 1) cost overrides (latest effective on or before today)
+          const { data: ovr } = await supabase
+            .from("asin_cost_overrides")
+            .select("asin, unit_cost, effective_from, created_at")
+            .in("asin", chunk)
+            .lte("effective_from", today)
+            .gt("unit_cost", 0)
+            .order("effective_from", { ascending: false })
+            .order("created_at", { ascending: false });
+          if (cancelled) return;
+          for (const row of (ovr || []) as Array<{ asin: string; unit_cost: number }>) {
+            setIfAbsent(row.asin, Number(row.unit_cost));
+          }
+
+          // 2) COG on record
+          const { data: cog } = await supabase
+            .from("asin_cog_for_repricer")
+            .select("asin, unit_cost")
+            .in("asin", chunk);
+          if (cancelled) return;
+          for (const row of (cog || []) as Array<{ asin: string; unit_cost: number }>) {
+            setIfAbsent(row.asin, Number(row.unit_cost));
+          }
+
+          // 3) created_listings (newest row wins) — unchanged rule, now a fallback
+          const { data: cl } = await supabase
+            .from("created_listings")
+            .select("asin, amount, cost, units, updated_at")
+            .in("asin", chunk)
+            .order("updated_at", { ascending: false });
+          if (cancelled) return;
+          const seenCl = new Set<string>();
+          for (const row of (cl || []) as Array<{ asin: string | null; amount: number | null; cost: number | null; units: number | null }>) {
+            const asin = (row.asin ?? "").trim();
+            if (!asin || seenCl.has(asin)) continue; // first row wins (latest updated_at)
+            seenCl.add(asin);
+            let unit = 0;
+            if (typeof row.amount === "number" && row.amount >= 0) unit = row.amount;
+            else if ((row.cost ?? 0) > 0 && (row.units ?? 0) > 0) unit = (row.cost as number) / (row.units as number);
+            setIfAbsent(asin, unit);
+          }
+
+          // 4) inventory.cost (already per-unit) for anything still unpriced
+          const stillMissing = chunk.filter((a) => next[a] === undefined);
+          if (stillMissing.length > 0) {
+            const { data: inv } = await supabase
+              .from("inventory")
+              .select("asin, cost")
+              .in("asin", stillMissing)
+              .gt("cost", 0);
+            if (cancelled) return;
+            for (const row of (inv || []) as Array<{ asin: string | null; cost: number | null }>) {
+              setIfAbsent(row.asin ?? "", Number(row.cost));
+            }
+          }
+        }
+      } catch (e) {
+        // Non-fatal: whatever resolved still applies, the rest stays $0 and the
+        // "missing costs count as $0" note explains it.
+        console.error("[ShipmentBuilder] unit cost lookup failed:", e);
       }
+      if (cancelled) return;
       for (const a of missing) if (next[a] === undefined) next[a] = 0;
       setCostByAsin((prev) => ({ ...prev, ...next }));
     })();
@@ -6271,7 +6349,7 @@ export default function ShipmentBuilder() {
                         ${totalCost.toFixed(2)}
                       </p>
                       <p className="mt-1 text-[11px] text-white/60">
-                        Sum of unit cost × qty for each SKU. Missing costs count as $0 — set them in Product Library.
+                        Sum of unit cost × qty for each SKU, using your COG on record. Missing costs count as $0 — set them on the COG page.
                       </p>
                     </div>
                   </div>
