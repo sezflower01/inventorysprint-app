@@ -1780,15 +1780,36 @@
     // "PL History Coverage" row is retired — its meaning is now folded
     // directly into plResult.text below, since a standalone "Coverage"
     // label didn't mean anything to users on its own.
-    const plRowLevel = plResult.state === "insufficient" ? "bad"
+    // KEEPA UNAVAILABLE IS NOT A PRODUCT RISK (2026-09-17).
+    //
+    // "insufficient" is scored as a hard "bad" because, for a product with
+    // genuinely no history, knowing nothing is a risk. But the same state also
+    // appears when mobile-scan-price-history could not reach Keepa at all
+    // (budget busy, quota exhausted, 429) and served SP-API offers only --
+    // it then returns { degraded: true, degraded_reason }. Reported on
+    // B0B2GHCDP5: no graph, "Not enough data", and an ACTIVE "Private-Label
+    // Risk" alert, while the seller's own Keepa extension showed full history
+    // and the Competitors header read "Keepa HTTP 429 ... tokensLeft -44".
+    // A temporary outage was being presented as a fact about the product.
+    //
+    // When the history response is degraded AND PL could not be scored, the
+    // row says why, carries "unknown" (no alert, no competition-risk points),
+    // and is left out of the weighted verdict rather than counted as a zero.
+    // A degraded response that still scored from cached series is unaffected.
+    const plKeepaUnavailable = state.history?.degraded === true && plResult.state !== "scored";
+    const plRowLevel = plKeepaUnavailable ? "unknown"
+      : plResult.state === "insufficient" ? "bad"
       : plResult.state === "limited_history" ? "caution"
       : plRiskUiLevel(plResult.level);
-    const plDisplayText = plResult.state === "insufficient" ? "Not enough data"
+    const plDisplayText = plKeepaUnavailable ? "Keepa unavailable — retry"
+      : plResult.state === "insufficient" ? "Not enough data"
       : plResult.state === "limited_history" ? "Limited History"
       : `${plResult.normalizedScore}% — ${plResult.level} Risk`;
-    const plCaption = plResult.state === "insufficient"
-      ? "Not enough historical data yet to determine Private-Label Risk reliably."
-      : plResult.text;
+    const plCaption = plKeepaUnavailable
+      ? `Price history could not be loaded from Keepa, so Private-Label Risk was not assessed. ${state.history?.degraded_reason || ""}`.trim()
+      : plResult.state === "insufficient"
+        ? "Not enough historical data yet to determine Private-Label Risk reliably."
+        : plResult.text;
     // PL needs price history (series) and stability (product age). Until both
     // are in, "Not enough data" would be a false "bad" -- show the skeleton.
     if (ready("history", "stability")) setChip($("apx-sa-pl"), plRowLevel, plDisplayText);
@@ -1937,7 +1958,9 @@
     }
     w(20, elig.level);
     w(15, amz.level);
-    w(10, plRowLevel);
+    // Left out entirely when Keepa was unreachable -- "unknown" would still add
+    // to max and score like "bad". See plKeepaUnavailable.
+    if (!plKeepaUnavailable) w(10, plRowLevel);
     max += 10;
     if (bsr != null) {
       if (bsr <= 10000) score += 10;
@@ -2001,7 +2024,8 @@
     // Clean categorical label for analyzer_decision_log.pl_risk — a short,
     // groupable value (unlike plDisplayText's "45% — Medium Risk", which is
     // fine for the UI but awkward to aggregate in SQL for brand history).
-    const plRiskLabel = plResult.state === "insufficient" ? "Insufficient Data"
+    const plRiskLabel = plKeepaUnavailable ? "Keepa Unavailable"
+      : plResult.state === "insufficient" ? "Insufficient Data"
       : plResult.state === "limited_history" ? "Limited History"
       : plResult.level; // "Low" | "Medium" | "High"
     renderDecisionMatrix({

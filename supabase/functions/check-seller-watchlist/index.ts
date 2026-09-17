@@ -37,7 +37,7 @@
 // 0-5) get a bounded detail batch, so cost scales with new-listing volume
 // rather than catalog size.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
-import { acquireKeepaGlobalSlot, reportKeepaTokensLeft, recordKeepa429, KEEPA_COST } from '../_shared/keepa-rate-gate.ts';
+import { acquireKeepaGlobalSlot, reportKeepaTokensLeft, recordKeepa429, KEEPA_COST, KEEPA_RESERVE } from '../_shared/keepa-rate-gate.ts';
 import { lookupAsinDetails } from '../_shared/asin-catalog-lookup.ts';
 import { getCatalogAccessToken, fetchCatalogItemDetails, fetchCatalogItemsBatch, SPAPI_HOSTS } from '../_shared/spapi-catalog-image.ts';
 import { MARKETPLACE_META } from '../_shared/marketplace-map.ts';
@@ -205,15 +205,32 @@ async function backfillBlankImages(admin: any, deadlineAt: number): Promise<Reco
  * claim; callers end the run rather than skipping onward, so that a refused
  * seller stays at the head of the queue for next time.
  */
+//
+// RESERVE: background (120), NOT the default. Changed 2026-09-17.
+//
+// acquireKeepaGlobalSlot defaults to KEEPA_REPRICER_RESERVE (60), so this job
+// was spending the shared bucket down to 60 local tokens -- which, with the
+// analyser's own uncounted calls opening a ~50-token gap, is ~0 real tokens.
+// Measured 2026-09-17 13:49 UTC: 998 watched sellers, 11-16 checked per
+// 5-minute run at 10 tokens each (~22-32 tokens/min against a 25/min plan),
+// every run ending "keepa-token-budget"; ledger tokens_left 6.4 while Keepa
+// itself answered the analyser panel with tokensLeft -44. The panel then had
+// no price history, no graph, seller IDs instead of names, and "Not enough
+// data" for private-label risk on B0B2GHCDP5.
+//
+// A reserve is a floor, not a rate cap: while nobody is using the analyser
+// this job still gets the whole 25/min refill once the buffer is full. It only
+// backs off while the seller is scanning, which is the point.
 async function acquireSlotOrGiveUp(admin: any, estimatedTokens: number, deadlineAt: number) {
-  const first = await acquireKeepaGlobalSlot(admin, { estimatedTokens });
+  const claim = () => acquireKeepaGlobalSlot(admin, { estimatedTokens, minReserve: KEEPA_RESERVE.background });
+  const first = await claim();
   if (first.ok) return first;
 
   const waitSeconds = Math.min(first.waitSeconds ?? MAX_SLOT_WAIT_SECONDS, MAX_SLOT_WAIT_SECONDS);
   if (Date.now() + waitSeconds * 1000 >= deadlineAt) return first;
 
   await sleep(waitSeconds * 1000);
-  return acquireKeepaGlobalSlot(admin, { estimatedTokens });
+  return claim();
 }
 
 Deno.serve(async (req) => {
