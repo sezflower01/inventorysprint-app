@@ -181,12 +181,57 @@ const $ = (id) => document.getElementById(id);
 // Always RESOLVES, never rejects — callers do `r?.ok ? r.data : null` or read
 // `r?.data?.x` directly, so a rejection would bypass their error handling
 // entirely. A failure is reported as { ok: false, error }.
+// ── Orphaned panel after an extension update (2026-09-18) ────────────────
+// An update or reload leaves this frame running but cut off: sendMessage
+// throws "Extension context invalidated" (or chrome.runtime is gone). A retry
+// cannot succeed, so fail fast with a plain message and a Reload banner.
+// content.js reloads the tab on RELOAD_PAGE (it needs no chrome.* for that).
+const EXTENSION_UPDATED_MSG =
+  "InventorySprint Create was just updated. Reload this page to reconnect, then try again.";
+const extensionAlive = () => { try { return !!chrome.runtime?.id; } catch { return false; } };
+const isContextInvalidated = (e) =>
+  !extensionAlive() || /context invalidated|extension context/i.test(String(e?.message || e || ""));
+let updatedBannerShown = false;
+function showExtensionUpdated() {
+  if (updatedBannerShown) return;
+  updatedBannerShown = true;
+  const bar = document.createElement("div");
+  bar.id = "cl-ext-updated";
+  bar.setAttribute("role", "alert");
+  Object.assign(bar.style, {
+    position: "sticky", top: "0", zIndex: "1000", display: "flex", gap: "8px",
+    alignItems: "center", justifyContent: "space-between", padding: "10px 12px",
+    background: "#fef3c7", color: "#78350f", borderBottom: "1px solid #f59e0b",
+    font: "600 12px/1.35 system-ui, sans-serif",
+  });
+  const text = document.createElement("span");
+  text.textContent = EXTENSION_UPDATED_MSG;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = "Reload page";
+  Object.assign(btn.style, {
+    flex: "0 0 auto", padding: "6px 10px", borderRadius: "6px", border: "none",
+    background: "#b45309", color: "#fff", font: "600 12px system-ui, sans-serif", cursor: "pointer",
+  });
+  btn.addEventListener("click", () => {
+    window.parent.postMessage({ source: "arbipro-create-panel", type: "RELOAD_PAGE" }, "*");
+  });
+  bar.append(text, btn);
+  document.body.prepend(bar);
+}
+const extensionUpdatedResult = () => {
+  showExtensionUpdated();
+  return { ok: false, error: EXTENSION_UPDATED_MSG, code: "EXTENSION_UPDATED" };
+};
+
 const bg = (type, extra = {}, retries = 1) => new Promise((res) => {
+  if (!extensionAlive()) { res(extensionUpdatedResult()); return; }
   const attempt = (left) => {
     try {
       chrome.runtime.sendMessage({ type, ...extra }, (r) => {
-        const lastError = chrome.runtime.lastError;
+        const lastError = chrome.runtime?.lastError;
         if (lastError) {
+          if (isContextInvalidated(lastError)) return res(extensionUpdatedResult());
           if (left > 0) return attempt(left - 1);
           const msg = lastError.message || "runtime_error";
           console.log(`[InvSPRNT] bg(${type}) failed: ${msg}`);
@@ -201,8 +246,8 @@ const bg = (type, extra = {}, retries = 1) => new Promise((res) => {
         res(r);
       });
     } catch (e) {
-      // Context invalidated cannot be retried back to life, but resolving with
-      // a clean failure beats an unhandled rejection from a dead panel.
+      // Context invalidated cannot be retried back to life: say so plainly.
+      if (isContextInvalidated(e)) return res(extensionUpdatedResult());
       if (left > 0) return attempt(left - 1);
       const msg = String(e?.message || e);
       console.log(`[InvSPRNT] bg(${type}) threw: ${msg}`);

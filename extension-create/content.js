@@ -28,11 +28,29 @@
     return v && /^[A-Z0-9]{10}$/.test(v) ? v : null;
   };
 
+  // ── Surviving an extension update (2026-09-18) ─────────────────────────
+  // Same scheme as the analyser's content.js. background.js re-injects this
+  // script into open tabs on update; each copy stamps an instance id on
+  // <html> and removes the previous copy's panel, launcher and drag overlay.
+  // An older copy -- cut off (chrome.runtime gone) or superseded -- counts as
+  // an invalid context and goes quiet through handleContextInvalidated().
+  const INSTANCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const INSTANCE_ATTR = "data-invsprnt-create";
+  for (const id of ["arbipro-create-panel-frame", "arbipro-create-launcher", "arbipro-create-drag-overlay"]) {
+    document.getElementById(id)?.remove();
+  }
+  document.documentElement.setAttribute(INSTANCE_ATTR, INSTANCE);
+
   let panelState = { pos: { ...DEFAULT_POS }, collapsed: false, hidden: false };
   async function loadState() {
     try { const o = await chrome.storage.local.get(STORE_KEY); if (o[STORE_KEY]) panelState = { ...panelState, ...o[STORE_KEY] }; } catch {}
   }
-  const saveState = () => { try { chrome.storage.local.set({ [STORE_KEY]: panelState }); } catch {} };
+  // storage.set returns a promise; a synchronous try/catch alone let its
+  // rejection escape as an unhandled "Extension context invalidated".
+  const saveState = () => {
+    if (!isExtensionContextValid()) { handleContextInvalidated(); return; }
+    try { chrome.storage.local.set({ [STORE_KEY]: panelState }).catch(() => {}); } catch {}
+  };
 
   // ─── Sourcing context capture ───
   // When the user lands on an Amazon page from a supplier site, persist
@@ -106,6 +124,9 @@
   }
 
   const isExtensionContextValid = () => {
+    if (contextInvalidated) return false;
+    // A newer injected copy owns the page now.
+    if (document.documentElement.getAttribute(INSTANCE_ATTR) !== INSTANCE) return false;
     try { return !!(chrome && chrome.runtime && chrome.runtime.id); } catch { return false; }
   };
 
@@ -116,6 +137,12 @@
     contextInvalidated = true;
     try { domObserver?.disconnect(); } catch {}
     domObserver = null;
+    // Put history back only if our wrapper is still the installed one; a newer
+    // copy may have wrapped ours.
+    try { if (history.pushState.__invsprnt === INSTANCE) history.pushState = _push; } catch {}
+    try { if (history.replaceState.__invsprnt === INSTANCE) history.replaceState = _replace; } catch {}
+    // These remove only THIS copy's own elements (a newer copy already took
+    // the shared ids off the page before mounting its own).
     unmountPanel();
     hideLauncher();
   }
@@ -228,6 +255,14 @@
   window.addEventListener("message", (e) => {
     const d = e.data;
     if (!d || d.source !== "arbipro-create-panel") return;
+    // The panel's "Reload page" button. Needs no chrome.* API, so it works
+    // even in a cut-off copy. Accepted only from our own panel frame.
+    if (d.type === "RELOAD_PAGE") {
+      const frame = document.getElementById("arbipro-create-panel-frame");
+      if (frame && e.source === frame.contentWindow) location.reload();
+      return;
+    }
+    if (!isExtensionContextValid()) { handleContextInvalidated(); return; }
     switch (d.type) {
       case "READY":
         postToPanel({ type: "RESTORE_STATE", collapsed: panelState.collapsed });
@@ -265,6 +300,7 @@
   // Alt+L (avoid clash with analyzer's Alt+A)
   window.addEventListener("keydown", (e) => {
     if (e.altKey && (e.key === "l" || e.key === "L")) {
+      if (!isExtensionContextValid()) { handleContextInvalidated(); return; }
       e.preventDefault(); togglePanel();
     }
   });
@@ -283,8 +319,11 @@
   }
 
   const _push = history.pushState, _replace = history.replaceState;
-  history.pushState = function () { _push.apply(this, arguments); setTimeout(pushCurrentAsin, 200); };
-  history.replaceState = function () { _replace.apply(this, arguments); setTimeout(pushCurrentAsin, 200); };
+  const wrappedPush = function () { _push.apply(this, arguments); setTimeout(pushCurrentAsin, 200); };
+  const wrappedReplace = function () { _replace.apply(this, arguments); setTimeout(pushCurrentAsin, 200); };
+  wrappedPush.__invsprnt = INSTANCE; wrappedReplace.__invsprnt = INSTANCE;
+  history.pushState = wrappedPush;
+  history.replaceState = wrappedReplace;
   window.addEventListener("popstate", () => setTimeout(pushCurrentAsin, 200));
 
   (async () => {
