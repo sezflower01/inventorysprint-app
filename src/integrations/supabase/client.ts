@@ -19,9 +19,20 @@ const SUPABASE_PUBLISHABLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiO
 // runSingleItem), so it only ever acts as a backstop against a truly stuck
 // connection, never as an early abort on a legitimately slow-but-working call.
 const FETCH_TIMEOUT_MS = 120_000;
+// Auth calls (token refresh, sign-in, getUser) get a much shorter ceiling
+// (2026-09-18). They are tiny requests, and auth-js holds its session lock for
+// the whole request: at 120 s one stalled refresh froze every getSession() --
+// and so every signed-in page on "Loading..." -- for up to two minutes per
+// attempt, retry after retry. Reported 2026-09-18 during Supabase's open
+// incident "401 errors due to JWT rejections" (API Gateway degraded): the
+// seller's two sessions from 11:50 never refreshed. At 20 s a stuck refresh
+// releases the lock and auth-js retries, instead of hanging the whole app.
+const AUTH_FETCH_TIMEOUT_MS = 20_000;
 const fetchWithTimeout: typeof fetch = (input, init) => {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+  const timeoutMs = url.includes('/auth/v1/') ? AUTH_FETCH_TIMEOUT_MS : FETCH_TIMEOUT_MS;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   // Respect a caller-supplied signal too, if one was ever passed.
   init?.signal?.addEventListener('abort', () => controller.abort());
   return fetch(input, { ...init, signal: controller.signal }).finally(() => clearTimeout(timeoutId));

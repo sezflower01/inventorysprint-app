@@ -197,6 +197,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }
 
     let initialResolved = false;
+    let servedStaleSession = false;
     const hasStoredToken = (() => {
       try {
         for (let i = 0; i < localStorage.length; i++) {
@@ -224,6 +225,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       const ageMs = stale?.expires_at ? Date.now() - stale.expires_at * 1000 : Infinity;
       if (stale && ageMs < STALE_GRACE_MS) {
         console.warn('Initial getSession() slow (>7s) — using cached session as a stale fallback.');
+        servedStaleSession = true; // the hard ceiling below must not undo this
         const isEmailVerified = Boolean(stale.user?.email_confirmed_at);
         setSession(isEmailVerified ? stale : null);
         setUser(isEmailVerified ? stale.user : null);
@@ -234,9 +236,34 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       console.warn('Initial getSession() slow (>7s) — still waiting, not clearing session.');
     }, hasStoredToken ? 7000 : 1500);
 
+    // HARD CEILING (2026-09-18). The branch above deliberately keeps waiting
+    // when the stored session expired more than STALE_GRACE_MS ago -- and
+    // nothing ever stopped that wait. getSession() then has to refresh the
+    // token over the network; when that refresh stalls (Supabase's open
+    // "401 errors due to JWT rejections" gateway incident; or auth-js's
+    // session lock held by a stuck request in another tab) every signed-in
+    // page sat on "Loading..." indefinitely. Reported 2026-09-18: the
+    // seller's 11:50 sessions never refreshed; pages loaded forever.
+    //
+    // After 30 s, stop waiting and fall through as signed out, so
+    // ProtectedRoute sends the seller to /login (with a redirect back) where
+    // signing in again works. 30 s leaves room for the 20 s auth fetch
+    // ceiling in client.ts plus a retry, so a slow-but-working refresh still
+    // wins. If getSession() resolves later it still updates state as before.
+    const hardCeiling = setTimeout(() => {
+      // Nothing to do if getSession() answered, or the 7 s fallback already
+      // let the seller in on a recent cached session.
+      if (initialResolved || servedStaleSession) return;
+      console.warn('Initial getSession() still pending after 30s — giving up and treating as signed out so the app is usable.');
+      setSession(null);
+      setUser(null);
+      setLoading(false);
+    }, 30_000);
+
     supabase.auth.getSession().then(({ data: { session } }) => {
       initialResolved = true;
       clearTimeout(initialSessionTimeout);
+      clearTimeout(hardCeiling);
       const isEmailVerified = Boolean(session?.user?.email_confirmed_at);
       setSession(isEmailVerified ? session : null);
       setUser(isEmailVerified ? session?.user ?? null : null);
@@ -245,6 +272,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     }).catch((err) => {
       initialResolved = true;
       clearTimeout(initialSessionTimeout);
+      clearTimeout(hardCeiling);
       console.warn('Initial getSession() failed:', err);
       setLoading(false);
     });
@@ -268,6 +296,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       subscription.unsubscribe();
       window.removeEventListener('storage', onStorage);
       clearTimeout(initialSessionTimeout);
+      clearTimeout(hardCeiling);
     };
   }, []);
 
