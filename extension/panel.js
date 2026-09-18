@@ -303,10 +303,83 @@
   // ── Background bridge ──────────────────────────────────────────────
   // Hardened: timeout + auto-retry wakes the MV3 service worker when it sleeps.
   // Prevents the "have to disable/re-enable the extension" symptom.
+  // ── Orphaned panel after an extension update (2026-09-18) ──────────────
+  //
+  // When the extension is updated or reloaded while an Amazon tab is open,
+  // this iframe keeps running but is cut off from the new extension: every
+  // chrome.runtime call throws "Extension context invalidated". Reported on
+  // the sign-in form -- the seller typed credentials and got that raw error,
+  // and retrying could never work. Only a page reload reconnects.
+  //
+  // background.js now re-injects content scripts on update, which replaces
+  // this frame with a live one in most tabs. For the rest: detect it, never
+  // retry (a retry cannot succeed), and tell the seller in plain words with
+  // a one-click reload.
+  const EXTENSION_UPDATED_MSG =
+    "InventorySprint was just updated. Reload this page to reconnect, then try again.";
+  const extensionAlive = () => { try { return !!chrome.runtime?.id; } catch { return false; } };
+  const isContextInvalidated = (e) =>
+    !extensionAlive() || /context invalidated|extension context/i.test(String(e?.message || e || ""));
+  let updatedBannerShown = false;
+  function showExtensionUpdated() {
+    if (updatedBannerShown) return;
+    updatedBannerShown = true;
+    const bar = document.createElement("div");
+    bar.id = "apx-ext-updated";
+    bar.setAttribute("role", "alert");
+    Object.assign(bar.style, {
+      position: "sticky", top: "0", zIndex: "1000", display: "flex", gap: "8px",
+      alignItems: "center", justifyContent: "space-between", padding: "10px 12px",
+      background: "#fef3c7", color: "#78350f", borderBottom: "1px solid #f59e0b",
+      font: "600 12px/1.35 system-ui, sans-serif",
+    });
+    const text = document.createElement("span");
+    text.textContent = EXTENSION_UPDATED_MSG;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Reload page";
+    Object.assign(btn.style, {
+      flex: "0 0 auto", padding: "6px 10px", borderRadius: "6px", border: "none",
+      background: "#b45309", color: "#fff", font: "600 12px system-ui, sans-serif", cursor: "pointer",
+    });
+    // The frame is cross-origin to the Amazon page and cannot reload it
+    // directly; content.js does it (its message listener needs no chrome APIs,
+    // so it still works when the extension context is gone).
+    btn.addEventListener("click", () => {
+      window.parent.postMessage({ source: "arbipro-panel", type: "RELOAD_PAGE" }, "*");
+    });
+    bar.append(text, btn);
+    document.body.prepend(bar);
+  }
+  const extensionUpdatedError = () => {
+    showExtensionUpdated();
+    const err = new Error(EXTENSION_UPDATED_MSG);
+    err.code = "EXTENSION_UPDATED";
+    return err;
+  };
+  // Drop-in for the direct chrome.runtime.sendMessage calls below bg(). Once
+  // the context is gone, sendMessage throws synchronously from inside click
+  // handlers; this shows the banner and answers the callback with an ordinary
+  // { ok: false } so every caller's existing failure path runs instead.
+  function safeSendMessage(msg, cb) {
+    const fail = () => {
+      showExtensionUpdated();
+      if (cb) setTimeout(() => cb({ ok: false, error: EXTENSION_UPDATED_MSG }), 0);
+    };
+    if (!extensionAlive()) return fail();
+    try {
+      chrome.runtime.sendMessage(msg, cb);
+    } catch (e) {
+      if (isContextInvalidated(e)) return fail();
+      throw e;
+    }
+  }
+
   const bg = (type, extra = {}, { timeoutMs = 8000, retries = 1 } = {}) =>
     new Promise((resolve, reject) => {
       let settled = false;
       const finish = (fn, val) => { if (!settled) { settled = true; fn(val); } };
+      if (!extensionAlive()) { finish(reject, extensionUpdatedError()); return; }
       const attempt = (left) => {
         let timer = setTimeout(() => {
           if (settled) return;
@@ -316,8 +389,9 @@
         try {
           chrome.runtime.sendMessage({ type, ...extra }, (resp) => {
             clearTimeout(timer);
-            const lastErr = chrome.runtime.lastError;
+            const lastErr = chrome.runtime?.lastError;
             if (lastErr) {
+              if (isContextInvalidated(lastErr)) return finish(reject, extensionUpdatedError());
               // "message port closed" / SW restart → retry once silently
               if (left > 0) return attempt(left - 1);
               return finish(reject, new Error(lastErr.message || "runtime_error"));
@@ -333,6 +407,9 @@
           });
         } catch (e) {
           clearTimeout(timer);
+          // sendMessage THROWS synchronously once the context is gone; a retry
+          // cannot succeed, so say what happened instead.
+          if (isContextInvalidated(e)) return finish(reject, extensionUpdatedError());
           if (left > 0) return attempt(left - 1);
           finish(reject, e instanceof Error ? e : new Error(String(e)));
         }
@@ -365,7 +442,7 @@
   async function checkAdminStatus() {
     try {
       const r = await new Promise((resolve) =>
-        chrome.runtime.sendMessage({ type: "ARBIPRO_CHECK_ADMIN" }, resolve));
+        safeSendMessage({ type: "ARBIPRO_CHECK_ADMIN" }, resolve));
       state.isAdmin = !!(r?.ok && r.isAdmin);
     } catch (e) {
       console.warn("[apx] admin check failed", e?.message || e);
@@ -473,7 +550,7 @@
     if (state.signedIn) {
       try {
         const r = await new Promise((resolve, reject) =>
-          chrome.runtime.sendMessage({ type: "ARBIPRO_LOAD_COST", asin: a }, (resp) =>
+          safeSendMessage({ type: "ARBIPRO_LOAD_COST", asin: a }, (resp) =>
             resp?.ok ? resolve(resp.data) : reject(new Error(resp?.error || "load failed")),
           ),
         );
@@ -521,7 +598,7 @@
         units,
         sale_price_override: Number.isFinite(sale) ? sale : null,
       };
-      chrome.runtime.sendMessage({ type: "ARBIPRO_SAVE_COST", row }, (r) => {
+      safeSendMessage({ type: "ARBIPRO_SAVE_COST", row }, (r) => {
         const err = chrome.runtime.lastError;
         if (err) { console.warn("[InvSPRNT] saveCost bridge", err.message); return; }
         if (!r?.ok) console.warn("[InvSPRNT] saveCost db", r?.error);
@@ -1510,7 +1587,7 @@
     // Skip recording until we have at least a title or image — prevents bare "(no Amazon match)" rows.
     if (!row.title && !row.image_url) return;
     await new Promise((resolve) =>
-      chrome.runtime.sendMessage({ type: "ARBIPRO_SAVE_SCAN", row }, (r) => {
+      safeSendMessage({ type: "ARBIPRO_SAVE_SCAN", row }, (r) => {
         // Dedup marker only — losing it just means one extra recorded scan.
         if (r?.ok) chrome.storage.local.set({ [key]: Date.now() }).catch(() => {});
         resolve(r);
@@ -2370,7 +2447,7 @@
     if (brandHistoryState.key === key) return; // already fetched/fetching for this exact scan
     brandHistoryState.key = key;
     renderBrandHistory({ loading: true });
-    chrome.runtime.sendMessage({ type: "ARBIPRO_INVOKE", fn: "brand-history-lookup", body: { brand: b, asin: a } }, (r) => {
+    safeSendMessage({ type: "ARBIPRO_INVOKE", fn: "brand-history-lookup", body: { brand: b, asin: a } }, (r) => {
       if (brandHistoryState.key !== key) return; // stale response — ASIN changed since this fired
       if (r?.ok && r.data && !r.data.error) {
         renderBrandHistory(r.data);
@@ -2466,7 +2543,7 @@
     dmState.recorded = null;
     updateDmUi("saving");
 
-    chrome.runtime.sendMessage({ type: "ARBIPRO_LOG_DECISION", row }, (r) => {
+    safeSendMessage({ type: "ARBIPRO_LOG_DECISION", row }, (r) => {
       if (r?.ok && r.data?.id) {
         dmState.decisionId = r.data.id;
         updateDmUi("ready");
@@ -2507,7 +2584,7 @@
         dmState.pending = true;
         const status = $("apx-dm-memory-status");
         if (status) status.textContent = `Saving ${action}…`;
-        chrome.runtime.sendMessage({
+        safeSendMessage({
           type: "ARBIPRO_RECORD_DECISION_ACTION",
           row: {
             decision_id: dmState.decisionId,

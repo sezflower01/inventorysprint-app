@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "InventorySprint — Amazon Analyzer",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "description": "Auto-detects ASIN on Amazon product pages and shows InventorySprint scanner data (Keepa stability, Buy Box, ROI, eligibility).",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [

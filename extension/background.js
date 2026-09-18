@@ -430,3 +430,42 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   })();
   return true; // async
 });
+
+// ── Heal open tabs after an install or update (2026-09-18) ───────────────
+//
+// Updating or reloading the extension leaves the OLD content scripts running
+// in every Amazon / InventorySprint tab that was already open, cut off from
+// the new extension: their chrome.* calls throw "Extension context
+// invalidated". On Amazon that broke the analyser panel (reported on its
+// sign-in form); on inventorysprint.com it silently dropped the website's
+// login hand-off, so signing in there never reached the extension.
+//
+// Re-inject the manifest's content scripts into those tabs. A reloaded
+// extension gets a fresh isolated world, so the new copies do not collide
+// with the old ones; content.js then removes the old panel and the old copy
+// retires itself. Only for install/update -- on a Chrome update the scripts
+// are still alive and must not be doubled. Failures are per tab (discarded
+// tabs, chrome:// pages, tabs mid-navigation) and never block the rest.
+chrome.runtime.onInstalled.addListener(({ reason }) => {
+  if (reason !== "install" && reason !== "update") return;
+  (async () => {
+    const scripts = chrome.runtime.getManifest().content_scripts || [];
+    let injected = 0, failed = 0;
+    for (const cs of scripts) {
+      let tabs = [];
+      try { tabs = await chrome.tabs.query({ url: cs.matches }); } catch { continue; }
+      for (const tab of tabs) {
+        if (!tab.id || tab.discarded || tab.status === "unloaded") continue;
+        try {
+          if (cs.css?.length) await chrome.scripting.insertCSS({ target: { tabId: tab.id }, files: cs.css });
+          if (cs.js?.length) await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: cs.js });
+          injected++;
+        } catch (e) {
+          failed++;
+          console.debug("[arbipro] re-inject skipped for tab", tab.id, e?.message || e);
+        }
+      }
+    }
+    console.log(`[arbipro] ${reason}: re-injected content scripts into ${injected} open tab(s), ${failed} skipped`);
+  })();
+});

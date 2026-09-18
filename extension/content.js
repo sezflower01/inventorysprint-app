@@ -27,11 +27,55 @@
     return v && /^[A-Z0-9]{10}$/.test(v) ? v : null;
   };
 
+  // ── Surviving an extension update (2026-09-18) ─────────────────────────
+  //
+  // Updating or reloading the extension does not remove this script from
+  // pages that are already open: it keeps running, cut off from the new
+  // extension, and every chrome.* call throws "Extension context
+  // invalidated". The seller hit it on the panel's sign-in form.
+  //
+  // background.js now injects a fresh copy into open tabs on update. Each
+  // copy stamps an instance id on <html>; a newer copy removes the old panel
+  // and launcher, and an older copy that notices it is stale or cut off
+  // retires -- disconnects its observer, restores history, stops touching
+  // chrome.* -- instead of throwing on every Amazon DOM mutation.
+  const INSTANCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const INSTANCE_ATTR = "data-invsprnt-analyzer";
+  for (const id of ["arbipro-panel-frame", "arbipro-launcher"]) document.getElementById(id)?.remove();
+  document.documentElement.setAttribute(INSTANCE_ATTR, INSTANCE);
+
+  let retired = false;
+  const extensionAlive = () => { try { return !!chrome.runtime?.id; } catch { return false; } };
+  const superseded = () => document.documentElement.getAttribute(INSTANCE_ATTR) !== INSTANCE;
+  let observer = null;
+  let _push = null, _replace = null;
+  function retire() {
+    if (retired) return;
+    retired = true;
+    try { observer?.disconnect(); } catch {}
+    // Only restore history if ours is still the installed wrapper; a newer
+    // copy may have wrapped ours, and unwinding would drop its hook.
+    try { if (_push && history.pushState.__invsprnt === INSTANCE) history.pushState = _push; } catch {}
+    try { if (_replace && history.replaceState.__invsprnt === INSTANCE) history.replaceState = _replace; } catch {}
+  }
+  // True when this copy may still act. Retires it the first time it isn't.
+  const usable = () => {
+    if (retired) return false;
+    if (superseded() || !extensionAlive()) { retire(); return false; }
+    return true;
+  };
+
   let panelState = { pos: { ...DEFAULT_POS }, collapsed: false, hidden: false };
   async function loadState() {
+    if (!usable()) return;
     try { const o = await chrome.storage.local.get(STORE_KEY); if (o[STORE_KEY]) panelState = { ...panelState, ...o[STORE_KEY] }; } catch {}
   }
-  const saveState = () => { try { chrome.storage.local.set({ [STORE_KEY]: panelState }); } catch {} };
+  // storage.set returns a promise: a synchronous try/catch alone let its
+  // rejection escape as an unhandled "Extension context invalidated".
+  const saveState = () => {
+    if (!usable()) return;
+    try { chrome.storage.local.set({ [STORE_KEY]: panelState }).catch(() => {}); } catch {}
+  };
 
   function isOnScreen(pos) {
     const vw = window.innerWidth, vh = window.innerHeight;
@@ -56,6 +100,7 @@
   let iframe = null;
   function mountPanel() {
     if (iframe) return iframe;
+    if (!usable()) return null; // getURL throws once the context is gone
     iframe = document.createElement("iframe");
     iframe.id = "arbipro-panel-frame";
     iframe.src = chrome.runtime.getURL("panel.html");
@@ -73,6 +118,7 @@
   let launcher = null;
   function ensureLauncher() {
     if (launcher) return launcher;
+    if (!usable()) return null;
     launcher = document.createElement("button");
     launcher.id = "arbipro-launcher";
     launcher.type = "button";
@@ -109,6 +155,15 @@
   window.addEventListener("message", (e) => {
     const d = e.data;
     if (!d || d.source !== "arbipro-panel") return;
+    // The panel's "Reload page" button. Handled even by a retired copy -- it
+    // needs no chrome.* API, and a cut-off tab is exactly when it is pressed.
+    // Only from our own frame: any script on the page can postMessage.
+    if (d.type === "RELOAD_PAGE") {
+      const frame = document.getElementById("arbipro-panel-frame");
+      if (frame && e.source === frame.contentWindow) location.reload();
+      return;
+    }
+    if (!usable()) return;
     switch (d.type) {
       case "READY":
         postToPanel({ type: "RESTORE_STATE", collapsed: panelState.collapsed });
@@ -151,6 +206,7 @@
   }
   window.addEventListener("keydown", (e) => {
     if (e.altKey && (e.key === "a" || e.key === "A")) {
+      if (!usable()) return;
       e.preventDefault(); togglePanel();
     }
   });
@@ -158,6 +214,7 @@
 
   let lastSent = null;
   function pushCurrentAsin(force = false) {
+    if (!usable()) return;
     const asin = detectAsin();
     const marketplace = detectMarketplace();
     const key = `${asin}|${marketplace}`;
@@ -167,14 +224,19 @@
     postToPanel({ type: "ASIN_CHANGED", asin, marketplace, url: location.href });
   }
 
-  const _push = history.pushState, _replace = history.replaceState;
-  history.pushState = function () { _push.apply(this, arguments); setTimeout(pushCurrentAsin, 200); };
-  history.replaceState = function () { _replace.apply(this, arguments); setTimeout(pushCurrentAsin, 200); };
+  _push = history.pushState; _replace = history.replaceState;
+  const wrappedPush = function () { _push.apply(this, arguments); setTimeout(pushCurrentAsin, 200); };
+  const wrappedReplace = function () { _replace.apply(this, arguments); setTimeout(pushCurrentAsin, 200); };
+  wrappedPush.__invsprnt = INSTANCE; wrappedReplace.__invsprnt = INSTANCE;
+  history.pushState = wrappedPush;
+  history.replaceState = wrappedReplace;
   window.addEventListener("popstate", () => setTimeout(pushCurrentAsin, 200));
 
   (async () => {
     await loadState();
-    new MutationObserver(() => pushCurrentAsin()).observe(document.documentElement, { childList: true, subtree: true });
+    if (!usable()) return;
+    observer = new MutationObserver(() => pushCurrentAsin());
+    observer.observe(document.documentElement, { childList: true, subtree: true });
     if (panelState.hidden) ensureLauncher();
     pushCurrentAsin(true);
   })();
