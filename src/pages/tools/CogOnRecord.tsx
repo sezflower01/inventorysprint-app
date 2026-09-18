@@ -140,6 +140,18 @@ interface ProductRow {
   /** The product's newest listing is saved but Amazon has not confirmed it yet. */
   awaiting_amazon: boolean;
   pending_listing_count: number;
+  /**
+   * Purchase-weighted average suggested on "Price changed" rows only
+   * (20260918041000): total spent / total units over the last 12 months of
+   * purchases including the new one (all purchases when < 10 units in 12
+   * months). The seller chose this over a stock-weighted average, which
+   * depends on pooled cross-marketplace stock counts.
+   */
+  suggested_avg_cost?: number | null;
+  suggested_avg_spent?: number | null;
+  suggested_avg_units?: number | null;
+  suggested_avg_lots?: number | null;
+  suggested_avg_window?: "last_12_months" | "all_time" | null;
 }
 
 type CogSource = "import" | "manual" | "listing";
@@ -951,6 +963,16 @@ export default function CogOnRecord() {
                                   >
                                     Use {money(r.price_change_unit_cost)}
                                   </Button>
+                                  {r.suggested_avg_cost != null && (
+                                    <Button
+                                      size="sm" variant="outline" className="h-6 px-2 text-xs"
+                                      onClick={() => setDrafts((d) => ({ ...d, [r.asin]: Number(r.suggested_avg_cost).toFixed(2) }))}
+                                      disabled={saving}
+                                      title="Copy the purchase-weighted average into the COG box — press ✓ to save it"
+                                    >
+                                      Average {money(r.suggested_avg_cost)}
+                                    </Button>
+                                  )}
                                   <Button
                                     size="sm" variant="ghost" className="h-6 px-2 text-xs"
                                     onClick={() => keepCurrent(r)} disabled={saving}
@@ -959,6 +981,13 @@ export default function CogOnRecord() {
                                     Keep {money(r.unit_cost)}
                                   </Button>
                                 </div>
+                                {r.suggested_avg_cost != null && r.suggested_avg_spent != null && r.suggested_avg_units != null && (
+                                  <div className="mt-1 text-[11px] text-muted-foreground tabular-nums">
+                                    Average = {money(r.suggested_avg_spent)} spent ÷ {Number(r.suggested_avg_units).toLocaleString()} units
+                                    {r.suggested_avg_lots != null && <> · {r.suggested_avg_lots} {r.suggested_avg_lots === 1 ? "purchase" : "purchases"}</>}
+                                    {" · "}{r.suggested_avg_window === "all_time" ? "all purchases" : "last 12 months"}, incl. this one
+                                  </div>
+                                )}
                               </div>
                             )}
                           </TableCell>
