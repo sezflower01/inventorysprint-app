@@ -1,11 +1,11 @@
-const CFG = self.ARBIPRO_CFG;
+const CFG = self.INVSPRNT_CFG;
 const $ = (id) => document.getElementById(id);
 
 const bg = (type, extra = {}) =>
   new Promise((res) => chrome.runtime.sendMessage({ type, ...extra }, (r) => res(r)));
 
 async function refresh() {
-  const r = await bg("ARBIPRO_GET_SESSION");
+  const r = await bg("INVSPRNT_GET_SESSION");
   const signed = !!r?.session?.access_token;
   $("pop-status").textContent = signed ? "Signed in ✓" : "Sign in to InventorySprint";
   $("pop-signin-form").classList.toggle("hidden", signed);
@@ -23,7 +23,7 @@ $("pop-signin-form").addEventListener("submit", async (e) => {
   btn.disabled = true;
   btn.textContent = "Signing in…";
   try {
-    const r = await bg("ARBIPRO_SIGN_IN_PASSWORD", { email, password });
+    const r = await bg("INVSPRNT_SIGN_IN_PASSWORD", { email, password });
     if (!r?.ok) throw new Error(r?.error || "Sign in failed");
     $("pop-password").value = "";
     await refresh();
@@ -36,7 +36,7 @@ $("pop-signin-form").addEventListener("submit", async (e) => {
 });
 
 $("pop-signout").addEventListener("click", async () => {
-  await bg("ARBIPRO_SIGN_OUT");
+  await bg("INVSPRNT_SIGN_OUT");
   refresh();
 });
 

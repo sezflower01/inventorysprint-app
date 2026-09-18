@@ -3,7 +3,7 @@
 // page works without changes.
 importScripts("config.js");
 
-const CFG = self.ARBIPRO_CFG;
+const CFG = self.INVSPRNT_CFG;
 
 async function getSession() {
   const { arbipro_session } = await chrome.storage.local.get("arbipro_session");
@@ -37,7 +37,7 @@ const STALE_TOKEN_GRACE_MS = 10 * 60 * 1000; // 10 min
 
 function logAuth(event, extra) {
   try {
-    const tag = "[arbipro-auth]";
+    const tag = "[InvSPRNT-auth]";
     if (extra !== undefined) console.log(tag, event, extra);
     else console.log(tag, event);
   } catch (_) { /* ignore */ }
@@ -248,39 +248,39 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     try {
       switch (msg?.type) {
-        case "ARBIPRO_SET_SESSION":
+        case "INVSPRNT_SET_SESSION":
           await setSession(msg.session); sendResponse({ ok: true }); break;
-        case "ARBIPRO_GET_SESSION": {
+        case "INVSPRNT_GET_SESSION": {
           const session = await getSession();
           const signed_out = await isSignedOutExplicit();
           sendResponse({ ok: true, session, signed_out });
           break;
         }
-        case "ARBIPRO_SIGN_OUT":
+        case "INVSPRNT_SIGN_OUT":
           await clearSessionExplicit("popup_signout");
           sendResponse({ ok: true });
           break;
-        case "ARBIPRO_SIGN_IN_PASSWORD": {
+        case "INVSPRNT_SIGN_IN_PASSWORD": {
           await signInWithPassword(msg.email, msg.password);
           sendResponse({ ok: true });
           break;
         }
-        case "ARBIPRO_EXPLICIT_SIGN_OUT":
+        case "INVSPRNT_EXPLICIT_SIGN_OUT":
           await clearSessionExplicit("web_app_logout");
           sendResponse({ ok: true });
           break;
-        case "ARBIPRO_INVOKE": {
+        case "INVSPRNT_INVOKE": {
           const data = await invoke(msg.fn, msg.body);
           sendResponse({ ok: true, data });
           break;
         }
-        case "ARBIPRO_LOOKUP_FNSKU": {
+        case "INVSPRNT_LOOKUP_FNSKU": {
           const asin = encodeURIComponent(msg.asin);
           const data = await restGet(`fnsku_map?asin=eq.${asin}&select=fnsku,condition&limit=1`);
           sendResponse({ ok: true, data: Array.isArray(data) ? data[0] || null : null });
           break;
         }
-        case "ARBIPRO_GET_PRIMARY_SELLER_AUTH": {
+        case "INVSPRNT_GET_PRIMARY_SELLER_AUTH": {
           const s = await ensureFreshSession();
           const uid = userIdFromJWT(s.access_token);
           const rows = await restGet(
@@ -291,7 +291,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data: picked });
           break;
         }
-        case "ARBIPRO_LOAD_FNSKU_SOURCES": {
+        case "INVSPRNT_LOAD_FNSKU_SOURCES": {
           const s = await ensureFreshSession();
           const uid = userIdFromJWT(s.access_token);
           const asin = encodeURIComponent(String(msg.asin || "").trim().toUpperCase());
@@ -312,7 +312,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data: { fnskuRows, inventoryRows, createdListingRows } });
           break;
         }
-        case "ARBIPRO_LOAD_MARKETPLACES": {
+        case "INVSPRNT_LOAD_MARKETPLACES": {
           // List user's connected marketplaces (selling regions).
           const s = await ensureFreshSession();
           const uid = userIdFromJWT(s.access_token);
@@ -324,7 +324,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data: { marketplaces: data || [], primary: prof?.[0]?.primary_marketplace_id || null } });
           break;
         }
-        case "ARBIPRO_GET_IMAGE_FALLBACK": {
+        case "INVSPRNT_GET_IMAGE_FALLBACK": {
           // Used by the panel before saving a created_listings row when the
           // Amazon DOM/Catalog scrape returned no image. We pull from the
           // user's own inventory and active_created_listings views first
@@ -347,7 +347,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data: { image_url } });
           break;
         }
-        case "ARBIPRO_SAVE_LISTING": {
+        case "INVSPRNT_SAVE_LISTING": {
           const s = await ensureFreshSession();
           const uid = userIdFromJWT(s.access_token);
           // Phase 4 (C2) — strip client-only hints, derive validation_status.
@@ -382,7 +382,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data });
           break;
         }
-        case "ARBIPRO_SAVE_THINKING": {
+        case "INVSPRNT_SAVE_THINKING": {
           // "Still Thinking to buy" — lightweight save before commit.
           // No cost/units required. Stores ASIN + image + title + supplier
           // URL (auto from current Amazon/source tab or first supplier slot).
@@ -433,7 +433,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data });
           break;
         }
-        case "ARBIPRO_FIND_LISTING": {
+        case "INVSPRNT_FIND_LISTING": {
           const s = await ensureFreshSession();
           const uid = userIdFromJWT(s.access_token);
           const asinRaw = String(msg.asin || "").trim().toUpperCase();
@@ -600,7 +600,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data: row });
           break;
         }
-        case "ARBIPRO_SEARCH_BY_SUPPLIER": {
+        case "INVSPRNT_SEARCH_BY_SUPPLIER": {
           const s = await ensureFreshSession();
           const uid = userIdFromJWT(s.access_token);
           const query = String(msg.query || "").trim().toLowerCase();
@@ -651,7 +651,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data: matches.slice(0, 100) });
           break;
         }
-        case "ARBIPRO_SEARCH_BY_TITLE": {
+        case "INVSPRNT_SEARCH_BY_TITLE": {
           const s = await ensureFreshSession();
           const uid = userIdFromJWT(s.access_token);
           const query = String(msg.query || "").trim();
@@ -666,7 +666,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data: Array.isArray(data) ? data : [] });
           break;
         }
-        case "ARBIPRO_ADD_PURCHASE": {
+        case "INVSPRNT_ADD_PURCHASE": {
           const s = await ensureFreshSession();
           const uid = userIdFromJWT(s.access_token);
           const src = msg.source || {};
@@ -714,7 +714,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data });
           break;
         }
-        case "ARBIPRO_UPDATE_LISTING": {
+        case "INVSPRNT_UPDATE_LISTING": {
           // Mirrors src/components/listings/EditListingDialog.tsx save contract:
           //   cost = Total Cost, units = Units, amount = per-unit COG,
           //   supplier_links = normalized array. RLS scopes update to user_id.
@@ -740,7 +740,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data });
           break;
         }
-        case "ARBIPRO_REPLENISH_FORECAST": {
+        case "INVSPRNT_REPLENISH_FORECAST": {
           // Mirrors src/pages/tools/NeedBuyAgain.tsx + src/lib/replenishment.ts
           // Aggregates a single ASIN's stock + sales velocity and returns the
           // same replenishment breakdown the web "Need to Buy Again" page uses.

@@ -45,7 +45,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [emailVerified, setEmailVerified] = useState(false);
   const [loading, setLoading] = useState(true);
 
-  // Silently hand the session to the ArbiProSeller Chrome extension. Its
+  // Silently hand the session to the InventorySprint Chrome extensions. Its
   // content script (handoff.js) already listens for this on every page of
   // the site — previously only /tools/ext-handoff ever sent it, which meant
   // "connecting" the extension required visiting a dedicated tab and staring
@@ -170,7 +170,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     // there's nothing to hydrate and no race) the original fast release.
     //
     // UPDATE: Supabase's own /auth endpoint has documented intermittent
-    // slowness (the ArbiProSeller Chrome extension's background.js was
+    // slowness (the InventorySprint Chrome extension's background.js was
     // already hardened for this — REFRESH_TIMEOUT_MS / STALE_TOKEN_GRACE_MS —
     // because the exact same freeze was hitting extension panels too). The
     // web app had no equivalent fallback and would hang on this screen for
@@ -273,7 +273,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   const signOut = async () => {
     manualSignOutInFlight = true;
-    // Broadcast to ArbiProSeller Chrome extensions BEFORE we tear down the
+    // Broadcast to InventorySprint Chrome extensions BEFORE we tear down the
     // Supabase session so their content scripts can forward the signal.
     try {
       window.postMessage({ type: "ARBIPRO_EXT_LOGOUT" }, window.location.origin);

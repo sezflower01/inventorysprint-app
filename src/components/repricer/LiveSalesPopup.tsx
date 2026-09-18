@@ -561,7 +561,7 @@ const LiveSalesPopup = ({ open, onOpenChange, marketplace: initialMarketplace = 
             <div className="p-1.5 rounded-lg bg-emerald-500/10">
               <ShoppingCart className="h-5 w-5 text-emerald-500" />
             </div>
-            ArbiPro Repricer in Action
+            InventorySprint Repricer in Action
           </DialogTitle>
           <DialogDescription className="sr-only">
             Live sales summary with product image, title, ASIN, units sold, and revenue.

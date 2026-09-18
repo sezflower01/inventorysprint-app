@@ -1,7 +1,7 @@
 // Panel UI logic. Receives ASIN_CHANGED from content.js, calls edge functions
 // via background.js, renders data, and computes profit/ROI + decision signal.
 (function () {
-  const CFG = self.ARBIPRO_CFG;
+  const CFG = self.INVSPRNT_CFG;
   const $ = (id) => document.getElementById(id);
 
   const fmtMoney = (n, ccy = "USD") => {
@@ -94,7 +94,7 @@
   let fxLoadPromise = null;
   function ensureFxRates() {
     if (fxLoadPromise) return fxLoadPromise;
-    fxLoadPromise = bg("ARBIPRO_LOAD_FX", {})
+    fxLoadPromise = bg("INVSPRNT_LOAD_FX", {})
       .then((r) => {
         if (r?.data && typeof r.data === "object") {
           state.fxRates = { USD: 1, ...r.data };
@@ -206,7 +206,7 @@
     if (feeRetryTimer) clearTimeout(feeRetryTimer);
     feeRetryTimer = setTimeout(async () => {
       try {
-        const prod = await bg("ARBIPRO_INVOKE", { fn: "fetch-listing-snapshot", body: { asin, marketplaceId: marketplaceIdFor(marketplace) } }).then(r => r?.data ?? null);
+        const prod = await bg("INVSPRNT_INVOKE", { fn: "fetch-listing-snapshot", body: { asin, marketplaceId: marketplaceIdFor(marketplace) } }).then(r => r?.data ?? null);
         if (state.asin !== asin || state.marketplace !== marketplace) return;
         const hasFees = getActualFeeTotal(prod?.fees) != null;
         if (hasFees) {
@@ -251,7 +251,7 @@
     if (gatingRetryTimer) clearTimeout(gatingRetryTimer);
     gatingRetryTimer = setTimeout(async () => {
       try {
-        const prod = await bg("ARBIPRO_INVOKE", { fn: "fetch-listing-snapshot", body: { asin, marketplaceId: marketplaceIdFor(marketplace) } }).then(r => r?.data ?? null);
+        const prod = await bg("INVSPRNT_INVOKE", { fn: "fetch-listing-snapshot", body: { asin, marketplaceId: marketplaceIdFor(marketplace) } }).then(r => r?.data ?? null);
         if (state.asin !== asin || state.marketplace !== marketplace) return;
         if (prod) {
           // Same clear-then-apply pattern as the main fetch (loadData) so a
@@ -297,7 +297,7 @@
   }
 
   function postHost(msg) {
-    parent.postMessage({ source: "arbipro-panel", ...msg }, "*");
+    parent.postMessage({ source: "invsprnt-panel", ...msg }, "*");
   }
 
   // ── Background bridge ──────────────────────────────────────────────
@@ -346,7 +346,7 @@
     // directly; content.js does it (its message listener needs no chrome APIs,
     // so it still works when the extension context is gone).
     btn.addEventListener("click", () => {
-      window.parent.postMessage({ source: "arbipro-panel", type: "RELOAD_PAGE" }, "*");
+      window.parent.postMessage({ source: "invsprnt-panel", type: "RELOAD_PAGE" }, "*");
     });
     bar.append(text, btn);
     document.body.prepend(bar);
@@ -420,7 +420,7 @@
   async function checkSession() {
     const wasSignedIn = state.signedIn;
     try {
-      const { session } = await bg("ARBIPRO_GET_SESSION");
+      const { session } = await bg("INVSPRNT_GET_SESSION");
       state.signedIn = !!session?.access_token;
     } catch { state.signedIn = false; }
     $("apx-signin").classList.toggle("hidden", state.signedIn);
@@ -442,7 +442,7 @@
   async function checkAdminStatus() {
     try {
       const r = await new Promise((resolve) =>
-        safeSendMessage({ type: "ARBIPRO_CHECK_ADMIN" }, resolve));
+        safeSendMessage({ type: "INVSPRNT_CHECK_ADMIN" }, resolve));
       state.isAdmin = !!(r?.ok && r.isAdmin);
     } catch (e) {
       console.warn("[apx] admin check failed", e?.message || e);
@@ -550,7 +550,7 @@
     if (state.signedIn) {
       try {
         const r = await new Promise((resolve, reject) =>
-          safeSendMessage({ type: "ARBIPRO_LOAD_COST", asin: a }, (resp) =>
+          safeSendMessage({ type: "INVSPRNT_LOAD_COST", asin: a }, (resp) =>
             resp?.ok ? resolve(resp.data) : reject(new Error(resp?.error || "load failed")),
           ),
         );
@@ -598,7 +598,7 @@
         units,
         sale_price_override: Number.isFinite(sale) ? sale : null,
       };
-      safeSendMessage({ type: "ARBIPRO_SAVE_COST", row }, (r) => {
+      safeSendMessage({ type: "INVSPRNT_SAVE_COST", row }, (r) => {
         const err = chrome.runtime.lastError;
         if (err) { console.warn("[InvSPRNT] saveCost bridge", err.message); return; }
         if (!r?.ok) console.warn("[InvSPRNT] saveCost db", r?.error);
@@ -1387,7 +1387,7 @@
     const safeInvoke = (fn, body, ms = 25000) => {
       delete lastInvokeError[fn];
       return withTimeout(
-        bg("ARBIPRO_INVOKE", { fn, body }).then(r => r?.data ?? null),
+        bg("INVSPRNT_INVOKE", { fn, body }).then(r => r?.data ?? null),
         ms,
         fn,
       );
@@ -1587,7 +1587,7 @@
     // Skip recording until we have at least a title or image — prevents bare "(no Amazon match)" rows.
     if (!row.title && !row.image_url) return;
     await new Promise((resolve) =>
-      safeSendMessage({ type: "ARBIPRO_SAVE_SCAN", row }, (r) => {
+      safeSendMessage({ type: "INVSPRNT_SAVE_SCAN", row }, (r) => {
         // Dedup marker only — losing it just means one extra recorded scan.
         if (r?.ok) chrome.storage.local.set({ [key]: Date.now() }).catch(() => {});
         resolve(r);
@@ -2447,7 +2447,7 @@
     if (brandHistoryState.key === key) return; // already fetched/fetching for this exact scan
     brandHistoryState.key = key;
     renderBrandHistory({ loading: true });
-    safeSendMessage({ type: "ARBIPRO_INVOKE", fn: "brand-history-lookup", body: { brand: b, asin: a } }, (r) => {
+    safeSendMessage({ type: "INVSPRNT_INVOKE", fn: "brand-history-lookup", body: { brand: b, asin: a } }, (r) => {
       if (brandHistoryState.key !== key) return; // stale response — ASIN changed since this fired
       if (r?.ok && r.data && !r.data.error) {
         renderBrandHistory(r.data);
@@ -2543,7 +2543,7 @@
     dmState.recorded = null;
     updateDmUi("saving");
 
-    safeSendMessage({ type: "ARBIPRO_LOG_DECISION", row }, (r) => {
+    safeSendMessage({ type: "INVSPRNT_LOG_DECISION", row }, (r) => {
       if (r?.ok && r.data?.id) {
         dmState.decisionId = r.data.id;
         updateDmUi("ready");
@@ -2585,7 +2585,7 @@
         const status = $("apx-dm-memory-status");
         if (status) status.textContent = `Saving ${action}…`;
         safeSendMessage({
-          type: "ARBIPRO_RECORD_DECISION_ACTION",
+          type: "INVSPRNT_RECORD_DECISION_ACTION",
           row: {
             decision_id: dmState.decisionId,
             asin: String(state.asin || "").toUpperCase(),
@@ -2872,7 +2872,7 @@
       const prevText = simAlertBtn.textContent;
       simAlertBtn.textContent = "Sending…";
       try {
-        const resp = await bg("ARBIPRO_INVOKE", {
+        const resp = await bg("INVSPRNT_INVOKE", {
           fn: "create-price-alert",
           body: { asin: state.asin, marketplace: state.marketplace, targetPrice, notifyEmail: email },
         });
@@ -2955,7 +2955,7 @@
     btn.disabled = true;
     btn.textContent = "Signing in…";
     try {
-      await bg("ARBIPRO_SIGN_IN_PASSWORD", { email, password }, { timeoutMs: 12000 });
+      await bg("INVSPRNT_SIGN_IN_PASSWORD", { email, password }, { timeoutMs: 12000 });
       $("apx-signin-password").value = "";
       // No explicit refresh here — the chrome.storage.onChanged listener
       // below already calls checkSession() the moment setSession() writes
@@ -3035,7 +3035,7 @@
       setStatus("Exporting your decision memory…");
       jsonBtn.disabled = true; csvBtn.disabled = true;
       try {
-        const resp = await bg("ARBIPRO_EXPORT_DECISION_MEMORY");
+        const resp = await bg("INVSPRNT_EXPORT_DECISION_MEMORY");
         return resp?.data || { logs: [], actions: [] };
       } finally {
         jsonBtn.disabled = false; csvBtn.disabled = false;
@@ -3053,7 +3053,7 @@
           analyzer_decision_log: data.logs || [],
           analyzer_decision_action: data.actions || [],
         };
-        download(`arbipro-decision-memory-${tsStamp()}.json`, JSON.stringify(payload, null, 2), "application/json");
+        download(`inventorysprint-decision-memory-${tsStamp()}.json`, JSON.stringify(payload, null, 2), "application/json");
         setStatus(`Exported ${payload.counts.logs} scans + ${payload.counts.actions} actions (JSON).`, "ok");
       } catch (e) {
         setStatus("Export failed: " + (e?.message || e), "err");
@@ -3066,9 +3066,9 @@
         const logsCsv = toCsv(data.logs || []);
         const actionsCsv = toCsv(data.actions || []);
         const stamp = tsStamp();
-        download(`arbipro-decision-log-${stamp}.csv`, logsCsv, "text/csv");
+        download(`inventorysprint-decision-log-${stamp}.csv`, logsCsv, "text/csv");
         // Small delay so browsers don't merge the two downloads.
-        setTimeout(() => download(`arbipro-decision-actions-${stamp}.csv`, actionsCsv, "text/csv"), 400);
+        setTimeout(() => download(`inventorysprint-decision-actions-${stamp}.csv`, actionsCsv, "text/csv"), 400);
         setStatus(`Exported ${data.logs?.length || 0} scans + ${data.actions?.length || 0} actions (CSV).`, "ok");
       } catch (e) {
         setStatus("Export failed: " + (e?.message || e), "err");
@@ -3083,7 +3083,7 @@
   // ── Receive ASIN updates from content script ───────────────────────
   window.addEventListener("message", async (e) => {
     const d = e.data;
-    if (!d || d.source !== "arbipro-host") return;
+    if (!d || d.source !== "invsprnt-host") return;
     if (d.type === "RESTORE_STATE") {
       applyCollapsed(!!d.collapsed);
       return;

@@ -41,7 +41,11 @@
   // chrome.* -- instead of throwing on every Amazon DOM mutation.
   const INSTANCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const INSTANCE_ATTR = "data-invsprnt-analyzer";
-  for (const id of ["arbipro-panel-frame", "arbipro-launcher"]) document.getElementById(id)?.remove();
+  // Legacy "arbipro-*" ids too: tabs still running a pre-rename copy (<= 1.4.4)
+  // carry those, and the copy injected on update must clear them as well.
+  for (const id of ["invsprnt-panel-frame", "invsprnt-launcher", "arbipro-panel-frame", "arbipro-launcher"]) {
+    document.getElementById(id)?.remove();
+  }
   document.documentElement.setAttribute(INSTANCE_ATTR, INSTANCE);
 
   let retired = false;
@@ -102,7 +106,7 @@
     if (iframe) return iframe;
     if (!usable()) return null; // getURL throws once the context is gone
     iframe = document.createElement("iframe");
-    iframe.id = "arbipro-panel-frame";
+    iframe.id = "invsprnt-panel-frame";
     iframe.src = chrome.runtime.getURL("panel.html");
     iframe.allow = "clipboard-write";
     document.documentElement.appendChild(iframe);
@@ -111,7 +115,7 @@
     return iframe;
   }
   const unmountPanel = () => { iframe?.remove(); iframe = null; };
-  const postToPanel = (msg) => iframe?.contentWindow?.postMessage({ source: "arbipro-host", ...msg }, "*");
+  const postToPanel = (msg) => iframe?.contentWindow?.postMessage({ source: "invsprnt-host", ...msg }, "*");
 
   // Floating launcher shown when the panel is hidden so users can re-open
   // it without needing to remember Alt+A.
@@ -120,7 +124,7 @@
     if (launcher) return launcher;
     if (!usable()) return null;
     launcher = document.createElement("button");
-    launcher.id = "arbipro-launcher";
+    launcher.id = "invsprnt-launcher";
     launcher.type = "button";
     launcher.title = "Open InventorySprint (Alt+A)";
     const launcherIcon = document.createElement("img");
@@ -154,12 +158,12 @@
 
   window.addEventListener("message", (e) => {
     const d = e.data;
-    if (!d || d.source !== "arbipro-panel") return;
+    if (!d || d.source !== "invsprnt-panel") return;
     // The panel's "Reload page" button. Handled even by a retired copy -- it
     // needs no chrome.* API, and a cut-off tab is exactly when it is pressed.
     // Only from our own frame: any script on the page can postMessage.
     if (d.type === "RELOAD_PAGE") {
-      const frame = document.getElementById("arbipro-panel-frame");
+      const frame = document.getElementById("invsprnt-panel-frame");
       if (frame && e.source === frame.contentWindow) location.reload();
       return;
     }

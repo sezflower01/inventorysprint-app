@@ -1,7 +1,7 @@
 // Service worker — token storage, refresh, and edge-function proxy.
 importScripts("config.js");
 
-const CFG = self.ARBIPRO_CFG;
+const CFG = self.INVSPRNT_CFG;
 
 async function getSession() {
   const { arbipro_session } = await chrome.storage.local.get("arbipro_session");
@@ -38,7 +38,7 @@ const STALE_TOKEN_GRACE_MS = 10 * 60 * 1000; // 10 min last-known-good window
 
 function logAuth(event, extra) {
   try {
-    const tag = "[arbipro-auth]";
+    const tag = "[InvSPRNT-auth]";
     if (extra !== undefined) console.log(tag, event, extra);
     else console.log(tag, event);
   } catch (_) { /* ignore */ }
@@ -272,37 +272,37 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     try {
       switch (msg?.type) {
-        case "ARBIPRO_SET_SESSION":
+        case "INVSPRNT_SET_SESSION":
           await setSession(msg.session);
           sendResponse({ ok: true });
           break;
-        case "ARBIPRO_GET_SESSION": {
+        case "INVSPRNT_GET_SESSION": {
           const session = await getSession();
           const signed_out = await isSignedOutExplicit();
           sendResponse({ ok: true, session, signed_out });
           break;
         }
-        case "ARBIPRO_SIGN_OUT":
+        case "INVSPRNT_SIGN_OUT":
           // Local-only sign out from inside the extension popup.
           await clearSessionExplicit("popup_signout");
           sendResponse({ ok: true });
           break;
-        case "ARBIPRO_SIGN_IN_PASSWORD": {
+        case "INVSPRNT_SIGN_IN_PASSWORD": {
           await signInWithPassword(msg.email, msg.password);
           sendResponse({ ok: true });
           break;
         }
-        case "ARBIPRO_EXPLICIT_SIGN_OUT":
+        case "INVSPRNT_EXPLICIT_SIGN_OUT":
           // Broadcast from inventorysprint.com web app — user clicked Log out.
           await clearSessionExplicit("web_app_logout");
           sendResponse({ ok: true });
           break;
-        case "ARBIPRO_INVOKE": {
+        case "INVSPRNT_INVOKE": {
           const data = await invoke(msg.fn, msg.body);
           sendResponse({ ok: true, data });
           break;
         }
-        case "ARBIPRO_SAVE_SCAN": {
+        case "INVSPRNT_SAVE_SCAN": {
           // Inject user_id from JWT so RLS passes.
           const s = await ensureFreshSession();
           const payload = JSON.parse(atob(s.access_token.split(".")[1]));
@@ -311,7 +311,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data });
           break;
         }
-        case "ARBIPRO_SAVE_COST": {
+        case "INVSPRNT_SAVE_COST": {
           // Persist cost-per-ASIN via SECURITY DEFINER RPC. Avoids the
           // broken upsert path (duplicate rows + barcode unique-index conflict
           // with historical scan rows) that silently dropped writes.
@@ -342,7 +342,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data });
           break;
         }
-        case "ARBIPRO_LOAD_COST": {
+        case "INVSPRNT_LOAD_COST": {
           const s = await ensureFreshSession();
           const payload = JSON.parse(atob(s.access_token.split(".")[1]));
           const asin = encodeURIComponent(msg.asin);
@@ -352,7 +352,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data: Array.isArray(data) ? data[0] || null : null });
           break;
         }
-        case "ARBIPRO_CHECK_ADMIN": {
+        case "INVSPRNT_CHECK_ADMIN": {
           // Gates admin-only panel affordances (e.g. the decision-JSON debug
           // button). Same RLS-scoped self-read the web app's admin settings
           // already relies on — a user can read their own user_roles row.
@@ -364,7 +364,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, isAdmin: Array.isArray(data) && data.length > 0 });
           break;
         }
-        case "ARBIPRO_LOG_DECISION": {
+        case "INVSPRNT_LOG_DECISION": {
           // Inject user_id from JWT so RLS passes; mirrors web ProductAnalyzer schema.
           const s = await ensureFreshSession();
           const payload = JSON.parse(atob(s.access_token.split(".")[1]));
@@ -373,7 +373,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data });
           break;
         }
-        case "ARBIPRO_RECORD_DECISION_ACTION": {
+        case "INVSPRNT_RECORD_DECISION_ACTION": {
           const s = await ensureFreshSession();
           const payload = JSON.parse(atob(s.access_token.split(".")[1]));
           const row = { ...msg.row, user_id: payload.sub };
@@ -381,7 +381,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data });
           break;
         }
-        case "ARBIPRO_EXPORT_DECISION_MEMORY": {
+        case "INVSPRNT_EXPORT_DECISION_MEMORY": {
           // Pulls the caller's full decision memory (RLS restricts to user_id).
           // Paginates in 1000-row chunks since PostgREST defaults cap at 1000.
           const s = await ensureFreshSession();
@@ -409,7 +409,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data: { logs, actions, user_id: uid, exported_at: new Date().toISOString() } });
           break;
         }
-        case "ARBIPRO_LOAD_FX": {
+        case "INVSPRNT_LOAD_FX": {
           // Load USD->X conversion rates so the panel can convert a USD
           // source cost into the marketplace currency for accurate ROI.
           // fx_rates is readable by any authenticated user (public SELECT).
@@ -462,10 +462,10 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
           injected++;
         } catch (e) {
           failed++;
-          console.debug("[arbipro] re-inject skipped for tab", tab.id, e?.message || e);
+          console.debug("[InvSPRNT] re-inject skipped for tab", tab.id, e?.message || e);
         }
       }
     }
-    console.log(`[arbipro] ${reason}: re-injected content scripts into ${injected} open tab(s), ${failed} skipped`);
+    console.log(`[InvSPRNT] ${reason}: re-injected content scripts into ${injected} open tab(s), ${failed} skipped`);
   })();
 });

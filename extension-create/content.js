@@ -36,7 +36,12 @@
   // an invalid context and goes quiet through handleContextInvalidated().
   const INSTANCE = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const INSTANCE_ATTR = "data-invsprnt-create";
-  for (const id of ["arbipro-create-panel-frame", "arbipro-create-launcher", "arbipro-create-drag-overlay"]) {
+  // Legacy "arbipro-create-*" ids too: tabs still running a pre-rename copy
+  // (<= 1.5.2) carry those, and the copy injected on update must clear them.
+  for (const id of [
+    "invsprnt-create-panel-frame", "invsprnt-create-launcher", "invsprnt-create-drag-overlay",
+    "arbipro-create-panel-frame", "arbipro-create-launcher", "arbipro-create-drag-overlay",
+  ]) {
     document.getElementById(id)?.remove();
   }
   document.documentElement.setAttribute(INSTANCE_ATTR, INSTANCE);
@@ -152,7 +157,7 @@
     if (iframe) return iframe;
     if (!isExtensionContextValid()) { handleContextInvalidated(); return null; }
     iframe = document.createElement("iframe");
-    iframe.id = "arbipro-create-panel-frame";
+    iframe.id = "invsprnt-create-panel-frame";
     iframe.src = chrome.runtime.getURL("panel.html");
     iframe.allow = "clipboard-write";
     document.documentElement.appendChild(iframe);
@@ -161,14 +166,14 @@
     return iframe;
   }
   const unmountPanel = () => { iframe?.remove(); iframe = null; };
-  const postToPanel = (msg) => iframe?.contentWindow?.postMessage({ source: "arbipro-host", ...msg }, "*");
+  const postToPanel = (msg) => iframe?.contentWindow?.postMessage({ source: "invsprnt-host", ...msg }, "*");
 
   let launcher = null;
   function ensureLauncher() {
     if (launcher) return launcher;
     if (!isExtensionContextValid()) { handleContextInvalidated(); return null; }
     launcher = document.createElement("button");
-    launcher.id = "arbipro-create-launcher";
+    launcher.id = "invsprnt-create-launcher";
     launcher.type = "button";
     launcher.title = "Open Create Listing (Alt+A)";
     const launcherIcon = document.createElement("img");
@@ -205,7 +210,7 @@
   function ensureOverlay() {
     if (overlay) return overlay;
     overlay = document.createElement("div");
-    overlay.id = "arbipro-create-drag-overlay";
+    overlay.id = "invsprnt-create-drag-overlay";
     Object.assign(overlay.style, {
       position: "fixed", inset: "0", zIndex: "2147483646",
       cursor: "grabbing", background: "transparent",
@@ -254,11 +259,11 @@
 
   window.addEventListener("message", (e) => {
     const d = e.data;
-    if (!d || d.source !== "arbipro-create-panel") return;
+    if (!d || d.source !== "invsprnt-create-panel") return;
     // The panel's "Reload page" button. Needs no chrome.* API, so it works
     // even in a cut-off copy. Accepted only from our own panel frame.
     if (d.type === "RELOAD_PAGE") {
-      const frame = document.getElementById("arbipro-create-panel-frame");
+      const frame = document.getElementById("invsprnt-create-panel-frame");
       if (frame && e.source === frame.contentWindow) location.reload();
       return;
     }

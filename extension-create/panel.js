@@ -40,7 +40,7 @@ async function checkFbaEligibility(asin, row = {}, force = false) {
   const code = marketplaceCodeForRow(row);
   const m = MARKETPLACES[code] || MARKETPLACES.US;
   const condition = row.condition || $("apx-cond")?.value || "new_new";
-  const r = await bg("ARBIPRO_INVOKE", {
+  const r = await bg("INVSPRNT_INVOKE", {
     fn: "check-fba-listing-eligibility",
     body: { asin, marketplace: code, marketplaceId: m.id, condition, force },
   });
@@ -214,7 +214,7 @@ function showExtensionUpdated() {
     background: "#b45309", color: "#fff", font: "600 12px system-ui, sans-serif", cursor: "pointer",
   });
   btn.addEventListener("click", () => {
-    window.parent.postMessage({ source: "arbipro-create-panel", type: "RELOAD_PAGE" }, "*");
+    window.parent.postMessage({ source: "invsprnt-create-panel", type: "RELOAD_PAGE" }, "*");
   });
   bar.append(text, btn);
   document.body.prepend(bar);
@@ -269,7 +269,7 @@ const state = {
 };
 
 /* ─── Drag — host content.js owns mouse tracking via overlay ─── */
-const post = (msg) => parent.postMessage({ source: "arbipro-create-panel", ...msg }, "*");
+const post = (msg) => parent.postMessage({ source: "invsprnt-create-panel", ...msg }, "*");
 $("apx-drag").addEventListener("mousedown", (e) => {
   if (e.target.closest("button")) return;
   post({ type: "DRAG_BEGIN", sx: e.screenX, sy: e.screenY });
@@ -291,7 +291,7 @@ $("apx-collapse").addEventListener("click", () => applyCollapsed(!collapsed));
 
 window.addEventListener("message", (e) => {
   const d = e.data;
-  if (!d || d.source !== "arbipro-host") return;
+  if (!d || d.source !== "invsprnt-host") return;
   if (d.type === "RESTORE_STATE") {
     collapsed = !!d.collapsed;
     $("apx-body").classList.toggle("hidden", collapsed);
@@ -412,7 +412,7 @@ async function pushRecentSupplier(url) {
 /* ─── Auth gating ─── */
 async function checkAuth() {
   const wasSignedIn = state.signedIn;
-  const r = await bg("ARBIPRO_GET_SESSION");
+  const r = await bg("INVSPRNT_GET_SESSION");
   state.signedIn = !!r?.session?.access_token;
   $("apx-signin").classList.toggle("hidden", state.signedIn);
   $("apx-content").classList.toggle("hidden", !state.signedIn);
@@ -434,7 +434,7 @@ $("apx-signin-form").addEventListener("submit", async (e) => {
   btn.disabled = true;
   btn.textContent = "Signing in…";
   try {
-    const r = await bg("ARBIPRO_SIGN_IN_PASSWORD", { email, password });
+    const r = await bg("INVSPRNT_SIGN_IN_PASSWORD", { email, password });
     if (!r?.ok) throw new Error(r?.error || "Sign in failed");
     $("apx-signin-password").value = "";
     // No explicit refresh here — the chrome.storage.onChanged listener below
@@ -466,7 +466,7 @@ function getAuthorizedMarketplaceCodes() {
 }
 
 async function loadMarketplaces() {
-  const r = await bg("ARBIPRO_LOAD_MARKETPLACES");
+  const r = await bg("INVSPRNT_LOAD_MARKETPLACES");
   if (!r?.ok) return;
   state.marketplaces = r.data?.marketplaces || [];
   state.primaryMkt = r.data?.primary || null;
@@ -558,7 +558,7 @@ $("apx-fetch").addEventListener("click", async () => {
   if (!/^[A-Z0-9]{10}$/.test(asin)) { setStatus("apx-fetch-status", "Enter a valid 10-char ASIN", "err"); return; }
   state.asin = asin;
   setStatus("apx-fetch-status", "Fetching…");
-  const r = await bg("ARBIPRO_INVOKE", { fn: "fetch-listing-snapshot", body: { asin } });
+  const r = await bg("INVSPRNT_INVOKE", { fn: "fetch-listing-snapshot", body: { asin } });
   if (!r?.ok) { setStatus("apx-fetch-status", r?.error || "Failed", "err"); return; }
   state.product = r.data || {};
   setStatus("apx-fetch-status", "");
@@ -777,7 +777,7 @@ $("apx-validate").addEventListener("click", async () => {
   }
   setStatus("apx-action-status", fbaStatusText(elig));
   setStatus("apx-action-status", "Validating…");
-  const r = await bg("ARBIPRO_INVOKE", {
+  const r = await bg("INVSPRNT_INVOKE", {
     fn: "create-amazon-listing",
     body: buildListingPayload("VALIDATION_PREVIEW"),
   });
@@ -825,7 +825,7 @@ $("apx-create").addEventListener("click", async () => {
 
     // FNSKU lookup (non-blocking)
     let fnsku = null;
-    try { const r = await bg("ARBIPRO_LOOKUP_FNSKU", { asin: state.asin }); fnsku = r?.data?.fnsku || null; } catch {}
+    try { const r = await bg("INVSPRNT_LOOKUP_FNSKU", { asin: state.asin }); fnsku = r?.data?.fnsku || null; } catch {}
 
     const total = Number($("apx-totalcost").value) || 0;
     const units = Number($("apx-units").value) || 1;
@@ -838,7 +838,7 @@ $("apx-create").addEventListener("click", async () => {
     let imageUrl = state.product?.imageUrl || null;
     if (!imageUrl) {
       try {
-        const r = await bg("ARBIPRO_GET_IMAGE_FALLBACK", { asin: state.asin });
+        const r = await bg("INVSPRNT_GET_IMAGE_FALLBACK", { asin: state.asin });
         if (r?.ok && r.data?.image_url) imageUrl = r.data.image_url;
       } catch {}
     }
@@ -865,14 +865,14 @@ $("apx-create").addEventListener("click", async () => {
       validation_started_at: getMode() === "amazon" && !blocked && ($("apx-fc")?.value || "").toUpperCase() === "FBA" ? new Date().toISOString() : null,
     };
 
-    const ins = await bg("ARBIPRO_SAVE_LISTING", { row });
+    const ins = await bg("INVSPRNT_SAVE_LISTING", { row });
     if (!ins?.ok) throw new Error(ins?.error || "DB insert failed");
 
     // Promote any saved supplier into the recent-suppliers list for next time.
     for (const s of supplierLinks) await pushRecentSupplier(s.link);
 
     if (getMode() === "amazon" && !blocked) {
-      const r = await bg("ARBIPRO_INVOKE", {
+      const r = await bg("INVSPRNT_INVOKE", {
         fn: "create-amazon-listing",
         body: { ...buildListingPayload("SUBMIT"), createdListingId: ins?.data?.id || null },
       });
@@ -914,12 +914,12 @@ $("apx-thinking")?.addEventListener("click", async () => {
     let imageUrl = state.product?.imageUrl || null;
     if (!imageUrl) {
       try {
-        const r = await bg("ARBIPRO_GET_IMAGE_FALLBACK", { asin: state.asin });
+        const r = await bg("INVSPRNT_GET_IMAGE_FALLBACK", { asin: state.asin });
         if (r?.ok && r.data?.image_url) imageUrl = r.data.image_url;
       } catch {}
     }
 
-    const r = await bg("ARBIPRO_SAVE_THINKING", {
+    const r = await bg("INVSPRNT_SAVE_THINKING", {
       row: {
         asin: state.asin,
         title: state.product?.title || null,
@@ -945,7 +945,7 @@ $("apx-thinking")?.addEventListener("click", async () => {
 });
 
 /* ─── Open records pages in InventorySprint ─── */
-const APP_BASE = (self.ARBIPRO_CFG?.APP_URL || "https://inventorysprint.com").replace(/\/+$/, "");
+const APP_BASE = (self.INVSPRNT_CFG?.APP_URL || "https://inventorysprint.com").replace(/\/+$/, "");
 $("apx-open-thinking")?.addEventListener("click", () => {
   chrome.tabs.create({ url: `${APP_BASE}/tools/still-thinking` });
 });
@@ -1133,7 +1133,7 @@ async function loadReplenishForecast(asin) {
   $("apx-rep-status").textContent = "Calculating from your inventory + 90-day sales…";
   $("apx-rep-status").style.color = "var(--muted)";
   try {
-    const r = await bg("ARBIPRO_REPLENISH_FORECAST", { asin });
+    const r = await bg("INVSPRNT_REPLENISH_FORECAST", { asin });
     if (!r?.ok) throw new Error(r?.error || "Forecast failed");
     if (purchase.source?.asin !== asin) return; // stale
     renderReplenish(r.data || {});
@@ -1240,7 +1240,7 @@ async function localFnskuFallback(asin) {
   try {
     const options = await loadFnskuOptionsLikeWeb(asin, false).catch(() => []);
     if (Array.isArray(options) && options.some((o) => isValidFnsku(o?.fnsku))) return null;
-    const lookup = await bg("ARBIPRO_LOOKUP_FNSKU", { asin });
+    const lookup = await bg("INVSPRNT_LOOKUP_FNSKU", { asin });
     const fnsku = normalizeFnsku(lookup?.data?.fnsku);
     if (fnsku && fnsku === normalizeFnsku(asin)) {
       return {
@@ -1333,7 +1333,7 @@ $("apx-p-find").addEventListener("click", async () => {
   purchase.source = null;
   purchase.fbaElig = null;
   renderPurchaseFbaGate();
-  const r = await bg("ARBIPRO_FIND_LISTING", { asin });
+  const r = await bg("INVSPRNT_FIND_LISTING", { asin });
   if (!r?.ok) { setStatus("apx-p-find-status", r?.error || "Search failed", "err"); return; }
   if (!r.data) {
     setStatus("apx-p-find-status", "No existing listing for this ASIN. Switch to New Listing.", "err");
@@ -1366,7 +1366,7 @@ $("apx-p-add").addEventListener("click", async () => {
   setStatus("apx-p-action-status", "Saving…");
   $("apx-p-add").disabled = true;
   try {
-    const r = await bg("ARBIPRO_ADD_PURCHASE", {
+    const r = await bg("INVSPRNT_ADD_PURCHASE", {
       source: purchase.source,
       totalCost: total,
       units,
@@ -1381,7 +1381,7 @@ $("apx-p-add").addEventListener("click", async () => {
     $("apx-p-newunits").value = "1";
     recalcPurchaseCog();
     // Refresh card to show latest
-    const r2 = await bg("ARBIPRO_FIND_LISTING", { asin: purchase.source.asin });
+    const r2 = await bg("INVSPRNT_FIND_LISTING", { asin: purchase.source.asin });
     if (r2?.ok && r2.data) {
       const allRows2 = Array.isArray(r2.data._allRows) ? r2.data._allRows : [r2.data];
       const currentSku = purchase.source?.sku;
@@ -1476,7 +1476,7 @@ $("apx-p-supplier-find").addEventListener("click", async () => {
   $("apx-p-supplier-results").innerHTML = "";
   $("apx-p-card").classList.add("hidden");
   $("apx-p-form").classList.add("hidden");
-  const r = await bg("ARBIPRO_SEARCH_BY_SUPPLIER", { query: q });
+  const r = await bg("INVSPRNT_SEARCH_BY_SUPPLIER", { query: q });
   if (!r?.ok) { setStatus("apx-p-supplier-status", r?.error || "Search failed", "err"); return; }
   const rows = r.data || [];
   setStatus("apx-p-supplier-status", `${rows.length} match${rows.length === 1 ? "" : "es"}. Click a record to add a new purchase.`, rows.length ? "ok" : "err");
@@ -1538,7 +1538,7 @@ $("apx-p-title-find").addEventListener("click", async () => {
   $("apx-p-title-results").innerHTML = "";
   $("apx-p-card").classList.add("hidden");
   $("apx-p-form").classList.add("hidden");
-  const r = await bg("ARBIPRO_SEARCH_BY_TITLE", { query: q });
+  const r = await bg("INVSPRNT_SEARCH_BY_TITLE", { query: q });
   if (!r?.ok) { setStatus("apx-p-title-status", r?.error || "Search failed", "err"); return; }
   const rows = r.data || [];
   setStatus("apx-p-title-status", `${rows.length} match${rows.length === 1 ? "" : "es"}. Click a record to add a new purchase.`, rows.length ? "ok" : "err");
@@ -1614,13 +1614,13 @@ function renderPrintSafety() {
 }
 
 async function getPrimarySellerAuth() {
-  const r = await bg("ARBIPRO_GET_PRIMARY_SELLER_AUTH", {});
+  const r = await bg("INVSPRNT_GET_PRIMARY_SELLER_AUTH", {});
   return r?.ok ? r.data : null;
 }
 
 async function runRescueForSkus(asin, skus) {
   const results = await Promise.all((skus || []).map((sku) =>
-    bg("ARBIPRO_INVOKE", { fn: "rescue-inventory-asin", body: { asin, sku } })
+    bg("INVSPRNT_INVOKE", { fn: "rescue-inventory-asin", body: { asin, sku } })
   ));
   return results
     .map((result, index) => {
@@ -1634,7 +1634,7 @@ async function runRescueForSkus(asin, skus) {
 
 async function syncFnskuFromAmazon(asin) {
   try {
-    const live = await bg("ARBIPRO_INVOKE", { fn: "get-fnsku", body: { asin } });
+    const live = await bg("INVSPRNT_INVOKE", { fn: "get-fnsku", body: { asin } });
     const data = live?.data || {};
     const fnsku = (data.fnsku || "").toString().trim().toUpperCase();
     if (live?.ok && isValidFnsku(fnsku)) {
@@ -1651,7 +1651,7 @@ async function loadFnskuOptionsLikeWeb(asin, allowAutoSync = true) {
 
   // Helper: read every cached fnsku_map row for this ASIN.
   const readCached = async () => {
-    const sources = await bg("ARBIPRO_LOAD_FNSKU_SOURCES", { asin, sellerId, marketplaceId });
+    const sources = await bg("INVSPRNT_LOAD_FNSKU_SOURCES", { asin, sellerId, marketplaceId });
     const rows = Array.isArray(sources?.data?.fnskuRows) ? sources.data.fnskuRows : [];
     const inventoryRows = Array.isArray(sources?.data?.inventoryRows) ? sources.data.inventoryRows : [];
     const createdListingRows = Array.isArray(sources?.data?.createdListingRows) ? sources.data.createdListingRows : [];
@@ -1754,14 +1754,14 @@ async function loadFnskuOptionsLikeWeb(asin, allowAutoSync = true) {
   // (it now scans every known SKU for this ASIN and upserts NEW + USED + COLLECTIBLE rows).
   if (allowAutoSync && options.length < 2) {
     try {
-      await bg("ARBIPRO_INVOKE", { fn: "get-fnsku", body: { asin } });
+      await bg("INVSPRNT_INVOKE", { fn: "get-fnsku", body: { asin } });
     } catch (e) { /* swallow — fall back to cache */ }
     options = await readCached();
   }
 
   // Last-ditch: per-SKU rescue for any inventory SKU still missing from fnsku_map.
   if (allowAutoSync && options.length < 2) {
-    const sources = await bg("ARBIPRO_LOAD_FNSKU_SOURCES", { asin, sellerId, marketplaceId });
+    const sources = await bg("INVSPRNT_LOAD_FNSKU_SOURCES", { asin, sellerId, marketplaceId });
     const data = sources?.data || {};
     const inventoryRows = Array.isArray(data.inventoryRows) ? data.inventoryRows : [];
     const createdListingRows = Array.isArray(data.createdListingRows) ? data.createdListingRows : [];
@@ -1914,7 +1914,7 @@ $("apx-l-find").addEventListener("click", async () => {
   printState.options = [];
   printState.selectedOptionIndex = null;
   printState.fbaElig = null;
-  const r = await bg("ARBIPRO_FIND_LISTING", { asin });
+  const r = await bg("INVSPRNT_FIND_LISTING", { asin });
   if (!r?.ok) { setStatus("apx-l-find-status", r?.error || "Search failed", "err"); return; }
   let listing = r.data || { asin, title: asin, image_url: "" };
   const allRows = Array.isArray(r.data?._allRows) ? r.data._allRows : (r.data ? [r.data] : []);
@@ -1924,7 +1924,7 @@ $("apx-l-find").addEventListener("click", async () => {
     loadFnskuOptionsLikeWeb(asin, true).catch(() => []),
   ]);
   printState.fbaElig = elig;
-  // The listing row comes from ARBIPRO_FIND_LISTING, i.e. live, ghost-filtered
+  // The listing row comes from INVSPRNT_FIND_LISTING, i.e. live, ghost-filtered
   // inventory, and often already carries the FNSKU. With no options this used
   // to REPLACE it with null -- the card read "FNSKU: missing" for a listing
   // whose own row held a valid X-FNSKU (B00LFXMBKI, 2026-09-15). Keep it.
@@ -2077,10 +2077,10 @@ $("apx-l-print").addEventListener("click", async () => {
  * Created Listings page. Loads the most recent created_listings row
  * for an ASIN (with SKU picker when multiple), lets the user change
  * Total Cost / Units / COG (linked recalc) and supplier links, and
- * PATCHes created_listings by id via ARBIPRO_UPDATE_LISTING.
+ * PATCHes created_listings by id via INVSPRNT_UPDATE_LISTING.
  */
 const edit = {
-  row: null,       // currently selected row from ARBIPRO_FIND_LISTING
+  row: null,       // currently selected row from INVSPRNT_FIND_LISTING
   allRows: [],     // sibling SKU rows for the picker
   suppliers: [{ link: "", discount_code: "" }],
 };
@@ -2192,7 +2192,7 @@ $("apx-e-find")?.addEventListener("click", async () => {
   $("apx-e-card").classList.add("hidden");
   $("apx-e-form").classList.add("hidden");
   $("apx-e-sku-picker").classList.add("hidden");
-  const r = await bg("ARBIPRO_FIND_LISTING", { asin });
+  const r = await bg("INVSPRNT_FIND_LISTING", { asin });
   if (!r?.ok) { setStatus("apx-e-find-status", r?.error || "Not found in your Created Listings", "err"); return; }
   const row = r.data;
   if (!row) { setStatus("apx-e-find-status", "No listing found for this ASIN in your account", "err"); return; }
@@ -2239,7 +2239,7 @@ $("apx-e-save")?.addEventListener("click", async () => {
 
   $("apx-e-save").disabled = true;
   setStatus("apx-e-action-status", "Saving…");
-  const r = await bg("ARBIPRO_UPDATE_LISTING", {
+  const r = await bg("INVSPRNT_UPDATE_LISTING", {
     id: edit.row.id,
     patch: {
       cost: Number(tc.toFixed(2)),

@@ -1,7 +1,7 @@
-# ArbiProSeller — Chrome Extension
+# InventorySprint — Amazon Analyzer Chrome Extension
 
 A local Manifest V3 Chrome extension that auto-detects the ASIN on any Amazon
-product page and shows ArbiProSeller scanner data (Buy Box, FBA/FBM lowest,
+product page and shows InventorySprint scanner data (Buy Box, FBA/FBM lowest,
 Keepa 90-day stability, Amazon presence %, BSR, est. monthly sales,
 eligibility, fees, ROI/profit, and Decision Signal) — same logic as the
 mobile UPC scanner.

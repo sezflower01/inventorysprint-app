@@ -1056,7 +1056,7 @@ export default function CreatedListings() {
       }
       setAddingPurchase(true);
 
-      // Same contract as extension-create/background.js ARBIPRO_ADD_PURCHASE:
+      // Same contract as extension-create/background.js INVSPRNT_ADD_PURCHASE:
       // never update/upsert/merge the selected row. Every Add Purchase creates
       // a brand-new created_listings row with the exact same SKU and today's date.
       if (!user?.id) {

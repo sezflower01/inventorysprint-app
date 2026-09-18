@@ -20,13 +20,13 @@ function safeSend(msg, onAck) {
       // Swallow lastError so it doesn't bubble as "Unchecked runtime.lastError".
       const err = chrome.runtime?.lastError;
       if (err) {
-        try { console.debug("[arbipro-auth] sendMessage ignored:", err.message); } catch (_) {}
+        try { console.debug("[InvSPRNT-auth] sendMessage ignored:", err.message); } catch (_) {}
         return;
       }
       try { onAck && onAck(); } catch (_) {}
     });
   } catch (e) {
-    try { console.debug("[arbipro-auth] sendMessage threw (ignored):", e?.message); } catch (_) {}
+    try { console.debug("[InvSPRNT-auth] sendMessage threw (ignored):", e?.message); } catch (_) {}
   }
 }
 
@@ -39,16 +39,16 @@ window.addEventListener("message", (event) => {
     const s = data.session;
     if (!s?.access_token || !s?.refresh_token) return;
     safeSend(
-      { type: "ARBIPRO_SET_SESSION", session: s },
+      { type: "INVSPRNT_SET_SESSION", session: s },
       () => window.postMessage({ type: "ARBIPRO_EXT_SESSION_ACK" }, "*"),
     );
     return;
   }
 
   if (data.type === "ARBIPRO_EXT_LOGOUT") {
-    try { console.log("[arbipro-auth]", "extension_logout_signal_received"); } catch (_) {}
+    try { console.log("[InvSPRNT-auth]", "extension_logout_signal_received"); } catch (_) {}
     safeSend(
-      { type: "ARBIPRO_EXPLICIT_SIGN_OUT" },
+      { type: "INVSPRNT_EXPLICIT_SIGN_OUT" },
       () => window.postMessage({ type: "ARBIPRO_EXT_LOGOUT_ACK" }, "*"),
     );
   }
