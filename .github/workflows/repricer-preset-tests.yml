@@ -4,14 +4,17 @@ on:
   push:
     paths:
       - 'supabase/functions/repricer-ai-evaluate/**'
+      - 'supabase/functions/_tests/repricer-ai-evaluate/**'
       - '.github/workflows/repricer-preset-tests.yml'
   pull_request:
     paths:
       - 'supabase/functions/repricer-ai-evaluate/**'
+      - 'supabase/functions/_tests/repricer-ai-evaluate/**'
       - '.github/workflows/repricer-preset-tests.yml'
 
-# Behavior-lock guard: these tests prove that the 3 repricer presets (Aggressive
-# Capture / Momentum Builder / Profit Extractor) remain semantically distinct
+# Behavior-lock guard: these tests prove that the 7 repricer presets (Aggressive
+# Capture / Momentum Builder / Profit Extractor / Match Buy Box / Match Lowest /
+# Smart Match / Momentum Smart) remain semantically distinct
 # (snapshot + uniqueness suite) and behave correctly under realistic market
 # conditions (scenario suite + underpriced-recovery/anomaly/fast-lane-cooldown
 # suite). Failure here means a preset has silently drifted — block the merge.
@@ -19,10 +22,10 @@ jobs:
   preset-behavior-lock:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Deno
-        uses: denoland/setup-deno@v1
+        uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
 
