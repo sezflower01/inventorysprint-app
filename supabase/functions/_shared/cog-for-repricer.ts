@@ -4,8 +4,9 @@
 //
 // Since 2026-09-16 every repricer path resolves a unit cost in this order:
 //
-//   1. asin_cost_overrides, latest effective on or before today
-//   2. COG on record, via the view asin_cog_for_repricer
+//   1. COG on record, via the view asin_cog_for_repricer
+//   2. asin_cost_overrides, latest effective on or before today -- only for an
+//      ASIN with no usable COG (order swapped 2026-09-17; see below)
 //   3. whatever that path used before (inventory.cost, created_listings, ...)
 //
 // Same precedence as Inventory Valuation (2026-09-15), so the seller maintains
@@ -105,8 +106,11 @@ export async function loadRepricerCostMap(
     if (Number.isFinite(cost) && cost > 0) map.set(key(c.user_id, c.asin), { unitCost: cost, source: "cog_on_record" });
   }
 
-  // Overrides win. Same selection as resolve_cog_for_date: latest effective_from,
-  // then latest created_at.
+  // Overrides only FILL IN where there is no usable COG (changed 2026-09-17).
+  // They used to win; 26 of 27 were auto-saved by the Created Listings
+  // purchase panel, not typed by the seller, and they hid COGs -- B0G54FYGXQ
+  // priced from $16.70 after the seller set $9.10. Same selection as
+  // resolve_cog_for_date: latest effective_from, then latest created_at.
   const bestOverride = new Map<string, { eff: string; created: string; cost: number }>();
   for (const o of overrides) {
     const cost = Number(o.unit_cost);
@@ -119,7 +123,9 @@ export async function loadRepricerCostMap(
       bestOverride.set(k, { eff, created, cost });
     }
   }
-  for (const [k, o] of bestOverride) map.set(k, { unitCost: o.cost, source: "cost_override" });
+  for (const [k, o] of bestOverride) {
+    if (!map.has(k)) map.set(k, { unitCost: o.cost, source: "cost_override" });
+  }
 
   return map;
 }

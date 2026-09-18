@@ -653,7 +653,7 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
 
   // ============================================================
   // Unit cost for the repricer (since 2026-09-16):
-  //   asin_cost_overrides -> COG on record -> created_listings -> inventory.cost
+  //   COG on record -> asin_cost_overrides -> created_listings -> inventory.cost
   //
   // Same precedence as Inventory Valuation and every repricer edge function
   // (_shared/cog-for-repricer.ts), so the COG column, the ROI range and the
@@ -698,7 +698,9 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
         const v = Number(c.unit_cost);
         if (c.asin && Number.isFinite(v) && v > 0) costMap[c.asin] = v;
       }
-      // Overrides win; latest effective_from, then latest created_at (same as
+      // Overrides only fill in where there is no usable COG (swapped
+      // 2026-09-17: 26 of 27 were auto-saved from purchases and hid seller
+      // COGs). Latest effective_from, then latest created_at (same as
       // resolve_cog_for_date).
       const best: Record<string, { eff: string; created: string; cost: number }> = {};
       for (const o of overrideRows) {
@@ -708,7 +710,9 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
         const prev = best[o.asin];
         if (!prev || eff > prev.eff || (eff === prev.eff && created > prev.created)) best[o.asin] = { eff, created, cost: v };
       }
-      for (const [asin, o] of Object.entries(best)) costMap[asin] = o.cost;
+      for (const [asin, o] of Object.entries(best)) {
+        if (costMap[asin] == null) costMap[asin] = o.cost;
+      }
     } catch (e) {
       // Non-fatal for the table, but loud: rows fall back to the old cost.
       console.error("[Repricer] COG on record / cost override load failed; showing created_listings cost:", e);
@@ -742,7 +746,7 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
     // first-class fallback for both image and (further down) COG.
     const clEnrich = createdListingMap[inv.asin];
     // One unit cost per row, used by the COG column, cost_converted and both
-    // ROI-range figures: override -> COG on record -> created_listings ->
+    // ROI-range figures: COG on record -> override -> created_listings ->
     // inventory.cost. See fetchRepricerCostMap.
     const effectiveUnitCost: number | null = repricerCostMap[inv.asin] != null
       ? repricerCostMap[inv.asin]
@@ -896,7 +900,7 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
       image_url: enrichedImage,
       price: displayPrice,
       my_price: displayMyPrice,
-      // COG resolution: override -> COG on record -> newest created_listings
+      // COG resolution: COG on record -> override -> newest created_listings
       // row -> inventory.cost (effectiveUnitCost above). Before 2026-09-16 the
       // newest created_listings row won outright.
       cost: effectiveUnitCost,

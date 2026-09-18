@@ -2021,7 +2021,19 @@ export default function ShipmentBuilder() {
 
       try {
         for (const chunk of chunks) {
-          // 1) cost overrides (latest effective on or before today)
+          // 1) COG on record (first value wins, so this order IS the precedence)
+          const { data: cog } = await supabase
+            .from("asin_cog_for_repricer")
+            .select("asin, unit_cost")
+            .in("asin", chunk);
+          if (cancelled) return;
+          for (const row of (cog || []) as Array<{ asin: string; unit_cost: number }>) {
+            setIfAbsent(row.asin, Number(row.unit_cost));
+          }
+
+          // 2) cost overrides, only for ASINs with no usable COG. Swapped
+          // 2026-09-17: 26 of 27 overrides were auto-saved from purchases and
+          // hid seller COGs (B0G54FYGXQ $16.70 vs a $9.10 COG).
           const { data: ovr } = await supabase
             .from("asin_cost_overrides")
             .select("asin, unit_cost, effective_from, created_at")
@@ -2032,16 +2044,6 @@ export default function ShipmentBuilder() {
             .order("created_at", { ascending: false });
           if (cancelled) return;
           for (const row of (ovr || []) as Array<{ asin: string; unit_cost: number }>) {
-            setIfAbsent(row.asin, Number(row.unit_cost));
-          }
-
-          // 2) COG on record
-          const { data: cog } = await supabase
-            .from("asin_cog_for_repricer")
-            .select("asin, unit_cost")
-            .in("asin", chunk);
-          if (cancelled) return;
-          for (const row of (cog || []) as Array<{ asin: string; unit_cost: number }>) {
             setIfAbsent(row.asin, Number(row.unit_cost));
           }
 

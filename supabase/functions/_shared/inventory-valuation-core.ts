@@ -81,7 +81,7 @@ async function fetchCogOnRecord(supabase: any, userId: string): Promise<Map<stri
   const PAGE = 1000;
   for (let from = 0; from < 50 * PAGE; from += PAGE) {
     const { data, error } = await supabase
-      .from("asin_cog_on_record")
+      .from("asin_cog_for_repricer")
       .select("asin, unit_cost")
       .eq("user_id", userId)
       .not("unit_cost", "is", null)
@@ -237,16 +237,19 @@ export async function computeInventoryValuation(supabase: any, userId: string): 
     // COG outranks inventory.unit_cost_manual (the inline editor on Synced
     // Inventory). Measured over 421 stocked rows: 81 disagreed, and on all 76
     // that carried both dates the COG was the newer edit, the inline value on
-    // none. asin_cost_overrides stays above COG -- a separate, maintained
-    // escape hatch shared with P&L's resolve_unit_cost_v1.
+    // none. COG also outranks asin_cost_overrides (changed 2026-09-17): 26 of
+    // the 27 overrides were auto-saved by the Created Listings purchase panel,
+    // none typed deliberately, and they hid seller COGs (B0G54FYGXQ: $16.70
+    // shown against a $9.10 COG). Overrides are now a fallback for products
+    // with no COG. COG comes from asin_cog_for_repricer (no placeholders).
     //
     // This block must stay identical to src/lib/inventory-valuation.ts and
     // src/pages/tools/SyncedInventory.tsx.
     let unitCost: number;
-    if (override !== undefined) {
-      unitCost = override;
-    } else if (cog !== undefined) {
+    if (cog !== undefined) {
       unitCost = cog;
+    } else if (override !== undefined) {
+      unitCost = override;
     } else if (row.unit_cost_manual && row.cost !== null && row.cost !== undefined) {
       unitCost = Number(row.cost);
     } else {

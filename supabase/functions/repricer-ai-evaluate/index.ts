@@ -5034,31 +5034,11 @@ Deno.serve(async (req) => {
       return query.maybeSingle();
     };
 
-    // === MANUAL COST OVERRIDE (date-aware) ===
-    // Check user's manual cost override first. If active, it WINS over inventory
-    // blended cost and created_listings — but never affects past sale snapshots
-    // (those are stored on sales_orders.unit_cost and consumed by P&L only).
-    // For repricer, "today" is the relevant date.
-    try {
-      const { data: overrideUnitCost, error: overrideErr } = await supabase
-        .rpc('resolve_cog_for_date', {
-          p_user_id: userId,
-          p_asin: targetAsin,
-          p_on_date: new Date().toISOString().slice(0, 10),
-        });
-      if (!overrideErr && overrideUnitCost != null && Number(overrideUnitCost) > 0) {
-        unitCost = Number(overrideUnitCost);
-        costSource = `manual cost override (effective today, asin: ${targetAsin})`;
-        console.log(`[repricer-ai-evaluate] MANUAL_COST_OVERRIDE asin=${targetAsin} unitCost=$${unitCost.toFixed(4)}`);
-      }
-    } catch (e) {
-      console.warn(`[repricer-ai-evaluate] resolve_cog_for_date failed for ${targetAsin}:`, (e as Error).message);
-    }
-
     // === COG ON RECORD (since 2026-09-16) ===
-    // Precedence: cost override (above) -> COG on record -> inventory.cost ->
-    // created_listings (below). Same as Inventory Valuation, the Repricer page
-    // and repricer-auto-lower-min (_shared/cog-for-repricer.ts), so the unit
+    // Precedence (swapped 2026-09-17): COG on record -> cost override (below,
+    // only when there is no usable COG) -> inventory.cost -> created_listings.
+    // Same as Inventory Valuation, the Repricer page and
+    // repricer-auto-lower-min (_shared/cog-for-repricer.ts), so the unit
     // cost in this trace, the suggested min and the Action Log match the one
     // number the seller maintains on the COG page.
     //
@@ -5088,6 +5068,29 @@ Deno.serve(async (req) => {
       } catch (e) {
         console.warn(`[repricer-ai-evaluate] COG on record lookup threw for ${targetAsin}:`, (e as Error).message);
       }
+    }
+
+    // === COST OVERRIDE (date-aware) -- fallback only, since 2026-09-17 ===
+    // It used to run FIRST and win. 26 of the seller's 27 overrides were
+    // auto-saved by the Created Listings purchase panel, not typed, and hid
+    // COGs (B0G54FYGXQ: $16.70 against a $9.10 COG). Now consulted only when
+    // COG on record (above) has nothing usable. When it applies it still beats
+    // inventory.cost and created_listings, and never touches past sale
+    // snapshots. For the repricer, "today" is the relevant date.
+    if (!unitCost || unitCost <= 0) try {
+      const { data: overrideUnitCost, error: overrideErr } = await supabase
+        .rpc('resolve_cog_for_date', {
+          p_user_id: userId,
+          p_asin: targetAsin,
+          p_on_date: new Date().toISOString().slice(0, 10),
+        });
+      if (!overrideErr && overrideUnitCost != null && Number(overrideUnitCost) > 0) {
+        unitCost = Number(overrideUnitCost);
+        costSource = `manual cost override (effective today, asin: ${targetAsin})`;
+        console.log(`[repricer-ai-evaluate] MANUAL_COST_OVERRIDE asin=${targetAsin} unitCost=$${unitCost.toFixed(4)}`);
+      }
+    } catch (e) {
+      console.warn(`[repricer-ai-evaluate] resolve_cog_for_date failed for ${targetAsin}:`, (e as Error).message);
     }
 
     if (targetCurrentPrice === undefined || targetCurrentPrice === null) {

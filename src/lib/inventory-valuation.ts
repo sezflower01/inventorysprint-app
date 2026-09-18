@@ -99,7 +99,7 @@ async function fetchCogOnRecord(userId: string): Promise<Map<string, number>> {
   const PAGE = 1000;
   for (let from = 0; from < 50 * PAGE; from += PAGE) {
     const { data, error } = await supabase
-      .from("asin_cog_on_record")
+      .from("asin_cog_for_repricer")
       .select("asin, unit_cost")
       .eq("user_id", userId)
       .not("unit_cost", "is", null)
@@ -276,15 +276,16 @@ async function getInventoryValuationTotalsLive(userId: string): Promise<Inventor
     const costEntry = costBySku.get(row.sku) ?? costByAsin.get(row.asin);
     const override = overridesByAsin.get(row.asin);
     const cog = cogByAsin.get(row.asin);
-    // Precedence (changed 2026-09-15): asin_cost_overrides → COG on record →
+    // Precedence (changed 2026-09-17): COG on record → asin_cost_overrides →
     // the Synced Inventory inline editor → created_listings → inventory.cost.
-    // Must stay identical to SyncedInventory.tsx and to the server-side
-    // computeInventoryValuation, or the implementations disagree on one number.
+    // Overrides used to come first; 26 of 27 were auto-saved from purchases
+    // and hid the seller's COG. Must stay identical to SyncedInventory.tsx and
+    // to the server-side computeInventoryValuation.
     let unitCost: number;
-    if (override !== undefined) {
-      unitCost = override;
-    } else if (cog !== undefined) {
+    if (cog !== undefined) {
       unitCost = cog;
+    } else if (override !== undefined) {
+      unitCost = override;
     } else if (row.unit_cost_manual && row.cost !== null && row.cost !== undefined) {
       unitCost = Number(row.cost);
     } else {
@@ -472,15 +473,16 @@ export async function getProjectedValuationMetrics(userId: string): Promise<Proj
     const costEntry = costBySku.get(row.sku) ?? costByAsin.get(row.asin);
     const override = overridesByAsin.get(row.asin);
     const cog = cogByAsin.get(row.asin);
-    // Precedence (changed 2026-09-15): asin_cost_overrides → COG on record →
+    // Precedence (changed 2026-09-17): COG on record → asin_cost_overrides →
     // the Synced Inventory inline editor → created_listings → inventory.cost.
-    // Must stay identical to SyncedInventory.tsx and to the server-side
-    // computeInventoryValuation, or the implementations disagree on one number.
+    // Overrides used to come first; 26 of 27 were auto-saved from purchases
+    // and hid the seller's COG. Must stay identical to SyncedInventory.tsx and
+    // to the server-side computeInventoryValuation.
     let unitCost: number;
-    if (override !== undefined) {
-      unitCost = override;
-    } else if (cog !== undefined) {
+    if (cog !== undefined) {
       unitCost = cog;
+    } else if (override !== undefined) {
+      unitCost = override;
     } else if (row.unit_cost_manual && row.cost !== null && row.cost !== undefined) {
       unitCost = Number(row.cost);
     } else {

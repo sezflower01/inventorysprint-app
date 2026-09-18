@@ -510,7 +510,7 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
     let hasMoreCog = true;
     while (hasMoreCog) {
       const { data: cogBatch, error: cogError } = await supabase
-        .from("asin_cog_on_record")
+        .from("asin_cog_for_repricer")
         .select("asin, unit_cost")
         .eq("user_id", userId)
         .not("unit_cost", "is", null)
@@ -826,18 +826,22 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
     // the inline editor on top would mean a third of stocked rows silently
     // ignored a COG edit.
     //
-    // asin_cost_overrides stays ABOVE COG. It is a separate, still-maintained
-    // feature with its own dialog (CostOverrideDialog), shared with P&L's
-    // resolve_unit_cost_v1, and it is the seller's deliberate "this ASIN is
-    // different" escape hatch -- 18 stocked rows, worth $2,089.
+    // COG also outranks asin_cost_overrides (changed 2026-09-17). Overrides
+    // sat above COG on the belief that they were deliberate seller entries.
+    // They were not: 26 of 27 were written automatically by the "add
+    // purchase" panel on Created Listings ("Auto-saved from purchase ..."), the
+    // 27th by a migration, none through CostOverrideDialog, and 17 disagreed
+    // with the COG. B0G54FYGXQ showed $16.70 here after the seller set $9.10.
+    // Overrides now only fill in for a product with no COG. COG is read through
+    // asin_cog_for_repricer, so unreviewed $1.00 placeholder COGs never win.
     //
     // created_listings survives only as a fallback, for a product with no COG
     // yet (9 stocked rows at the time of the change, 1 of which needed it).
     let finalUnitCost: number | null;
-    if (override !== undefined) {
-      finalUnitCost = override;
-    } else if (cog !== undefined) {
+    if (cog !== undefined) {
       finalUnitCost = cog;
+    } else if (override !== undefined) {
+      finalUnitCost = override;
     } else if (item.unit_cost_manual && item.cost !== null && item.cost !== undefined) {
       // Manually edited → inventory.cost is already per-unit
       finalUnitCost = Number(item.cost);

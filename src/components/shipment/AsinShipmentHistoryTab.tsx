@@ -95,26 +95,28 @@ export default function AsinShipmentHistoryTab({ shipments }: Props) {
       let unit = 0;
       try {
         const today = new Date().toISOString().slice(0, 10);
-        const { data: ovr } = await supabase
-          .from("asin_cost_overrides")
-          .select("unit_cost, effective_from, created_at")
+        const { data: cog } = await supabase
+          .from("asin_cog_for_repricer")
+          .select("unit_cost")
           .eq("asin", asin)
-          .lte("effective_from", today)
-          .gt("unit_cost", 0)
-          .order("effective_from", { ascending: false })
-          .order("created_at", { ascending: false })
           .limit(1);
         if (cancelled) return;
-        if (ovr && ovr.length > 0) unit = Number((ovr[0] as { unit_cost: number }).unit_cost) || 0;
+        if (cog && cog.length > 0) unit = Number((cog[0] as { unit_cost: number }).unit_cost) || 0;
 
+        // Overrides only when there is no usable COG (swapped 2026-09-17:
+        // most were auto-saved from purchases and hid seller COGs).
         if (unit <= 0) {
-          const { data: cog } = await supabase
-            .from("asin_cog_for_repricer")
-            .select("unit_cost")
+          const { data: ovr } = await supabase
+            .from("asin_cost_overrides")
+            .select("unit_cost, effective_from, created_at")
             .eq("asin", asin)
+            .lte("effective_from", today)
+            .gt("unit_cost", 0)
+            .order("effective_from", { ascending: false })
+            .order("created_at", { ascending: false })
             .limit(1);
           if (cancelled) return;
-          if (cog && cog.length > 0) unit = Number((cog[0] as { unit_cost: number }).unit_cost) || 0;
+          if (ovr && ovr.length > 0) unit = Number((ovr[0] as { unit_cost: number }).unit_cost) || 0;
         }
 
         if (unit <= 0) {
