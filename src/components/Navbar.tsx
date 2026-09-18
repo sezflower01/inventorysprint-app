@@ -59,20 +59,6 @@ const Navbar = ({ hideMobileMenuButton = false }: NavbarProps = {}) => {
     setMobileMenuOpen(false);
   };
 
-  const goToDownloadPage = () => {
-    if (location.pathname !== '/admin') {
-      navigate('/admin');
-    }
-    setMobileMenuOpen(false);
-  };
-
-  const goToBuyLicense = () => {
-    if (location.pathname !== '/buy-license') {
-      navigate('/buy-license');
-    }
-    setMobileMenuOpen(false);
-  };
-
   return (
     <nav
       className={cn(
@@ -86,8 +72,6 @@ const Navbar = ({ hideMobileMenuButton = false }: NavbarProps = {}) => {
           <NavbarLinks
             goToHome={goToHome}
             handleNavigation={handleNavigation}
-            goToDownloadPage={goToDownloadPage}
-            goToBuyLicense={goToBuyLicense}
           />
         </div>
 
@@ -119,8 +103,6 @@ const Navbar = ({ hideMobileMenuButton = false }: NavbarProps = {}) => {
         <NavbarMobileMenu
           goToHome={goToHome}
           handleNavigation={handleNavigation}
-          goToDownloadPage={goToDownloadPage}
-          goToBuyLicense={goToBuyLicense}
         />
       )}
     </nav>

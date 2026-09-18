@@ -29,16 +29,12 @@ import AdminErrorNotification from "@/components/chat/AdminErrorNotification";
 export interface NavbarLinksProps {
   goToHome: () => void;
   handleNavigation: (section: string) => void;
-  goToDownloadPage: () => void;
-  goToBuyLicense: () => void;
   linkClass?: string;
 }
 
 const NavbarLinks: React.FC<NavbarLinksProps> = ({
   goToHome,
   handleNavigation,
-  goToDownloadPage,
-  goToBuyLicense,
   linkClass = "font-medium text-brand-600 hover:text-brand-700 transition-colors cursor-pointer"
 }) => {
   const { t, language } = useLanguage();
@@ -97,28 +93,6 @@ const NavbarLinks: React.FC<NavbarLinksProps> = ({
       });
     }
     navigate('/contact');
-  };
-
-  const handleDownloadClick = () => {
-    if (typeof gtag !== 'undefined') {
-      gtag('event', 'navigation_click', {
-        event_category: 'engagement',
-        event_label: 'download_nav',
-        value: 1
-      });
-    }
-    goToDownloadPage();
-  };
-
-  const handleBuyLicenseClick = () => {
-    if (typeof gtag !== 'undefined') {
-      gtag('event', 'navigation_click', {
-        event_category: 'engagement',
-        event_label: 'buy_license_nav',
-        value: 1
-      });
-    }
-    goToBuyLicense();
   };
 
   const blogItems = [

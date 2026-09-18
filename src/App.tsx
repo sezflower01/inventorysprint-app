@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
+import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { HelmetProvider } from "react-helmet-async";
 import { LanguageProvider } from "@/contexts/LanguageContext";
@@ -119,7 +119,6 @@ import Support from "./pages/Support";
 import About from "./pages/About";
 import PrivacyPolicy from "./pages/PrivacyPolicy";
 import TermsOfService from "./pages/TermsOfService";
-import BuyLicense from "./pages/BuyLicense";
 import AiRepricerProduct from "./pages/AiRepricerProduct";
 import ProductLibraryProduct from "./pages/ProductLibraryProduct";
 import ModuleExplainer from "./pages/ModuleExplainer";
@@ -137,7 +136,6 @@ import PersonalHour from "./pages/PersonalHour";
 import { ModuleGuard } from "./components/access/ModuleGuard";
 import Diagnostics from "./pages/Diagnostics";
 import Settings from "./pages/Settings";
-import AdminDownload from "./pages/AdminDownload";
 import Subscriptions from "./pages/Subscriptions";
 import DesktopOnlyWidgets from "./components/DesktopOnlyWidgets";
 import GlobalErrorInterceptor from "./components/GlobalErrorInterceptor";
@@ -281,7 +279,8 @@ function App() {
                   <Route path="/about" element={<About />} />
                   <Route path="/privacy" element={<PrivacyPolicy />} />
                   <Route path="/terms" element={<TermsOfService />} />
-                  <Route path="/buy-license" element={<BuyLicense />} />
+                  {/* Retired 2026-09-18 with the Visual Basic desktop program: the site is web-only now. Old links land on web pricing. */}
+                  <Route path="/buy-license" element={<Navigate to="/pricing" replace />} />
                   <Route path="/products/ai-repricer" element={<AiRepricerProduct />} />
                   <Route path="/products/product-library" element={<ProductLibraryProduct />} />
                   <Route path="/products/modules/:slug" element={<ModuleExplainer />} />
@@ -388,7 +387,8 @@ function App() {
                   <Route path="/leads/admin-asin-upload" element={<ProtectedRoute><AdminAsinUpload /></ProtectedRoute>} />
                   
                   <Route path="/PersonalHour" element={<ProtectedRoute><ModuleGuard module="personalhour" redirectTo="/tools" redirectToast="Access restricted: PersonalHour is owner-only."><PersonalHour /></ModuleGuard></ProtectedRoute>} />
-                  <Route path="/admin" element={<AdminDownload />} />
+                  {/* Was the desktop installer download page (Setup_ArbiProSeller*.exe), retired 2026-09-18. */}
+                  <Route path="/admin" element={<Navigate to="/pricing" replace />} />
                   <Route path="/subscriptions" element={<ProtectedRoute><Subscriptions /></ProtectedRoute>} />
                   <Route path="/tools/admin-management" element={<ProtectedRoute><AdminManagement /></ProtectedRoute>} />
                   <Route path="/tools/admin-users" element={<ProtectedRoute><AdminUsers /></ProtectedRoute>} />

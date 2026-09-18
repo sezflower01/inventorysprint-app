@@ -39,22 +39,6 @@ const Footer = () => {
     }
   };
 
-  const goToDownloadPage = () => {
-    if (location.pathname !== '/admin') {
-      window.location.href = '/admin';
-    } else {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    }
-  };
-
-  const goToBuyLicense = () => {
-    if (location.pathname !== '/buy-license') {
-      window.location.href = '/buy-license';
-    } else {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    }
-  };
-
   const goToContact = () => {
     if (location.pathname !== '/contact') {
       window.location.href = '/contact';

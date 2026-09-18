@@ -50,13 +50,11 @@ const BlogMobileSection: React.FC<{ navigate: (path: string) => void }> = ({ nav
   );
 };
 
-interface NavbarMobileMenuProps extends NavbarLinksProps {}
+type NavbarMobileMenuProps = NavbarLinksProps;
 
 const NavbarMobileMenu: React.FC<NavbarMobileMenuProps> = ({
   goToHome,
   handleNavigation,
-  goToDownloadPage,
-  goToBuyLicense,
 }) => {
   const { t } = useLanguage();
   const navigate = useNavigate();
@@ -114,28 +112,6 @@ const NavbarMobileMenu: React.FC<NavbarMobileMenuProps> = ({
       });
     }
     navigate('/contact');
-  };
-
-  const handleDownloadClick = () => {
-    if (typeof gtag !== 'undefined') {
-      gtag('event', 'navigation_click', {
-        event_category: 'engagement',
-        event_label: 'download_mobile_nav',
-        value: 1
-      });
-    }
-    goToDownloadPage();
-  };
-
-  const handleBuyLicenseClick = () => {
-    if (typeof gtag !== 'undefined') {
-      gtag('event', 'navigation_click', {
-        event_category: 'engagement',
-        event_label: 'buy_license_mobile_nav',
-        value: 1
-      });
-    }
-    goToBuyLicense();
   };
 
   const handleSignOut = async () => {

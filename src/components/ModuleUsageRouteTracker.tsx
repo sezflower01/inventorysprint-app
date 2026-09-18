@@ -9,7 +9,7 @@ const USAGE_TRACK_IGNORE = new Set<string>([
   "/", "/login", "/signup", "/signed-in", "/auth/callback",
   "/forgot-password", "/reset-password", "/complete-profile",
   "/tools", "/pricing", "/about", "/contact", "/download",
-  "/buy-license", "/privacy-policy", "/terms-of-service", "/support",
+  "/privacy-policy", "/terms-of-service", "/support",
 ]);
 
 const moduleLookup = new Map<string, string>();
