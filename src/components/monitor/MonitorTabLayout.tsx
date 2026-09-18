@@ -149,29 +149,44 @@ export default function MonitorTabLayout({ monitorData, marketplace, logLinks }:
       setBlockerBuckets(buckets);
 
       // Fetch floor-blocked assignments split by auto-floor status
+      // Mirrors repricer-auto-lower-min (2026-09-18): coverage comes from the
+      // RULE (auto_lower_min_marketplaces), and the limit is the rule's drops
+      // per UTC day plus the 30% total cap -- no longer "5 drops ever" or the
+      // per-assignment flag. Keep in step with the worker.
       const { data: floorBlockedRows } = await supabase
         .from("repricer_assignments")
-        .select("asin, auto_lower_min_price, auto_floor_drop_count, manual_min_price, min_price_override, rule_id")
+        .select("asin, marketplace, auto_floor_drop_day, auto_floor_drops_on_day, manual_min_price, min_price_override, rule_id")
         .eq("user_id", user.id)
         .eq("is_enabled", true)
         .eq("status", "active")
         .ilike("last_recommendation_reason", "%floor%")
         .limit(500);
 
+      const floorRuleIds = [...new Set((floorBlockedRows || []).map((r) => r.rule_id).filter((id): id is string => !!id))];
+      const { data: floorRules } = floorRuleIds.length
+        ? await supabase
+            .from("repricer_rules")
+            .select("id, auto_lower_min_marketplaces, auto_lower_min_max_drops_per_day")
+            .in("id", floorRuleIds)
+        : { data: [] as Array<{ id: string; auto_lower_min_marketplaces: string[]; auto_lower_min_max_drops_per_day: number }> };
+      const floorRuleBy = new Map((floorRules || []).map((r) => [r.id, r]));
+      const todayUtc = new Date().toISOString().slice(0, 10);
+
       let manualNeeded = 0;
       let autoHandling = 0;
       for (const row of floorBlockedRows || []) {
-        const autoEnabled = !!(row as any).auto_lower_min_price;
-        const dropsUsed = (row as any).auto_floor_drop_count || 0;
-        const manualMin = (row as any).manual_min_price;
-        const currentMin = (row as any).min_price_override;
-        const maxDrops = 5;
+        const rule = row.rule_id ? floorRuleBy.get(row.rule_id) : undefined;
+        const autoEnabled = !!rule && (rule.auto_lower_min_marketplaces ?? []).includes(row.marketplace);
+        const dropsToday = row.auto_floor_drop_day === todayUtc ? Number(row.auto_floor_drops_on_day || 0) : 0;
+        const maxPerDay = Number(rule?.auto_lower_min_max_drops_per_day ?? 3);
+        const manualMin = row.manual_min_price;
+        const currentMin = row.min_price_override;
         const maxDropPct = 30;
         let totalDropPct = 0;
         if (manualMin != null && manualMin > 0 && currentMin != null) {
           totalDropPct = Math.round(((manualMin - Number(currentMin)) / manualMin) * 100);
         }
-        const isExhausted = dropsUsed >= maxDrops || totalDropPct >= maxDropPct;
+        const isExhausted = dropsToday >= maxPerDay || totalDropPct >= maxDropPct;
         if (!autoEnabled || isExhausted) {
           manualNeeded++;
         } else {

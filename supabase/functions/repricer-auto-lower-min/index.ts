@@ -1,4 +1,21 @@
-// repricer-auto-lower-min — hourly floor-drop worker.
+// repricer-auto-lower-min — per-rule floor-drop worker.
+//
+// ── PER-RULE SCHEDULE (2026-09-18) ──────────────────────────────────────────
+// Seller request: the VA does not check daily, so the automation must carry
+// it, switched on INSIDE each rule with an interval the seller picks.
+//   * A rule is covered in a marketplace when that marketplace is in
+//     repricer_rules.auto_lower_min_marketplaces. EVERY enabled, active
+//     assignment on the rule is covered -- including listings added later.
+//     (The old per-assignment auto_lower_min_price flag was set once and never
+//     for new listings, so coverage decayed; it is no longer read here.)
+//   * The cron fires every 5 minutes; a rule is processed only when its own
+//     auto_lower_min_interval_minutes has passed since auto_lower_min_last_run_at.
+//   * The lifetime "5 drops per listing" limit is replaced by the rule's
+//     auto_lower_min_max_drops_per_day (UTC day). At a 5-minute interval five
+//     lifetime drops would be spent in 25 minutes and the listing then stuck
+//     for good -- 126 in-stock listings already were.
+//   * US only for now (ALLOWED_MARKETPLACES), whatever a rule or caller asks.
+// Every other safety rule below is unchanged.
 //
 // PURPOSE
 // Sellers hit a state where the repricer wants to compete but cannot, because
@@ -91,7 +108,18 @@ const corsHeaders = {
 const POLICY_ROI_FLOOR: Record<string, number> = { US: 0, CA: 70, MX: 70, BR: 70 };
 const DEFAULT_POLICY_ROI_FLOOR = 70;
 
-const MAX_DROPS = 5;
+/** Only marketplaces the worker may act in, whatever a rule or caller asks. */
+const ALLOWED_MARKETPLACES = ["US"];
+/** Scheduled-run slack: the cron fires on 5-minute ticks, a few seconds apart. */
+const DUE_SLACK_MS = 60_000;
+/**
+ * Never undercut a competitor price older than this. Snapshots refresh ~every
+ * 19 min per ASIN (median, measured 2026-09-18); 3 h allows for gaps. Needed
+ * once the worker started reading each ASIN's LATEST snapshot: the old capped
+ * read only ever saw ~30 minutes of snapshots, and without this guard a
+ * days-old lowest price could have set a floor.
+ */
+const MAX_SNAPSHOT_AGE_MS = 3 * 60 * 60 * 1000;
 const MAX_CUMULATIVE_DROP_PCT = 30;
 const UNDERCUT_STEP = 0.01;
 /** Tolerance when re-verifying ROI after cent-rounding. */
@@ -113,6 +141,8 @@ interface AssignmentRow {
   min_price_override: number | null;
   manual_min_price: number | null;
   auto_floor_drop_count: number | null;
+  auto_floor_drop_day: string | null;
+  auto_floor_drops_on_day: number | null;
   last_buybox_status: string | null;
   /**
    * Marketplace-correct current price. Deliberately NOT inventory.my_price:
@@ -136,6 +166,14 @@ interface Decision {
   roi_floor?: number;
   drop_pct?: number | null;
   drop_count?: number;
+  /** Drops already made today (UTC) and the rule's daily allowance. */
+  drops_today?: number;
+  max_drops_per_day?: number;
+  rule_id?: string | null;
+  /** Age of the competitor snapshot the decision used, in minutes. */
+  snapshot_age_min?: number | null;
+  /** Which price was beaten: lowest, buybox, or lowest_fallback (no BB price). */
+  anchor?: "lowest" | "buybox" | "lowest_fallback";
   cumulative_drop_pct?: number | null;
   fx_rate?: number;
   /** Which fee source backed the ROI maths: asin_fee_cache or inventory. */
@@ -166,51 +204,101 @@ Deno.serve(async (req) => {
   }
 
   const dryRun = body.dry_run === true;
-  const marketplaces = Array.isArray(body.marketplaces) && body.marketplaces.length
+  const requested = Array.isArray(body.marketplaces) && body.marketplaces.length
     ? (body.marketplaces as string[]).map((m) => String(m).toUpperCase())
-    : ["US"];
+    : ALLOWED_MARKETPLACES;
+  const marketplaces = requested.filter((m) => ALLOWED_MARKETPLACES.includes(m));
   const onlyUserId = typeof body.user_id === "string" ? body.user_id : null;
-  const limit = typeof body.limit === "number" ? body.limit : 2000;
+  // Dry runs look at every switched-on rule unless asked to honour the
+  // intervals; real runs always honour them.
+  const respectSchedule = dryRun ? body.respect_schedule === true : true;
+  const runStartedAt = new Date();
+  const today = runStartedAt.toISOString().slice(0, 10); // UTC day for the daily limit
 
   const run = async () => {
     const decisions: Decision[] = [];
+    if (!marketplaces.length) {
+      return { items_processed: 0, detail: { decisions: [], note: "no allowed marketplace requested" } };
+    }
 
-    // ── 1. Eligible assignments ────────────────────────────────────────────
-    let q = admin
-      .from("repricer_assignments")
-      .select(
-        "id, user_id, asin, sku, marketplace, rule_id, min_price_override, manual_min_price, " +
-          "auto_floor_drop_count, last_buybox_status, last_applied_price",
-      )
-      .eq("auto_lower_min_price", true)
-      .eq("is_enabled", true)
-      .eq("status", "active")
-      .in("marketplace", marketplaces)
-      .not("rule_id", "is", null)
-      .limit(limit);
-    if (onlyUserId) q = q.eq("user_id", onlyUserId);
+    // ── 1a. Rules switched on, and due ──────────────────────────────────────
+    let rq = admin
+      .from("repricer_rules")
+      .select("id, user_id, min_roi_percent, min_roi_marketplace_overrides, auto_lower_min_marketplaces, " +
+        "auto_lower_min_interval_minutes, auto_lower_min_max_drops_per_day, auto_lower_min_last_run_at, " +
+        "auto_lower_min_undercut, auto_lower_min_anchor")
+      .overlaps("auto_lower_min_marketplaces", marketplaces);
+    if (onlyUserId) rq = rq.eq("user_id", onlyUserId);
+    const { data: ruleRowsRaw, error: rErr } = await rq;
+    if (rErr) throw new Error(`rules: ${rErr.message}`);
+    const allOnRules = (ruleRowsRaw ?? []) as unknown as Array<Record<string, any>>;
+    const dueRules = allOnRules.filter((r) => {
+      if (!respectSchedule) return true;
+      const last = r.auto_lower_min_last_run_at ? new Date(r.auto_lower_min_last_run_at).getTime() : 0;
+      const intervalMs = Number(r.auto_lower_min_interval_minutes ?? 60) * 60_000;
+      return runStartedAt.getTime() - last >= intervalMs - DUE_SLACK_MS;
+    });
+    const ruleBy = new Map<string, Record<string, any>>();
+    for (const r of dueRules) ruleBy.set(r.id, r);
+    if (!dueRules.length) {
+      return {
+        items_processed: 0,
+        detail: { decisions: [], note: allOnRules.length ? "no rule due yet" : "no rule has auto-lower on", rules_on: allOnRules.length },
+      };
+    }
 
-    const { data: assignmentsRaw, error: aErr } = await q;
-    if (aErr) throw new Error(`assignments: ${aErr.message}`);
-    const assignments = (assignmentsRaw ?? []) as unknown as AssignmentRow[];
+    // ── 1b. Every enabled, active assignment on a due rule ──────────────────
+    // Paginated: PostgREST returns at most 1,000 rows per request.
+    const assignments: AssignmentRow[] = [];
+    const ruleIdsDue = dueRules.map((r) => r.id as string);
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await admin
+        .from("repricer_assignments")
+        .select(
+          "id, user_id, asin, sku, marketplace, rule_id, min_price_override, manual_min_price, " +
+            "auto_floor_drop_count, auto_floor_drop_day, auto_floor_drops_on_day, last_buybox_status, last_applied_price",
+        )
+        .in("rule_id", ruleIdsDue)
+        .eq("is_enabled", true)
+        .eq("status", "active")
+        .in("marketplace", marketplaces)
+        .order("id")
+        .range(from, from + 999);
+      if (error) throw new Error(`assignments: ${error.message}`);
+      assignments.push(...((data ?? []) as unknown as AssignmentRow[]));
+      if (!data || data.length < 1000) break;
+    }
+    // A rule is on for specific marketplaces only.
+    const covered = assignments.filter((a) =>
+      ((ruleBy.get(a.rule_id ?? "")?.auto_lower_min_marketplaces ?? []) as string[]).includes(a.marketplace));
+    assignments.length = 0;
+    assignments.push(...covered);
     if (!assignments.length) {
-      return { items_processed: 0, detail: { decisions: [], note: "no eligible assignments" } };
+      return { items_processed: 0, detail: { decisions: [], note: "due rules have no eligible assignments", rules_due: dueRules.length } };
     }
 
     const userIds = [...new Set(assignments.map((a) => a.user_id))];
     const skus = [...new Set(assignments.map((a) => a.sku).filter(Boolean))] as string[];
     const asins = [...new Set(assignments.map((a) => a.asin))];
-    const ruleIds = [...new Set(assignments.map((a) => a.rule_id).filter(Boolean))] as string[];
 
     // ── 2. Cost + fees live on inventory, keyed by (user_id, sku) ──────────
-    const { data: invRows } = await admin
-      .from("inventory")
-      .select("id, user_id, sku, cost, fees_json, my_price, price, min_price")
-      .in("user_id", userIds)
-      .in("sku", skus)
-      .limit(20000);
+    // Chunked + paginated: PostgREST returns at most 1,000 rows per request.
     const invBy = new Map<string, Record<string, unknown>>();
-    for (const r of invRows ?? []) invBy.set(`${r.user_id}::${r.sku}`, r);
+    for (let i = 0; i < skus.length; i += 200) {
+      const chunk = skus.slice(i, i + 200);
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await admin
+          .from("inventory")
+          .select("id, user_id, sku, cost, fees_json, my_price, price, min_price")
+          .in("user_id", userIds)
+          .in("sku", chunk)
+          .order("id")
+          .range(from, from + 999);
+        if (error) throw new Error(`inventory: ${error.message}`);
+        for (const r of data ?? []) invBy.set(`${r.user_id}::${r.sku}`, r);
+        if (!data || data.length < 1000) break;
+      }
+    }
 
     // ── 2b. Unit cost: cost override -> COG on record -> inventory.cost ────
     //
@@ -229,42 +317,46 @@ Deno.serve(async (req) => {
     // silently revert some ASINs to inventory.cost.
     const costBy = await loadRepricerCostMap(admin, userIds, asins);
 
-    // ── 3. Latest competitor snapshot per (asin, marketplace) ──────────────
-    // Time-series table: order newest-first and keep the first key seen.
-    const { data: snaps } = await admin
-      .from("repricer_competitor_snapshots")
-      .select("asin, marketplace, lowest_fba_price, lowest_overall_price, buybox_price, fetched_at")
-      .in("asin", asins)
-      .in("marketplace", marketplaces)
-      .order("fetched_at", { ascending: false })
-      .limit(20000);
+    // ── 3. Latest competitor snapshot per (user, asin, marketplace) ────────
+    // Via latest_competitor_snapshots() (20260918070000), one row per ASIN on
+    // the (user_id, asin, marketplace, fetched_at DESC) index. It replaced a
+    // single newest-first read of ALL snapshots with no seller filter: capped
+    // at 1,000 rows (~half an hour of snapshots), it reported older-but-valid
+    // data as "no_competitor_data", and it could read another seller's
+    // snapshot of the same ASIN.
     const snapBy = new Map<string, Record<string, unknown>>();
-    for (const s of snaps ?? []) {
-      const k = `${s.asin}::${s.marketplace}`;
-      if (!snapBy.has(k)) snapBy.set(k, s);
+    for (const uid of userIds) {
+      const userAsins = [...new Set(assignments.filter((a) => a.user_id === uid).map((a) => a.asin))];
+      for (const mp of marketplaces) {
+        for (let i = 0; i < userAsins.length; i += 300) {
+          const { data, error } = await admin.rpc("latest_competitor_snapshots", {
+            p_user_id: uid, p_asins: userAsins.slice(i, i + 300), p_marketplace: mp,
+          });
+          if (error) throw new Error(`snapshots: ${error.message}`);
+          for (const s of (data ?? []) as Array<Record<string, unknown>>) snapBy.set(`${uid}::${s.asin}::${mp}`, s);
+        }
+      }
     }
 
     // ── 3b. Per-ASIN fee cache ─────────────────────────────────────────────
     // fees_json alone is not a sufficient fee source: dry run #2 refused all 18
     // remaining candidates as `fees_unresolvable` without this. See
     // mergeFeeSources() for why guessing the gap is not an option.
-    const { data: feeRows } = await admin
-      .from("asin_fee_cache")
-      .select("user_id, asin, marketplace, referral_rate, fba_fee_fixed, fee_source")
-      .in("user_id", userIds)
-      .in("asin", asins)
-      .in("marketplace", marketplaces)
-      .limit(20000);
+    // Chunked: one row per (user, asin, marketplace) is under 1,000 today, but
+    // PostgREST would silently cap a bigger catalogue at 1,000.
     const feeBy = new Map<string, Record<string, unknown>>();
-    for (const f of feeRows ?? []) feeBy.set(`${f.user_id}::${f.asin}::${f.marketplace}`, f);
+    for (let i = 0; i < asins.length; i += 300) {
+      const { data: feeRows, error: fErr } = await admin
+        .from("asin_fee_cache")
+        .select("user_id, asin, marketplace, referral_rate, fba_fee_fixed, fee_source")
+        .in("user_id", userIds)
+        .in("asin", asins.slice(i, i + 300))
+        .in("marketplace", marketplaces);
+      if (fErr) throw new Error(`fee cache: ${fErr.message}`);
+      for (const f of feeRows ?? []) feeBy.set(`${f.user_id}::${f.asin}::${f.marketplace}`, f);
+    }
 
-    // ── 4. Rule-level ROI floors ───────────────────────────────────────────
-    const { data: rules } = await admin
-      .from("repricer_rules")
-      .select("id, min_roi_percent, min_roi_marketplace_overrides")
-      .in("id", ruleIds);
-    const ruleBy = new Map<string, Record<string, unknown>>();
-    for (const r of rules ?? []) ruleBy.set(r.id, r);
+    // ── 4. Rule-level ROI floors: already loaded with the due rules (1a). ──
 
     // ── 5. Pin FX once per currency for the whole run ──────────────────────
     const fxByMarketplace = new Map<string, number>();
@@ -274,13 +366,13 @@ Deno.serve(async (req) => {
     }
 
     // ── 6. Decide ──────────────────────────────────────────────────────────
-    const writes: { id: string; newMin: number; nextCount: number; invId?: string; baseline?: number }[] = [];
+    const writes: { id: string; newMin: number; nextCount: number; nextToday: number; invId?: string; baseline?: number }[] = [];
 
     for (const a of assignments) {
       const mp = a.marketplace;
       const fx = fxByMarketplace.get(mp) ?? 1;
       const inv = invBy.get(`${a.user_id}::${a.sku}`) as Record<string, any> | undefined;
-      const snap = snapBy.get(`${a.asin}::${mp}`) as Record<string, any> | undefined;
+      const snap = snapBy.get(`${a.user_id}::${a.asin}::${mp}`) as Record<string, any> | undefined;
 
       const d: Decision = {
         assignment_id: a.id,
@@ -308,15 +400,22 @@ Deno.serve(async (req) => {
       d.unit_cost = unitCost;
       d.cost_source = resolvedCost ? resolvedCost.source : "inventory";
 
-      // RULE 1 — exhausted by drop count.
+      // RULE 1 — daily drop allowance (was: 5 drops per listing, ever).
+      // The rule sets the allowance; the count resets on a new UTC day.
       const drops = Number(a.auto_floor_drop_count ?? 0);
       d.drop_count = drops;
+      d.rule_id = a.rule_id;
+      const rule = a.rule_id ? ruleBy.get(a.rule_id) as Record<string, any> | undefined : undefined;
+      const maxPerDay = Number(rule?.auto_lower_min_max_drops_per_day ?? 3);
+      const dropsToday = a.auto_floor_drop_day === today ? Number(a.auto_floor_drops_on_day ?? 0) : 0;
+      d.drops_today = dropsToday;
+      d.max_drops_per_day = maxPerDay;
       // Reason keys are BUCKETS, never interpolated values: the skip_reasons
       // tally is the only feedback an unattended job gives, and embedding the
       // number made every cumulative skip its own key
       // (exhausted_cumulative_36.06pct, _38.46pct, ...) — unreadable. The value
       // lives on the decision row, where it can be queried.
-      if (drops >= MAX_DROPS) { push("exhausted_drop_count"); continue; }
+      if (dropsToday >= maxPerDay) { push("daily_drop_limit"); continue; }
 
       // RULE 1 — exhausted by cumulative %. Baseline is the ORIGINAL floor.
       // SELF-HEALING BASELINE.
@@ -351,9 +450,19 @@ Deno.serve(async (req) => {
       if (bb === "winning" || bb === "owned") { push("already_owns_buybox"); continue; }
 
       // RULE 6 — competitor data present.
-      const lowest = snap?.lowest_fba_price ?? snap?.lowest_overall_price ?? null;
+      // The price to beat: the rule's anchor (per rule since 2026-09-18).
+      // 'buybox' uses the Buy Box price and falls back to the lowest when the
+      // snapshot has none; 'lowest' is the original behaviour.
+      const lowestCompetitor = snap?.lowest_fba_price ?? snap?.lowest_overall_price ?? null;
+      const wantBuybox = rule?.auto_lower_min_anchor === "buybox";
+      const bbPrice = snap?.buybox_price != null && Number(snap.buybox_price) > 0 ? Number(snap.buybox_price) : null;
+      const lowest = wantBuybox && bbPrice != null ? bbPrice : lowestCompetitor;
+      d.anchor = wantBuybox ? (bbPrice != null ? "buybox" : "lowest_fallback") : "lowest";
       d.lowest = lowest;
       if (lowest == null || !(Number(lowest) > 0)) { push("no_competitor_data"); continue; }
+      const snapAgeMs = snap?.fetched_at ? runStartedAt.getTime() - new Date(snap.fetched_at).getTime() : Infinity;
+      d.snapshot_age_min = Number.isFinite(snapAgeMs) ? Math.round(snapAgeMs / 60_000) : null;
+      if (!(snapAgeMs <= MAX_SNAPSHOT_AGE_MS)) { push("stale_competitor_data"); continue; }
 
       // Marketplace-correct price only. On US we may fall back to inventory,
       // which is denominated in USD; on any other marketplace we must not —
@@ -366,7 +475,6 @@ Deno.serve(async (req) => {
       }
 
       // RULE 4 — ROI floor: policy, raised by the rule's own floor.
-      const rule = a.rule_id ? ruleBy.get(a.rule_id) as Record<string, any> | undefined : undefined;
       const overrides = (rule?.min_roi_marketplace_overrides ?? {}) as Record<string, unknown>;
       const ruleFloorRaw = overrides?.[mp] ?? rule?.min_roi_percent ?? null;
       const ruleFloor = ruleFloorRaw == null ? null : Number(ruleFloorRaw);
@@ -384,8 +492,11 @@ Deno.serve(async (req) => {
       const floorPrice = priceForRoi(unitCost, fees, roiFloor, fx, mp);
       if (floorPrice == null) { push("fees_unresolvable"); continue; }
 
-      // Target: undercut the lowest by one cent.
-      const target = round2(Number(lowest) - UNDERCUT_STEP);
+      // Target: the rule's "lower by" amount below the lowest (default $0.01,
+      // 0 = match). Per rule since 2026-09-18; was a fixed UNDERCUT_STEP.
+      const undercutRaw = Number(rule?.auto_lower_min_undercut);
+      const undercut = Number.isFinite(undercutRaw) && undercutRaw >= 0 ? undercutRaw : UNDERCUT_STEP;
+      const target = round2(Number(lowest) - undercut);
 
       // RULE 2 — the 30% cap is TWO guards, and both are needed:
       //
@@ -437,6 +548,7 @@ Deno.serve(async (req) => {
         id: a.id,
         newMin,
         nextCount: drops + 1,
+        nextToday: dropsToday + 1,
         invId: mp === "US" ? (inv.id as string) : undefined,
         // Persist the anchor on the very first drop, so the cumulative guard is
         // live from run two onward regardless of how the flag was enabled.
@@ -452,7 +564,9 @@ Deno.serve(async (req) => {
           .from("repricer_assignments")
           .update({
             min_price_override: w.newMin,
-            auto_floor_drop_count: w.nextCount,
+            auto_floor_drop_count: w.nextCount, // lifetime total, no longer a limit
+            auto_floor_drop_day: today,
+            auto_floor_drops_on_day: w.nextToday,
             updated_at: new Date().toISOString(),
             // Only ever written when it was NULL — the anchor must never move
             // once set, or the cumulative cap would follow the price down.
@@ -471,6 +585,16 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Stamp every due rule, lowered or not, so its interval counts from this
+    // run. Dry runs never stamp: they must not delay the real schedule.
+    if (!dryRun && ruleIdsDue.length) {
+      const { error: stampErr } = await admin
+        .from("repricer_rules")
+        .update({ auto_lower_min_last_run_at: runStartedAt.toISOString() })
+        .in("id", ruleIdsDue);
+      if (stampErr) console.error(`[auto-lower-min] rule stamp failed: ${stampErr.message}`);
+    }
+
     const wouldLower = decisions.filter((x) => x.action === "lower").length;
     const skipReasons: Record<string, number> = {};
     for (const x of decisions) {
@@ -486,6 +610,8 @@ Deno.serve(async (req) => {
       detail: {
         dry_run: dryRun,
         marketplaces,
+        rules_on: allOnRules.length,
+        rules_due: dueRules.length,
         considered: assignments.length,
         would_lower: wouldLower,
         written,

@@ -7322,6 +7322,8 @@ export type Database = {
           auto_apply_enabled: boolean
           auto_floor_consecutive_losses: number
           auto_floor_drop_count: number
+          auto_floor_drop_day: string | null
+          auto_floor_drops_on_day: number
           auto_lower_min_price: boolean | null
           auto_raise_max_price: boolean | null
           auto_resumed_at: string | null
@@ -7509,6 +7511,8 @@ export type Database = {
           auto_apply_enabled?: boolean
           auto_floor_consecutive_losses?: number
           auto_floor_drop_count?: number
+          auto_floor_drop_day?: string | null
+          auto_floor_drops_on_day?: number
           auto_lower_min_price?: boolean | null
           auto_raise_max_price?: boolean | null
           auto_resumed_at?: string | null
@@ -7696,6 +7700,8 @@ export type Database = {
           auto_apply_enabled?: boolean
           auto_floor_consecutive_losses?: number
           auto_floor_drop_count?: number
+          auto_floor_drop_day?: string | null
+          auto_floor_drops_on_day?: number
           auto_lower_min_price?: boolean | null
           auto_raise_max_price?: boolean | null
           auto_resumed_at?: string | null
@@ -9129,6 +9135,12 @@ export type Database = {
       }
       repricer_rules: {
         Row: {
+          auto_lower_min_anchor: string
+          auto_lower_min_interval_minutes: number
+          auto_lower_min_last_run_at: string | null
+          auto_lower_min_marketplaces: string[]
+          auto_lower_min_max_drops_per_day: number
+          auto_lower_min_undercut: number
           age_overlay_enabled: boolean | null
           age_overlay_mode: string | null
           ai_settings: Json | null
@@ -9242,6 +9254,12 @@ export type Database = {
           when_only_seller: string | null
         }
         Insert: {
+          auto_lower_min_anchor?: string
+          auto_lower_min_interval_minutes?: number
+          auto_lower_min_last_run_at?: string | null
+          auto_lower_min_marketplaces?: string[]
+          auto_lower_min_max_drops_per_day?: number
+          auto_lower_min_undercut?: number
           age_overlay_enabled?: boolean | null
           age_overlay_mode?: string | null
           ai_settings?: Json | null
@@ -9355,6 +9373,12 @@ export type Database = {
           when_only_seller?: string | null
         }
         Update: {
+          auto_lower_min_anchor?: string
+          auto_lower_min_interval_minutes?: number
+          auto_lower_min_last_run_at?: string | null
+          auto_lower_min_marketplaces?: string[]
+          auto_lower_min_max_drops_per_day?: number
+          auto_lower_min_undercut?: number
           age_overlay_enabled?: boolean | null
           age_overlay_mode?: string | null
           ai_settings?: Json | null
