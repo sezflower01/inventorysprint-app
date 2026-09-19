@@ -120,6 +120,16 @@ const DUE_SLACK_MS = 60_000;
  * days-old lowest price could have set a floor.
  */
 const MAX_SNAPSHOT_AGE_MS = 3 * 60 * 60 * 1000;
+/**
+ * Never trust a Buy Box status older than this. repricer-scheduler writes
+ * last_buybox_status and last_sp_api_check_at in the same UPDATE, so the
+ * latter is the status's age. Measured 2026-09-19 over the 679 covered US
+ * listings: 233 "losing" statuses were over a day old, 239 in-stock listings
+ * had a "losing" status older than 3 h -- some ~132 days. A stale "losing"
+ * would let the worker lower the floor of a listing that has long since won
+ * the Buy Box, so the skip-if-winning rule must not rest on it.
+ */
+const MAX_BB_STATUS_AGE_MS = 3 * 60 * 60 * 1000;
 const MAX_CUMULATIVE_DROP_PCT = 30;
 const UNDERCUT_STEP = 0.01;
 /** Tolerance when re-verifying ROI after cent-rounding. */
@@ -144,6 +154,8 @@ interface AssignmentRow {
   auto_floor_drop_day: string | null;
   auto_floor_drops_on_day: number | null;
   last_buybox_status: string | null;
+  /** When last_buybox_status was written (same UPDATE in repricer-scheduler). */
+  last_sp_api_check_at: string | null;
   /**
    * Marketplace-correct current price. Deliberately NOT inventory.my_price:
    * that column holds the US price, so comparing it against an MX/CA/BR
@@ -172,6 +184,8 @@ interface Decision {
   rule_id?: string | null;
   /** Age of the competitor snapshot the decision used, in minutes. */
   snapshot_age_min?: number | null;
+  /** Age of the Buy Box status the decision relied on, in minutes. */
+  bb_status_age_min?: number | null;
   /** Which price was beaten: lowest, buybox, or lowest_fallback (no BB price). */
   anchor?: "lowest" | "buybox" | "lowest_fallback";
   cumulative_drop_pct?: number | null;
@@ -256,7 +270,8 @@ Deno.serve(async (req) => {
         .from("repricer_assignments")
         .select(
           "id, user_id, asin, sku, marketplace, rule_id, min_price_override, manual_min_price, " +
-            "auto_floor_drop_count, auto_floor_drop_day, auto_floor_drops_on_day, last_buybox_status, last_applied_price",
+            "auto_floor_drop_count, auto_floor_drop_day, auto_floor_drops_on_day, last_buybox_status, last_sp_api_check_at, " +
+            "last_applied_price",
         )
         .in("rule_id", ruleIdsDue)
         .eq("is_enabled", true)
@@ -445,9 +460,13 @@ Deno.serve(async (req) => {
         }
       }
 
-      // RULE 5 — already winning.
+      // RULE 5 — already winning. Only on a FRESH status: a stale "losing"
+      // cannot prove we are not winning now (see MAX_BB_STATUS_AGE_MS).
       const bb = String(a.last_buybox_status ?? "").toLowerCase();
       if (bb === "winning" || bb === "owned") { push("already_owns_buybox"); continue; }
+      const bbAgeMs = a.last_sp_api_check_at ? runStartedAt.getTime() - new Date(a.last_sp_api_check_at).getTime() : Infinity;
+      d.bb_status_age_min = Number.isFinite(bbAgeMs) ? Math.round(bbAgeMs / 60_000) : null;
+      if (!(bbAgeMs <= MAX_BB_STATUS_AGE_MS)) { push("stale_buybox_status"); continue; }
 
       // RULE 6 — competitor data present.
       // The price to beat: the rule's anchor (per rule since 2026-09-18).
