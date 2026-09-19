@@ -141,8 +141,11 @@ interface ProductRow {
   awaiting_amazon: boolean;
   pending_listing_count: number;
   /**
-   * Purchase-weighted average suggested on "Price changed" rows only
-   * (20260918041000): total spent / total units over the last 12 months of
+   * Purchase-weighted average, suggested on every product with 2+ purchases
+   * since 20260919041000 (was "Price changed" rows only, 20260918041000).
+   * Shown as a button the seller picks; never written to the COG on its own.
+   * Formula since 20260919042000: total spent / total units over purchases
+   * since January 1 of the current year (resets every Jan 1). Before that: the last 12 months of
    * purchases including the new one (all purchases when < 10 units in 12
    * months). The seller chose this over a stock-weighted average, which
    * depends on pooled cross-marketplace stock counts.
@@ -151,10 +154,15 @@ interface ProductRow {
   suggested_avg_spent?: number | null;
   suggested_avg_units?: number | null;
   suggested_avg_lots?: number | null;
-  suggested_avg_window?: "last_12_months" | "all_time" | null;
+  suggested_avg_window?: "year_to_date" | "last_12_months" | "all_time" | null;
 }
 
 type CogSource = "import" | "manual" | "listing";
+
+/** The Average counts purchases since Jan 1 of the current year (20260919042000). */
+const avgWindowLabel = (w: ProductRow["suggested_avg_window"]) =>
+  w === "year_to_date" ? `purchases since Jan 1, ${new Date().getFullYear()}`
+  : w === "all_time" ? "all purchases" : "last 12 months";
 
 /** The COG table's columns, as returned by insert/update. */
 interface CogRecord {
@@ -945,6 +953,27 @@ export default function CogOnRecord() {
                                 {r.needs_review ? `Confirm ${money(r.unit_cost)}` : "Mark reviewed"}
                               </Button>
                             )}
+                            {/* Average on every row with 2+ purchases (20260919041000). A pick,
+                                never auto-applied: it only fills the box; ✓ saves it. "Price
+                                changed" rows show it inside their own panel below. */}
+                            {!hasPriceChange(r) && r.suggested_avg_cost != null && r.suggested_avg_spent != null && r.suggested_avg_units != null
+                              && Number(r.suggested_avg_cost) !== Number(r.unit_cost) && (
+                              <div className="mt-1.5 text-xs">
+                                <Button
+                                  size="sm" variant="outline" className="h-6 px-2 text-xs"
+                                  onClick={() => setDrafts((d) => ({ ...d, [r.asin]: Number(r.suggested_avg_cost).toFixed(2) }))}
+                                  disabled={saving}
+                                  title="Copy the average of all purchases into the COG box — press ✓ to save it"
+                                >
+                                  Average {money(r.suggested_avg_cost)}
+                                </Button>
+                                <div className="mt-1 text-[11px] text-muted-foreground tabular-nums">
+                                  = {money(r.suggested_avg_spent)} spent ÷ {Number(r.suggested_avg_units).toLocaleString()} units
+                                  {r.suggested_avg_lots != null && <> · {r.suggested_avg_lots} purchases</>}
+                                  {" · "}{avgWindowLabel(r.suggested_avg_window)}
+                                </div>
+                              </div>
+                            )}
                             {hasPriceChange(r) && (
                               <div className="mt-1.5 rounded-md border border-orange-500/50 bg-orange-500/5 px-2 py-1.5 text-xs">
                                 <div className="tabular-nums">
@@ -985,7 +1014,7 @@ export default function CogOnRecord() {
                                   <div className="mt-1 text-[11px] text-muted-foreground tabular-nums">
                                     Average = {money(r.suggested_avg_spent)} spent ÷ {Number(r.suggested_avg_units).toLocaleString()} units
                                     {r.suggested_avg_lots != null && <> · {r.suggested_avg_lots} {r.suggested_avg_lots === 1 ? "purchase" : "purchases"}</>}
-                                    {" · "}{r.suggested_avg_window === "all_time" ? "all purchases" : "last 12 months"}, incl. this one
+                                    {" · "}{avgWindowLabel(r.suggested_avg_window)}, incl. this one
                                   </div>
                                 )}
                               </div>
