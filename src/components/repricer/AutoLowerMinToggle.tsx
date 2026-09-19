@@ -64,6 +64,11 @@ interface Props {
 /** Marketplaces the worker acts in today. */
 const SUPPORTED = ["US"];
 const INTERVALS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60];
+// Drops per day keep pace with the interval: 12 per 60 min (one per two
+// checks). Filled in whenever the interval changes; the seller can override.
+const suggestedDropsPerDay = (intervalMin: number) => Math.round(720 / intervalMin);
+// One drop per check at 5 min -- each run lowers a listing at most once.
+const MAX_DROPS_PER_DAY = 288;
 
 type Anchor = "lowest" | "buybox";
 
@@ -227,8 +232,8 @@ export default function AutoLowerMinToggle({ userId, marketplace, onChanged }: P
     if (raw === undefined) return;
     const n = Math.round(Number(raw));
     setDrafts((d) => ({ ...d, [rule.ruleId]: { ...d[rule.ruleId], maxPerDay: undefined } }));
-    if (!Number.isFinite(n) || n < 1 || n > 20) {
-      toast.error("Max drops per day must be a whole number from 1 to 20.");
+    if (!Number.isFinite(n) || n < 1 || n > MAX_DROPS_PER_DAY) {
+      toast.error(`Max drops per day must be a whole number from 1 to ${MAX_DROPS_PER_DAY}.`);
       return;
     }
     if (n !== rule.maxPerDay) void saveSetting(rule, { auto_lower_min_max_drops_per_day: n }, `max ${n} drops per day`);
@@ -323,8 +328,14 @@ export default function AutoLowerMinToggle({ userId, marketplace, onChanged }: P
                           <Select
                             value={String(rule.interval)}
                             disabled={busy}
-                            onValueChange={(v) =>
-                              void saveSetting(rule, { auto_lower_min_interval_minutes: Number(v) }, `checks every ${v} min`)}
+                            onValueChange={(v) => {
+                              const drops = suggestedDropsPerDay(Number(v));
+                              void saveSetting(
+                                rule,
+                                { auto_lower_min_interval_minutes: Number(v), auto_lower_min_max_drops_per_day: drops },
+                                `checks every ${v} min, up to ${drops} drops per day`,
+                              );
+                            }}
                           >
                             <SelectTrigger className="h-7 text-xs"><SelectValue /></SelectTrigger>
                             <SelectContent>
@@ -364,7 +375,7 @@ export default function AutoLowerMinToggle({ userId, marketplace, onChanged }: P
                         <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
                           Max drops per day
                           <Input
-                            type="number" inputMode="numeric" min={1} max={20} step={1}
+                            type="number" inputMode="numeric" min={1} max={MAX_DROPS_PER_DAY} step={1}
                             className="h-7 text-xs tabular-nums"
                             disabled={busy}
                             value={draft.maxPerDay ?? String(rule.maxPerDay)}
@@ -373,6 +384,11 @@ export default function AutoLowerMinToggle({ userId, marketplace, onChanged }: P
                             onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
                           />
                         </label>
+                        <p className="col-span-2 text-[10px] text-muted-foreground">
+                          {rule.maxPerDay === suggestedDropsPerDay(rule.interval)
+                            ? `Drops per day follow the interval: 12 per 60 min, so ${rule.maxPerDay} at every ${rule.interval} min.`
+                            : `Custom limit. Every ${rule.interval} min would suggest ${suggestedDropsPerDay(rule.interval)} (12 per 60 min).`}
+                        </p>
                         {rule.interval < 15 && (
                           <p className="col-span-2 text-[10px] text-amber-600 dark:text-amber-400">
                             Competitor prices refresh about every 20 minutes, so checking this often mostly re-reads the same prices.
