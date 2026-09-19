@@ -39,7 +39,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 import { acquireKeepaGlobalSlot, reportKeepaTokensLeft, recordKeepa429, KEEPA_COST, KEEPA_RESERVE } from '../_shared/keepa-rate-gate.ts';
 import { lookupAsinDetails } from '../_shared/asin-catalog-lookup.ts';
-import { getCatalogAccessToken, fetchCatalogItemDetails, fetchCatalogItemsBatch, SPAPI_HOSTS } from '../_shared/spapi-catalog-image.ts';
+import { getCatalogAccessToken, fetchCatalogItemsBatch, SPAPI_HOSTS } from '../_shared/spapi-catalog-image.ts';
 import { MARKETPLACE_META } from '../_shared/marketplace-map.ts';
 import { waitForApiToken } from '../_shared/rate-limiter.ts';
 import { qualifyListing } from '../_shared/source-qualification.ts';
@@ -47,14 +47,27 @@ import { summarizeOffers } from '../_shared/keepa-offers.ts';
 import { readEligibility, resolveEligibility } from '../_shared/eligibility-lookup.ts';
 import { withCronLock } from '../_shared/cron-lock.ts';
 
-// Bound on SP-API catalog lookups per run. These cost no Keepa tokens, but
-// they do cost wall-clock inside the run budget, and a run only processes a
-// couple of sellers anyway.
-const MAX_SPAPI_IMAGE_LOOKUPS = 12;
+// Bound on ASINs sent to SP-API Catalog Items per run. These cost no Keepa
+// tokens; they cost wall-clock inside the run budget and share the catalog_api
+// bucket (2 req/s) with backfill-catalog-brands and classify-listing-brands,
+// which is what the batching and the token wait respect.
+//
+// Raised from 12 on 2026-09-19 with the switch from one-ASIN-per-call to
+// fetchCatalogItemsBatch (20 per call): 12 ASINs/run could not keep up with
+// detection, let alone clear a 43,544-row backlog. 300 ASINs is 15 batched
+// calls, ~8s at the bucket's rate.
+const MAX_SPAPI_IMAGE_ASINS = 300;
 
-// How many picture-less rows to consider per run. Newest first, since a fresh
-// detection is the one a user is most likely looking at right now.
-const BLANK_IMAGE_SCAN_LIMIT = 60;
+// How many rows missing a title or an image to consider per run.
+//
+// NOT "newest first" any more. Newest-first with a 60-row window never
+// advanced: detection adds blanks continuously, so the same recent rows were
+// re-scanned every run while 43,313 older ones were unreachable (measured
+// 2026-09-19). Rows are now taken never-tried first, then
+// longest-ago-tried (details_checked_at, 20260919052000), so every row is
+// reached and a hopeless ASIN costs one attempt per cycle instead of one per
+// run.
+const BLANK_DETAIL_SCAN_LIMIT = 400;
 
 const MAX_PRODUCT_DETAIL_ASINS = 50;
 
@@ -135,66 +148,139 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * Amazon's own data, on a quota entirely separate from Keepa.
  */
 async function backfillBlankImages(admin: any, deadlineAt: number): Promise<Record<string, number>> {
-  const stats = { scanned: 0, fromCatalog: 0, fromSpApi: 0, stillBlank: 0, tokenMissing: 0 };
+  const stats = { scanned: 0, fromCatalog: 0, fromBrandCache: 0, fromSpApi: 0, stillBlank: 0, tokenMissing: 0, spapiAsins: 0 };
   try {
-    const { data: blankRows } = await admin
-      .from('seller_watch_new_listings')
-      .select('id, asin, user_id, marketplace, title, image_url')
-      .is('image_url', null)
+    // Rows missing EITHER field. The old query filtered on a null image only,
+    // so a row that had an image but no title was never revisited (1,368 of
+    // them on 2026-09-19).
+    //
+    // Never-tried first, then longest-ago-tried. PostgREST cannot express
+    // "NULLS FIRST" with .order(nullsFirst) on a mixed sort reliably enough to
+    // rely on, so it is two reads: the never-tried ones, then the stalest to
+    // fill the remainder of the window.
+    const need = () =>
+      admin.from('seller_watch_new_listings')
+        .select('id, asin, user_id, marketplace, title, image_url')
+        .or('image_url.is.null,title.is.null');
+
+    const { data: fresh } = await need()
+      .is('details_checked_at', null)
       .order('detected_at', { ascending: false })
-      .limit(BLANK_IMAGE_SCAN_LIMIT);
+      .limit(BLANK_DETAIL_SCAN_LIMIT);
 
-    if (!blankRows?.length) return stats;
+    let blankRows: any[] = fresh ?? [];
+    if (blankRows.length < BLANK_DETAIL_SCAN_LIMIT) {
+      const { data: stale } = await need()
+        .not('details_checked_at', 'is', null)
+        .order('details_checked_at', { ascending: true })
+        .limit(BLANK_DETAIL_SCAN_LIMIT - blankRows.length);
+      blankRows = blankRows.concat(stale ?? []);
+    }
+
+    if (!blankRows.length) return stats;
     stats.scanned = blankRows.length;
+    const asins: string[] = blankRows.map((r: any) => r.asin);
 
-    const details = await lookupAsinDetails(admin, blankRows.map((r: any) => r.asin));
+    // ── FREE SOURCES FIRST ────────────────────────────────────────────────
+    // Catalog tables this app already fills (title + image), then
+    // asin_brand_cache, which backfill-catalog-brands populates from the same
+    // SP-API catalogue and which held titles for 7,697 blank rows on
+    // 2026-09-19. It has no image column, so a cache hit can still leave the
+    // image to fetch.
+    const details = await lookupAsinDetails(admin, asins);
+    const cachedTitles = new Map<string, string>();
+    for (let i = 0; i < asins.length; i += 200) {
+      const { data: cached } = await admin
+        .from('asin_brand_cache')
+        .select('asin, title')
+        .in('asin', asins.slice(i, i + 200))
+        .not('title', 'is', null);
+      for (const c of cached ?? []) if (c.title) cachedTitles.set(c.asin, c.title);
+    }
 
-    // Group the leftovers by (user, marketplace): the SP-API token is scoped
-    // to both, so this exchanges one token per group rather than per row.
-    const stillBlank = blankRows.filter((r: any) => !details.get(r.asin)?.image);
+    // Group by (user, marketplace): an SP-API token is scoped to both, so this
+    // exchanges one token per group rather than one per row.
+    const stillNeedsSpApi = blankRows.filter((r: any) => {
+      const found = details.get(r.asin);
+      const haveImage = r.image_url || found?.image;
+      const haveTitle = r.title || found?.title || cachedTitles.get(r.asin);
+      return !haveImage || !haveTitle;
+    });
     const groups = new Map<string, any[]>();
-    for (const row of stillBlank) {
+    for (const row of stillNeedsSpApi) {
       const key = `${row.user_id}|${row.marketplace}`;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push(row);
     }
 
-    let spapiBudget = MAX_SPAPI_IMAGE_LOOKUPS;
+    // ── SP-API, BATCHED ──────────────────────────────────────────────────
+    // 20 ASINs per call (fetchCatalogItemsBatch) instead of one, which is what
+    // makes clearing a 43,000-row backlog possible at all. The helper waits on
+    // the shared catalog_api token bucket, so this cannot outrun the 2 req/s
+    // limit the brand backfill also lives within.
+    let asinBudget = MAX_SPAPI_IMAGE_ASINS;
     for (const [key, rows] of groups) {
-      if (spapiBudget <= 0 || Date.now() >= deadlineAt) break;
+      if (asinBudget <= 0 || Date.now() >= deadlineAt) break;
       const [userId, marketplace] = key.split('|');
       const token = await getCatalogAccessToken(admin, userId, marketplace);
       if (!token) {
         stats.tokenMissing += rows.length;
         continue;
       }
-      for (const row of rows) {
-        if (spapiBudget <= 0 || Date.now() >= deadlineAt) break;
-        spapiBudget--;
-        const spapi = await fetchCatalogItemDetails(admin, token, row.asin, marketplace);
-        if (spapi.image || spapi.title) {
-          const prev = details.get(row.asin);
-          details.set(row.asin, {
-            title: prev?.title ?? spapi.title,
-            image: prev?.image ?? spapi.image,
-          });
-          if (spapi.image) stats.fromSpApi++;
-        }
+      const take = rows.slice(0, asinBudget).map((r: any) => r.asin);
+      asinBudget -= take.length;
+      stats.spapiAsins += take.length;
+      const batch = await fetchCatalogItemsBatch(admin, token, take, marketplace);
+      for (const [asin, spapi] of batch) {
+        if (!spapi?.image && !spapi?.title) continue;
+        const prev = details.get(asin);
+        details.set(asin, {
+          title: prev?.title ?? spapi.title,
+          image: prev?.image ?? spapi.image,
+        });
+        if (spapi.image) stats.fromSpApi++;
       }
     }
 
+    // ── WRITE ────────────────────────────────────────────────────────────
+    // details_checked_at is stamped on every scanned row, found or not: that
+    // is what moves the window on and stops a permanently blank ASIN being
+    // re-tried every five minutes.
+    // A per-row UPDATE is only needed where something was actually found. The
+    // rest just need the timestamp, so they go in chunked bulk updates --
+    // 400 round trips inside a 90s run budget was most of the cost of the
+    // scan, and 237 of them carried no data.
+    const checkedAt = new Date().toISOString();
+    const emptyIds: string[] = [];
     for (const row of blankRows) {
       const found = details.get(row.asin);
-      if (!found?.image && !found?.title) { stats.stillBlank++; continue; }
-      const patch: Record<string, unknown> = {};
-      if (found.image) patch.image_url = found.image;
-      if (found.title && !row.title) patch.title = found.title;
-      if (!Object.keys(patch).length) { stats.stillBlank++; continue; }
+      const patch: Record<string, unknown> = { details_checked_at: checkedAt };
+      if (!row.image_url && found?.image) patch.image_url = found.image;
+      if (!row.title) {
+        const title = found?.title ?? cachedTitles.get(row.asin);
+        if (title) {
+          patch.title = title;
+          if (!found?.title) stats.fromBrandCache++;
+        }
+      }
+      if (Object.keys(patch).length === 1) {
+        stats.stillBlank++;
+        emptyIds.push(row.id);
+        continue;
+      }
       await admin.from('seller_watch_new_listings').update(patch).eq('id', row.id);
     }
-    stats.fromCatalog = stats.scanned - stats.stillBlank - stats.fromSpApi;
+    // Chunked: supabase-js writes .in() straight into the query string, and a
+    // few hundred uuids build a URL Deno rejects outright (see
+    // _shared/asin-catalog-lookup.ts).
+    for (let i = 0; i < emptyIds.length; i += 100) {
+      await admin.from('seller_watch_new_listings')
+        .update({ details_checked_at: checkedAt })
+        .in('id', emptyIds.slice(i, i + 100));
+    }
+    stats.fromCatalog = stats.scanned - stats.stillBlank - stats.fromSpApi - stats.fromBrandCache;
   } catch (e) {
-    console.warn('[check-seller-watchlist] image backfill failed', (e as Error).message);
+    console.warn('[check-seller-watchlist] detail backfill failed', (e as Error).message);
   }
   return stats;
 }
