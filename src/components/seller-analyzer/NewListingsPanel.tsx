@@ -8,6 +8,7 @@ import { amazonListingUrl, amazonStorefrontUrl } from "./amazonUrls";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -231,6 +232,15 @@ export default function NewListingsPanel() {
   // waited behind it.
   const [tab, setTab] = useState("searching");
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  /**
+   * Show one seller's detections instead of the whole queue (2026-09-19).
+   * A new seller's first detections land wherever recency puts them, so with
+   * hundreds queued the newest store is buried. Built like the supplier filter
+   * on Created Listings: every store with its listing count beside the name.
+   * "all" is every seller. Counts come from the rows actually loaded (the tab
+   * caps at 1,000), which is why the note below says so when it bites.
+   */
+  const [sellerFilter, setSellerFilter] = useState<string>("all");
   const [removing, setRemoving] = useState(false);
   const { toast } = useToast();
 
@@ -528,15 +538,61 @@ export default function NewListingsPanel() {
             // Amazon returned no brand for these, so no rule can classify them.
             // Shown rather than hidden: absent data is not a confirmed mismatch.
             const blocked = isDone ? [] : excluded;
-            let shown = rows;
 
-            const ids = rows.map((l) => l.id);
+            // One entry per seller present in the loaded rows, most listings
+            // first — the store that just started adding things is the one
+            // you are looking for, and it is the one recency buries.
+            const sellerKey = (l: NewListing) => `${l.seller_id}|${l.marketplace}`;
+            const sellerCounts = new Map<string, number>();
+            for (const l of rows) sellerCounts.set(sellerKey(l), (sellerCounts.get(sellerKey(l)) ?? 0) + 1);
+            const sellerOptions = Array.from(sellerCounts.entries())
+              .map(([key, count]) => ({ key, count, name: sellerNames[key] ?? key.split("|")[0] }))
+              .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+            // A filter on a seller who has nothing in THIS tab would show an
+            // empty list with no explanation, so fall back to everything.
+            const activeSeller = sellerCounts.has(sellerFilter) ? sellerFilter : "all";
+            const shown = activeSeller === "all" ? rows : rows.filter((l) => sellerKey(l) === activeSeller);
+
+            // Selection follows the filter: "Select all shown" must never
+            // reach rows the seller cannot see.
+            const ids = shown.map((l) => l.id);
             const allSelected = ids.length > 0 && ids.every((id) => selected.has(id));
             // Only the loaded rows can ever be selected, so the label says so
             // rather than letting "Select all" imply it reached all of them.
             const truncated = total > rows.length;
             return (
               <TabsContent key={key} value={key} className="mt-0 space-y-3">
+                {sellerOptions.length > 1 && (
+                  <div className="flex flex-wrap items-end gap-2 pb-1">
+                    <label className="flex flex-col gap-1">
+                      <span className="text-xs font-medium">
+                        Filter by seller ({sellerOptions.length.toLocaleString()} store{sellerOptions.length === 1 ? "" : "s"})
+                      </span>
+                      <Select value={activeSeller} onValueChange={(v) => { setSellerFilter(v); setSelected(new Set()); }}>
+                        <SelectTrigger className="w-[300px] h-8 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        {/* Scrolls: a long watch list must not run off the screen. */}
+                        <SelectContent className="max-h-[300px] overflow-y-auto">
+                          <SelectItem value="all" className="text-xs">
+                            All sellers ({rows.length.toLocaleString()})
+                          </SelectItem>
+                          {sellerOptions.map((s) => (
+                            <SelectItem key={s.key} value={s.key} className="text-xs">
+                              {s.name} ({s.count.toLocaleString()})
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </label>
+                    {activeSeller !== "all" && (
+                      <Button type="button" variant="ghost" size="sm" className="h-8 text-xs" onClick={() => { setSellerFilter("all"); setSelected(new Set()); }}>
+                        Show all sellers
+                      </Button>
+                    )}
+                  </div>
+                )}
+
                 {rows.length > 0 && (
                   <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-2">
                     <label className="flex items-center gap-2 text-xs cursor-pointer select-none">
@@ -546,8 +602,13 @@ export default function NewListingsPanel() {
                         aria-label="Select all listings shown"
                       />
                       <span>
-                        Select all shown ({rows.length.toLocaleString()})
-                        {truncated && (
+                        Select all shown ({shown.length.toLocaleString()})
+                        {activeSeller !== "all" && (
+                          <span className="text-muted-foreground">
+                            {" "}from {sellerNames[activeSeller] ?? activeSeller.split("|")[0]}
+                          </span>
+                        )}
+                        {activeSeller === "all" && truncated && (
                           <span className="text-muted-foreground">
                             {" "}of {total.toLocaleString()}
                           </span>
