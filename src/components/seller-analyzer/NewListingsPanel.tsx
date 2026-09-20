@@ -224,7 +224,7 @@ function DeleteMatchingExcludedWords({ onDone }: { onDone: () => void }) {
 
 export default function NewListingsPanel() {
   const { sourceMap } = useBrandSources();
-  const { done, pending, excluded, sellerActivity, sellerCatalog, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, pendingOlderTotal, reviewWindowDays, myBrandsOnly, setMyBrandsOnly, trustedDetectionsOnly, setTrustedDetectionsOnly, loading, eligibility, sellerNames, deleteListings, deleteByStatus, refresh } = useSellerNewListings();
+  const { done, pending, excluded, sellerActivity, sellerCatalog, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, pendingOlderTotal, reviewWindowDays, myBrandsOnly, setMyBrandsOnly, sortBy, setSortBy, trustedDetectionsOnly, setTrustedDetectionsOnly, loading, eligibility, sellerNames, deleteListings, deleteByStatus, refresh } = useSellerNewListings();
   // Lands on the review list. Was "done", a tab frozen at 6 rows: its statuses
   // were written only by the source worker deleted on 2026-08-19, and a grep of
   // every edge function and the whole frontend on 2026-09-02 found nothing that
@@ -585,6 +585,23 @@ export default function NewListingsPanel() {
                         </SelectContent>
                       </Select>
                     </label>
+                    {/* Sort (2026-09-20). Brand-strength-first is the default
+                        and buries fresh detections under a seller who holds a
+                        lot of your brands -- which looked like detection had
+                        stopped. Only meaningful with "My brands only" on; with
+                        "All brands" the queue is already newest-first. */}
+                    {myBrandsOnly && (
+                      <label className="flex flex-col gap-1">
+                        <span className="text-xs font-medium">Sort by</span>
+                        <Select value={sortBy} onValueChange={(v) => setSortBy(v as "brand" | "newest")}>
+                          <SelectTrigger className="w-[200px] h-8 text-xs"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="brand" className="text-xs">Strongest brand match</SelectItem>
+                            <SelectItem value="newest" className="text-xs">Newest detected first</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </label>
+                    )}
                     {activeSeller !== "all" && (
                       <Button type="button" variant="ghost" size="sm" className="h-8 text-xs" onClick={() => { setSellerFilter("all"); setSelected(new Set()); }}>
                         Show all sellers

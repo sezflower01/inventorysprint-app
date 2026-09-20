@@ -205,6 +205,16 @@ export function useSellerNewListings() {
   const [sellerActivity, setSellerActivity] = useState<SellerActivity[]>([]);
   const [sellerCatalog, setSellerCatalog] = useState<SellerCatalogEntry[]>([]);
   const [myBrandsOnly, setMyBrandsOnly] = useState(false);
+  /**
+   * How the queue is ordered (2026-09-20). "brand" is the original behaviour:
+   * strongest brand match first, then date. It hides today's work when a
+   * seller holds a lot of your brands -- measured that day, the first 1,000
+   * brand-sorted rows led with 2026-09-11 and 2026-09-01 (my_brand_asins up
+   * to 94) while 143 rows detected that morning sat further down, which read
+   * as "detection stopped" when detection was in fact running normally.
+   * "newest" is a straight detected_at sort.
+   */
+  const [sortBy, setSortBy] = useState<"brand" | "newest">("brand");
   /** Default true: show only detections whose dates are trustworthy. */
   const [trustedDetectionsOnly, setTrustedDetectionsOnly] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -239,7 +249,7 @@ export function useSellerNewListings() {
           .from("seller_new_listings_branded")
           .select(SELECT_COLS)
           .in("source_status", ["candidates_found", "sourced", "no_candidates"]))
-          .order(myBrandsOnly ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
+          .order(myBrandsOnly && sortBy === "brand" ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
         // ONE RULE: does this listing's brand match the seller's own brands?
@@ -256,7 +266,7 @@ export function useSellerNewListings() {
           .select(SELECT_COLS)
           .in("source_status", ["unsourced", "sourcing"]))
           .eq("brand_match_state", "matched")
-          .order(myBrandsOnly ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
+          .order(myBrandsOnly && sortBy === "brand" ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
         // NO BRAND FROM AMAZON -- kept visible, in its own group.
@@ -272,7 +282,7 @@ export function useSellerNewListings() {
           .select(SELECT_COLS)
           .in("source_status", ["unsourced", "sourcing"]))
           .eq("brand_match_state", "unknown")
-          .order(myBrandsOnly ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
+          .order(myBrandsOnly && sortBy === "brand" ? "my_brand_asins" : "detected_at", { ascending: false, nullsFirst: false })
           .order("detected_at", { ascending: false })
           .limit(PAGE_SIZE),
         supabase
@@ -393,7 +403,7 @@ export function useSellerNewListings() {
     } finally {
       setLoading(false);
     }
-  }, [myBrandsOnly, trustedDetectionsOnly]);
+  }, [myBrandsOnly, trustedDetectionsOnly, sortBy]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -545,7 +555,7 @@ export function useSellerNewListings() {
   return {
     done, pending, excluded, sellerActivity, sellerCatalog, doneTotal, pendingTotal, excludedTotal, pendingQualifiedTotal, loading,
     pendingOlderTotal, reviewWindowDays: REVIEW_WINDOW_DAYS,
-    myBrandsOnly, setMyBrandsOnly,
+    myBrandsOnly, setMyBrandsOnly, sortBy, setSortBy,
     trustedDetectionsOnly, setTrustedDetectionsOnly,
     eligibility, sellerNames, deleteListings,
     deleteByStatus, refresh,
