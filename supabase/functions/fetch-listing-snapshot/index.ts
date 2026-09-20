@@ -506,6 +506,17 @@ Deno.serve(async (req) => {
       .map((r: any) => r?.rank).filter((n: any) => typeof n === 'number' && n > 0);
     const salesRank: number | null = broadRanks.length ? Math.min(...broadRanks) : null;
 
+    // Keep what Amazon said, including nothing. Without this row a blank BSR in
+    // the extension is unexplainable: "Amazon has no rank for this ASIN" and
+    // "the lookup never ran" look identical (20260920060000). Fire-and-forget
+    // -- a cache write must never fail a scan.
+    adminClient
+      .from('asin_brand_cache')
+      .upsert({ asin, sales_rank: salesRank, sales_rank_at: new Date().toISOString() }, { onConflict: 'asin' })
+      .then(({ error }: { error: unknown }) => {
+        if (error) console.warn('[fetch-listing-snapshot] sales_rank cache write failed', error);
+      });
+
     // For simple mode (e.g., printing page), return immediately with just catalog data
     if (simple) {
       console.log(`Simple mode: returning in ${Date.now() - startTime}ms`);

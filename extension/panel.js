@@ -1451,6 +1451,10 @@
           ? Number(prod.salesRank)
           : null;
         renderMeta(); renderEligibility(); renderFbaEligibility(); renderFbaCompliance(); renderRoiAndSignal();
+        // Also re-render the stability block: it owns the BSR card, and when
+        // Keepa finishes FIRST that card was drawn before Amazon's fallback
+        // rank arrived, leaving "—" until the next scan.
+        renderStability();
         markSummarySourceReady("snapshot");
         // Not approved yet on this first check? Amazon's restrictions API and
         // our own seller-account override (see fetch-listing-snapshot)
@@ -1919,7 +1923,10 @@
     { const _el = $("apx-sa-pl-info"); if (_el) _el.title = ready("history", "stability") ? plCaption : "Loading price history…"; }
 
     const { bsr, source: bsrSource } = displayBsr();
-    $("apx-sa-bsr").textContent = bsr ? "#" + bsr.toLocaleString() : "—";
+    // "No rank" only once BOTH sources have answered -- before that a dash
+    // means "still loading", and claiming otherwise is worse than a dash.
+    const bsrSettled = ready("stability") && state.product && "salesRank" in state.product;
+    $("apx-sa-bsr").textContent = bsr ? "#" + bsr.toLocaleString() : (bsrSettled ? "No rank" : "—");
     { const _b = $("apx-sa-bsr"); if (_b) _b.title = bsr
         ? (bsrSource === "amazon" ? "Amazon's own sales rank (Keepa has none for this product)" : "Keepa sales rank")
         : "No sales rank from Keepa or Amazon"; }
