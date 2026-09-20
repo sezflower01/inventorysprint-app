@@ -411,7 +411,12 @@ Deno.serve(async (req) => {
       catalogData = await callSpApi(
         `/catalog/2022-04-01/items/${asin}`,
         accessToken,
-        { marketplaceIds: marketplaceId, includedData: 'summaries,images', locale }
+        // salesRanks rides along free -- same call, same catalog_api quota.
+        // The extension's BSR comes from Keepa, which has NO sales rank for
+        // about 8% of scanned products (measured 2026-09-20: 313 of 3,838
+        // cached, mostly books/ISBNs and brand-new listings). Those showed
+        // "BSR —" and "Est/mo —" with nothing to fall back on.
+        { marketplaceIds: marketplaceId, includedData: 'summaries,images,salesRanks', locale }
       );
     } catch (err) {
       const message = err instanceof Error ? (err as Error).message : String(err);
@@ -489,6 +494,17 @@ Deno.serve(async (req) => {
       images.find((i: any) => i?.marketplaceId === 'ATVPDKIKX0DER') ||
       images[0];
     const imageUrl = imageForMarketplace?.images?.[0]?.link || '';
+
+    // Broad department rank (salesRanks[].displayGroupRanks[]) -- the number
+    // sellers mean by BSR. NOT classificationRanks, which is a narrow
+    // subcategory rank and not comparable between products (see
+    // _shared/spapi-catalog-image.ts for the same choice).
+    const rankGroup = (Array.isArray(item?.salesRanks) ? item.salesRanks : [])
+      .find((r: any) => r?.marketplaceId === marketplaceId) ||
+      (Array.isArray(item?.salesRanks) ? item.salesRanks : [])[0];
+    const broadRanks = (rankGroup?.displayGroupRanks || [])
+      .map((r: any) => r?.rank).filter((n: any) => typeof n === 'number' && n > 0);
+    const salesRank: number | null = broadRanks.length ? Math.min(...broadRanks) : null;
 
     // For simple mode (e.g., printing page), return immediately with just catalog data
     if (simple) {
@@ -1091,6 +1107,8 @@ Deno.serve(async (req) => {
         unfulfilled,
         gatingStatus,
         gatingReasons,
+        // Amazon's own BSR, used by the panel only when Keepa has none.
+        salesRank,
         marketplaceGating  // New: array of eligibility per marketplace
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

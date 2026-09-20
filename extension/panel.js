@@ -13,11 +13,24 @@
   // Shared range labels — keep in sync with the data-range buttons in panel.html
   // and the range enum accepted by mobile-scan-price-history.
   const RANGE_LABELS = { "90": "3M", "180": "6M", "365": "1Y", "730": "2Y", "1825": "5Y", "SINCE_LISTED": "Since Listed" };
-  const estimateMonthlySales = (intel = {}) => {
+  const estimateMonthlySales = (intel = {}, fallbackBsr = null) => {
     const backendEstimate = Number(intel.est_monthly_sales ?? intel.monthly_sold);
     if (Number.isFinite(backendEstimate) && backendEstimate > 0) return Math.round(backendEstimate);
-    const bsr = Number(intel.bsr_current);
+    const bsr = Number(intel.bsr_current ?? fallbackBsr);
     return Number.isFinite(bsr) && bsr > 0 ? Math.max(1, Math.round(100000 * Math.pow(bsr, -0.6))) : null;
+  };
+  /**
+   * BSR to show: Keepa's first, else Amazon's own rank from the catalog call
+   * fetch-listing-snapshot already makes. Keepa has no rank for ~8% of
+   * products, which showed "BSR —" and "Est/mo —" together even though Amazon
+   * publishes one. `source` lets the UI mark whose number it is.
+   */
+  const displayBsr = () => {
+    const keepa = Number(state.stability?.intel?.bsr_current);
+    if (Number.isFinite(keepa) && keepa > 0) return { bsr: keepa, source: "keepa" };
+    const amz = Number(state.product?.salesRank);
+    if (Number.isFinite(amz) && amz > 0) return { bsr: amz, source: "amazon" };
+    return { bsr: null, source: null };
   };
 
   // The five lookups loadData() runs per scan, by the name each task marks
@@ -903,13 +916,15 @@
   }
   function renderStability() {
     const intel = state.stability?.intel || {};
-    $("apx-bsr").textContent = intel.bsr_current?.toLocaleString?.() ?? "—";
+    { const _d = displayBsr();
+      $("apx-bsr").textContent = _d.bsr ? _d.bsr.toLocaleString() : "—";
+      $("apx-bsr").title = _d.source === "amazon" ? "Amazon's own sales rank (Keepa has none for this product)" : ""; }
     $("apx-amz").textContent = intel.amazon_presence_pct != null ? `${Math.round(intel.amazon_presence_pct)}%` : "—";
     const fba = intel.sellers_fba ?? "—", fbm = intel.sellers_fbm ?? "—";
     $("apx-sellers").textContent = `${fba} / ${fbm}`;
     const swing = computeSwingFromHistory() ?? state.stability?.swing_pct;
     $("apx-swing").textContent = swing != null ? `${swing.toFixed(1)}%` : "—";
-    const sales = estimateMonthlySales(intel);
+    const sales = estimateMonthlySales(intel, displayBsr().bsr);
     { const _b = $("apx-sa-sales-bar"); if (_b) _b.textContent = sales ? sales.toLocaleString() + "/mo" : "—"; }
   }
 
@@ -1428,6 +1443,13 @@
         if (Array.isArray(prod?.marketplaceGating)) state.product.marketplaceGating = prod.marketplaceGating;
         if (prod?.title && prod.title !== "Product not found on Amazon") state.product.title = prod.title;
         if (prod?.imageUrl) state.product.image = prod.imageUrl;
+        // Amazon's own BSR, a fallback for when Keepa has no sales rank --
+        // ~8% of products, mostly books/ISBNs and brand-new listings
+        // (measured 2026-09-20: 313 of 3,838 cached). It rides along on the
+        // catalog call the snapshot already makes, so it costs nothing.
+        state.product.salesRank = Number.isFinite(Number(prod?.salesRank)) && Number(prod.salesRank) > 0
+          ? Number(prod.salesRank)
+          : null;
         renderMeta(); renderEligibility(); renderFbaEligibility(); renderFbaCompliance(); renderRoiAndSignal();
         markSummarySourceReady("snapshot");
         // Not approved yet on this first check? Amazon's restrictions API and
@@ -1537,7 +1559,7 @@
     const salePrice = isFinite(saleOverride) && saleOverride > 0 ? saleOverride : fallbackPrice;
     const { profit, roi } = computeWebStyleRoi(salePrice, unitCost, fees);
     const bsr = intel.bsr_current ?? null;
-    const estSales = estimateMonthlySales(intel);
+    const estSales = estimateMonthlySales(intel, displayBsr().bsr);
     const approvalStatus = currentApprovalStatusForStorage();
     return {
       barcode: state.asin,
@@ -1896,9 +1918,12 @@
     // always populated by computePrivateLabelRisk(), never blank.
     { const _el = $("apx-sa-pl-info"); if (_el) _el.title = ready("history", "stability") ? plCaption : "Loading price history…"; }
 
-    const bsr = intel.bsr_current;
+    const { bsr, source: bsrSource } = displayBsr();
     $("apx-sa-bsr").textContent = bsr ? "#" + bsr.toLocaleString() : "—";
-    const sales = estimateMonthlySales(intel);
+    { const _b = $("apx-sa-bsr"); if (_b) _b.title = bsr
+        ? (bsrSource === "amazon" ? "Amazon's own sales rank (Keepa has none for this product)" : "Keepa sales rank")
+        : "No sales rank from Keepa or Amazon"; }
+    const sales = estimateMonthlySales(intel, bsr);
     $("apx-sa-sales").textContent = sales ? sales.toLocaleString() + "/mo" : "—";
     { const _b = $("apx-sa-sales-bar"); if (_b) _b.textContent = sales ? sales.toLocaleString() + "/mo" : "—"; }
     const maxCost = computeMaxCost();
