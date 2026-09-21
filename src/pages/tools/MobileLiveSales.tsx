@@ -809,6 +809,8 @@ const MobileLiveSales = () => {
   // leaving revalidating stuck true forever (every completing call finding
   // itself "stale" relative to the next one that already started).
   const fetchInFlightRef = useRef(false);
+  /** When the page last re-read on being shown again; throttles that re-read. */
+  const lastShownReadRef = useRef(0);
   const latestReconciledRequestIdRef = useRef("");
   const lastProfitRenderRef = useRef<any>(null);
   const lastSyncKickRef = useRef(0);
@@ -2116,9 +2118,10 @@ const MobileLiveSales = () => {
     if (freshSelected && freshSelected !== selected) setSelected(freshSelected);
   }, [rows, selected?.asin]);
 
-  // CPU-pressure control: visibility/focus/pageshow auto-refresh removed.
-  // Switching back to the tab no longer triggers a heavy sales sync; user
-  // taps Refresh when they want fresh data.
+  // CPU-pressure control: switching back to the tab no longer triggers the
+  // heavy Amazon sales SYNC; the user taps Refresh for that. Returning to the
+  // page does trigger one cheap database re-read (see the visibility effect
+  // below the ticker), because the orders are already synced server-side.
 
   // Local-only ticker: re-reads already-synced Supabase tables on a
   // period-aware cadence so numbers update without a manual tap, without
@@ -2139,6 +2142,36 @@ const MobileLiveSales = () => {
     const id = setInterval(tick, intervalMs);
     return () => clearInterval(id);
   }, [user?.id, fetchToday, period]);
+
+  // Catch up the moment the page is shown again (2026-09-21).
+  //
+  // A phone freezes a backgrounded or screen-off page, so the ticker above
+  // stops and the totals sit at whatever they were when the seller left. On
+  // return nothing re-read until the next tick -- up to 60s on This Week / MTD
+  // -- which read as "totals only move when I open the page". The orders were
+  // never late: measured the same day, sync-sales-orders ran 288 times in 24h
+  // with no failures and wrote each order 3-5 minutes after it was placed,
+  // around the clock.
+  //
+  // This is a single silent DATABASE re-read, not the Amazon sync that the
+  // CPU-pressure change removed from focus/visibility -- that stays removed.
+  // Skipped if a read finished in the last 10s, so switching apps back and
+  // forth cannot stack reads.
+  useEffect(() => {
+    if (!user?.id) return;
+    const onShow = () => {
+      if (document.visibilityState !== "visible" || fetchInFlightRef.current) return;
+      if (Date.now() - lastShownReadRef.current < 10_000) return;
+      lastShownReadRef.current = Date.now();
+      void fetchToday({ silent: true });
+    };
+    document.addEventListener("visibilitychange", onShow);
+    window.addEventListener("pageshow", onShow);
+    return () => {
+      document.removeEventListener("visibilitychange", onShow);
+      window.removeEventListener("pageshow", onShow);
+    };
+  }, [user?.id, fetchToday]);
 
   const activeMarketplaces = useMemo(() => {
     // Only marketplaces this account has actually connected — not a
