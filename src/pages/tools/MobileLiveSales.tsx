@@ -436,6 +436,8 @@ interface AsinRow {
   stockFba?: number;
   stockFbm?: number;
   hasFbmOrder?: boolean;
+  /** True when an order in this period has NO fulfillment_channel from Amazon. */
+  hasUnknownChannelOrder?: boolean;
   marketplaces?: string[];
   orderIds?: string[];
   /** True when ≥1 non-US row had no stored fees AND no asin_fee_cache entry. */
@@ -579,7 +581,7 @@ const RecordDetail = ({
       </div>
 
       {/* FBM shipping label cost — visible directly inside FBM records. */}
-      {(row.hasFbmOrder || (row.stockFbm ?? 0) > 0) && (
+      {(row.hasFbmOrder || ((row.stockFbm ?? 0) > 0 && row.hasUnknownChannelOrder)) && (
         <button
           type="button"
           onClick={() => setLabelDialogOpen(true)}
@@ -1709,7 +1711,12 @@ const MobileLiveSales = () => {
 
         const purchaseTimePt = formatBusinessTimePt(row.purchase_timestamp_utc);
         const mkt = String((row as any).marketplace || "").trim().toUpperCase() || "US";
-        const isFbmOrder = String((row as any).fulfillment_channel || "").trim().toUpperCase() === "MFN";
+        const channelRaw = String((row as any).fulfillment_channel || "").trim().toUpperCase();
+        const isFbmOrder = channelRaw === "MFN";
+        // Amazon does not always give us a channel (13,142 of 2026's orders
+        // have none). Unknown is not FBA, so those must still be able to
+        // carry a label cost -- see the button condition below.
+        const channelUnknown = channelRaw === "";
         const existing = asinMap.get(asin);
         if (existing) {
           existing.units += qty;
@@ -1729,6 +1736,7 @@ const MobileLiveSales = () => {
           if (oid) existing._orderIds.add(oid);
           existing._marketplaces.add(mkt);
           if (isFbmOrder) existing.hasFbmOrder = true;
+          if (channelUnknown) existing.hasUnknownChannelOrder = true;
           if (feeCacheMissingNonUs) {
             existing.feesMissing = true;
             const set = new Set(existing.feesMissingMarketplaces || []);
@@ -1764,6 +1772,7 @@ const MobileLiveSales = () => {
             roi: null,
             latestPurchaseTimePt: purchaseTimePt,
             hasFbmOrder: isFbmOrder,
+            hasUnknownChannelOrder: channelUnknown,
             feesMissing: feeCacheMissingNonUs || undefined,
             feesMissingMarketplaces: feeCacheMissingNonUs ? [mkt] : undefined,
             _orderIds: set,
@@ -3115,7 +3124,7 @@ const MobileLiveSales = () => {
                           FBA {r.stockFba}
                         </span>
                       )}
-                      {(r.hasFbmOrder || (r.stockFbm ?? 0) > 0) && (
+                      {(r.hasFbmOrder || ((r.stockFbm ?? 0) > 0 && r.hasUnknownChannelOrder)) && (
                         <>
                           <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-400/30 text-amber-300 text-[10px] font-bold uppercase tracking-wider">
                             FBM{(r.stockFbm ?? 0) > 0 ? ` ${r.stockFbm}` : " Order"}

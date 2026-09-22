@@ -59,6 +59,8 @@ interface SalesRow {
   latestPurchaseTimestampUtc?: string | null;
   latestPurchaseTimePt?: string | null;
   hasFbmOrder?: boolean; // true if any underlying order row is FBM (fulfillment_channel='MFN')
+  /** True when an order in this period has NO fulfillment_channel from Amazon. */
+  hasUnknownChannelOrder?: boolean;
   stockFbm?: number;
   stockFba?: number;
 }
@@ -1762,7 +1764,12 @@ const LiveSales = ({
 
         const purchaseTimePt = formatBusinessTimePt((row as any).purchase_timestamp_utc);
         const rowMarketplace = inferFinancialEventMarketplace(row as any) || "US";
-        const isFbmOrder = String((row as any).fulfillment_channel || "").trim().toUpperCase() === "MFN";
+        const channelRaw = String((row as any).fulfillment_channel || "").trim().toUpperCase();
+        const isFbmOrder = channelRaw === "MFN";
+        // Amazon does not always give us a channel (13,142 of 2026's orders
+        // have none). Unknown is not FBA, so those must still be able to
+        // carry a label cost -- see the button condition below.
+        const channelUnknown = channelRaw === "";
         const existing = asinMap.get(asin);
         if (existing) {
           existing.units += qty;
@@ -1770,6 +1777,7 @@ const LiveSales = ({
           existing.pendingUnits = (existing.pendingUnits || 0) + pendingUnits;
           existing.pendingRevenue = (existing.pendingRevenue || 0) + _estUsd;
           if (isFbmOrder) existing.hasFbmOrder = true;
+          if (channelUnknown) existing.hasUnknownChannelOrder = true;
           if (!existing.title && row.title) existing.title = row.title;
           if (!existing.image_url && row.image_url) existing.image_url = row.image_url;
           if (rowMarketplace && !existing.marketplaces!.includes(rowMarketplace)) {
@@ -1792,6 +1800,7 @@ const LiveSales = ({
             latestPurchaseTimestampUtc: (row as any).purchase_timestamp_utc || null,
             latestPurchaseTimePt: purchaseTimePt,
             hasFbmOrder: isFbmOrder,
+            hasUnknownChannelOrder: channelUnknown,
           });
         }
 
@@ -2936,7 +2945,7 @@ const LiveSales = ({
                           </>
                         );
                       })()}
-                      {(row.hasFbmOrder || (row.stockFbm ?? 0) > 0) && (
+                      {(row.hasFbmOrder || ((row.stockFbm ?? 0) > 0 && row.hasUnknownChannelOrder)) && (
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); setFbmLabelAsin(row.asin); }}
