@@ -1369,15 +1369,34 @@ async function handleSyncRequest(req: Request): Promise<Response> {
         'Brazil': 'A2Q3Y263D00KWC',
       };
       
-      // Group orders by marketplace
+      // Group orders by marketplace AND FULFILMENT CHANNEL.
+      //
+      // Channel used to be decided per ASIN, with
+      //   isFbmAsin = marketplaceOrders.some(o => o.fulfillment_channel === 'MFN')
+      // so ONE seller-fulfilled order made every order of that ASIN take FBM
+      // fees: referral and closing zeroed, the lot bundled into fba_fee, and no
+      // FBA fulfilment fee at all. Measured 2026-09-22: 30 AFN orders across 2
+      // ASINs were billed that way -- B0G3XTWZYX's $50 FBA sale was charged
+      // $7.50 total (15%) with no fulfilment fee, and 17 ASINs sell on both
+      // channels, so it kept spreading.
+      //
+      // Unknown channel counts as AFN, which is what the old `.some()` did for
+      // an ASIN with no MFN order, so ASINs Amazon never gave a channel for
+      // (13,142 orders in 2026) behave exactly as before.
+      const channelKeyFor = (o: any) =>
+        String(o?.fulfillment_channel || '').trim().toUpperCase() === 'MFN' ? 'MFN' : 'AFN';
+      const groupKeyFor = (o: any) => {
+        const mp = o.marketplace || 'US';
+        const mpId = MARKETPLACE_NAME_TO_ID[mp] || MARKETPLACE_NAME_TO_ID['US'];
+        return `${mpId}|${channelKeyFor(o)}`;
+      };
       const ordersByMarketplace = new Map<string, typeof ordersForAsin>();
       for (const order of ordersForAsin) {
-        const mp = order.marketplace || 'US';
-        const mpId = MARKETPLACE_NAME_TO_ID[mp] || MARKETPLACE_NAME_TO_ID['US'];
-        if (!ordersByMarketplace.has(mpId)) {
-          ordersByMarketplace.set(mpId, []);
+        const key = groupKeyFor(order);
+        if (!ordersByMarketplace.has(key)) {
+          ordersByMarketplace.set(key, []);
         }
-        ordersByMarketplace.get(mpId)!.push(order);
+        ordersByMarketplace.get(key)!.push(order);
       }
       
       console.log(`💰 ENRICH_BY_ASIN: Orders by marketplace:`, [...ordersByMarketplace.entries()].map(([k, v]) => `${k}=${v.length}`).join(', '));
@@ -1436,7 +1455,9 @@ async function handleSyncRequest(req: Request): Promise<Response> {
       console.log(`💰 ENRICH_BY_ASIN: Fresh seller prices for ${targetAsin}: skuMap=${JSON.stringify([...skuPriceMap.entries()])}, fallback=$${freshInventoryPrice} USD`);
       
       // Process each marketplace
-      for (const [marketplaceId, marketplaceOrders] of ordersByMarketplace.entries()) {
+      for (const [groupKey, marketplaceOrders] of ordersByMarketplace.entries()) {
+        const [marketplaceId, groupChannel] = groupKey.split('|');
+        const isFbmGroup = groupChannel === 'MFN';
         let priceToUse = 0;
         let priceInLocalCurrency = 0; // The actual local currency price (e.g., MXN, CAD)
         let priceSource = 'none';
@@ -1632,10 +1653,15 @@ async function handleSyncRequest(req: Request): Promise<Response> {
         let historySampleSize = 0;
         
         // PRIORITY 1: Check financial_events_cache for ACTUAL settled fees
+        //
+        // FBA ONLY. The lookup takes inventory.sku with limit(1), which on a
+        // dual-channel ASIN can be the FBA SKU, and it filters fba_fees > 0 --
+        // so a seller-fulfilled order could inherit FBA fulfilment fees it
+        // never paid. The Fees API path below prices FBM correctly.
         // ALWAYS try learned_history first (settled fees are authoritative, even in force mode)
         // Force mode only bypasses asin_fee_cache TTL, NOT settled financial history
         // financial_events_cache.asin stores SKU, so we need to look up the SKU first
-        {
+        if (!isFbmGroup) {
           const { data: invForSku } = await supabase
             .from('inventory')
             .select('sku')
@@ -1758,8 +1784,9 @@ async function handleSyncRequest(req: Request): Promise<Response> {
         
         // PRIORITY 2: Fall back to Fees API if no history
         if (!finalFees) {
-          // Detect FBM: check if ANY order in this marketplace group is FBM
-          const isFbmAsin = marketplaceOrders.some((o: any) => o.fulfillment_channel === 'MFN');
+          // This group IS one channel now (see the grouping above), so no
+          // guessing from siblings.
+          const isFbmAsin = isFbmGroup;
           
           const apiFees = await fetchProductFees(accessToken, targetAsin, priceToUse, marketplaceId, FX_RATES_CACHE, isNonUs ? priceInLocalCurrency : undefined, !isFbmAsin);
           
@@ -1786,13 +1813,23 @@ async function handleSyncRequest(req: Request): Promise<Response> {
         const ff = finalFees as any;
         const referralRate = priceToUse > 0 ? ff.referralFee / priceToUse : 0.15;
         
-        feesByMarketplace.set(marketplaceId, {
+        feesByMarketplace.set(groupKey, {
           ...ff,
           referralRate,
           feeSource,
         } as any);
         
-        // Update asin_fee_cache for this marketplace
+        // Update asin_fee_cache for this marketplace.
+        //
+        // FBA GROUPS ONLY. asin_fee_cache is keyed (user, asin, marketplace)
+        // with no channel, and the repricer reads it to judge profitability of
+        // an FBA offer. Writing an FBM group's numbers there -- everything
+        // bundled into fba_fee_fixed with referral_rate 0 -- would tell the
+        // repricer an FBA listing costs 0% referral. That is the same
+        // channel-blind mistake this whole block just fixed.
+        if (isFbmGroup) {
+          console.log(`💰 ENRICH_BY_ASIN: FBM group for ${targetAsin} in ${marketplaceShortName} -- not writing asin_fee_cache (no channel column)`);
+        } else {
         await supabase.from('asin_fee_cache').upsert({
           user_id: userId,
           asin: targetAsin,
@@ -1808,8 +1845,9 @@ async function handleSyncRequest(req: Request): Promise<Response> {
           last_verified_at: new Date().toISOString(),
           history_sample_size: historySampleSize,
         }, { onConflict: 'user_id,asin,marketplace' });
-        
+
         console.log(`💰 ENRICH_BY_ASIN: Cached fees for ${targetAsin} in ${marketplaceShortName} [source: ${feeSource}]: fba=$${ff.fbaFee.toFixed(2)}, referral_rate=${(referralRate * 100).toFixed(1)}%`);
+        }
       }
       
       // Now update all orders with their marketplace-specific fees
@@ -1904,7 +1942,7 @@ async function handleSyncRequest(req: Request): Promise<Response> {
         try {
           const orderMarketplace = order.marketplace || 'US';
           const marketplaceId = MARKETPLACE_NAME_TO_ID[orderMarketplace] || MARKETPLACE_NAME_TO_ID['US'];
-          const cachedFees = feesByMarketplace.get(marketplaceId);
+          const cachedFees = feesByMarketplace.get(`${marketplaceId}|${channelKeyFor(order)}`);
           
           if (!cachedFees) {
             console.warn(`ENRICH_BY_ASIN: No fees available for ${order.order_id} in marketplace ${marketplaceId}`);
