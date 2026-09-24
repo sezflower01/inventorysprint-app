@@ -103,6 +103,12 @@ interface InventoryItem {
   inbound_dry_run_error?: string | null;
   inbound_dry_run_plan_id?: string | null;
   inbound_dry_run_at?: string | null;
+  /** Competitors on the listing when it was created (20260924010000). NULL on
+   *  listings created before that -- Amazon keeps no offer-count history. */
+  sellers_at_create?: number | null;
+  sellers_fba_at_create?: number | null;
+  sellers_fbm_at_create?: number | null;
+  sellers_counted_at?: string | null;
 }
 
 const isPrintableFnsku = (fnsku?: string | null, asin?: string | null) => {
@@ -178,6 +184,12 @@ export default function CreatedListings() {
   const [showNotesOnly, setShowNotesOnly] = useState(false);
   const [panelTotalCost, setPanelTotalCost] = useState("");
   const [panelUnits, setPanelUnits] = useState("");
+  /**
+   * Fresh seller counts per listing id, from the Recheck button. Kept in state
+   * rather than written back to the row: sellers_at_create is a BASELINE and
+   * must never be overwritten by a later check.
+   */
+  const [sellerChecks, setSellerChecks] = useState<Record<string, { total: number; fba: number | null; fbm: number | null } | "loading">>({});
   const [panelCog, setPanelCog] = useState("");
   const [sumOutput, setSumOutput] = useState("");
   const [panelEffectiveDate, setPanelEffectiveDate] = useState<Date>(new Date());
@@ -3061,6 +3073,65 @@ export default function CreatedListings() {
                                 Inbound testing…
                               </Badge>
                             )}
+                            {/* Sellers then vs now (2026-09-24). The count at
+                                create is the number that cannot be recovered
+                                later, so it shows whenever we have it; Recheck
+                                asks Amazon for today's and compares. */}
+                            {(() => {
+                              const check = sellerChecks[item.id];
+                              const then = item.sellers_at_create;
+                              const now = check && check !== "loading" ? check.total : null;
+                              const diff = then != null && now != null ? now - then : null;
+                              return (
+                                <>
+                                  {then != null && (
+                                    <Badge
+                                      variant="outline"
+                                      className="h-5 px-1.5 text-[10px]"
+                                      title={`${item.sellers_fba_at_create ?? 0} FBA, ${item.sellers_fbm_at_create ?? 0} FBM when created${item.sellers_counted_at ? ` on ${new Date(item.sellers_counted_at).toLocaleDateString()}` : ''}`}
+                                    >
+                                      {then} seller{then === 1 ? '' : 's'} at create
+                                    </Badge>
+                                  )}
+                                  {now != null && (
+                                    <Badge
+                                      variant="outline"
+                                      className={`h-5 px-1.5 text-[10px] ${diff == null ? '' : diff > 0 ? 'border-red-500 text-red-700' : diff < 0 ? 'border-emerald-500 text-emerald-700' : ''}`}
+                                      title={check !== "loading" && check ? `${check.fba ?? 0} FBA, ${check.fbm ?? 0} FBM now` : 'now'}
+                                    >
+                                      {now} now{diff != null && diff !== 0 ? ` (${diff > 0 ? '+' : ''}${diff})` : diff === 0 ? ' (same)' : ''}
+                                    </Badge>
+                                  )}
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="h-5 px-1.5 text-[10px]"
+                                    disabled={check === "loading"}
+                                    title={then != null
+                                      ? 'Count the sellers on this listing now and compare with when you created it'
+                                      : 'Count the sellers on this listing now (none was recorded when it was created)'}
+                                    onClick={async (e) => {
+                                      e.stopPropagation();
+                                      setSellerChecks((m) => ({ ...m, [item.id]: "loading" }));
+                                      try {
+                                        const { data, error } = await supabase.functions.invoke('listing-seller-count', {
+                                          body: { asin: item.asin, marketplace: 'US', createdListingId: item.id, reason: 'recheck' },
+                                        });
+                                        if (error) throw new Error(error.message);
+                                        if (data?.error) throw new Error(data.error);
+                                        setSellerChecks((m) => ({ ...m, [item.id]: { total: Number(data.total), fba: data.fba ?? null, fbm: data.fbm ?? null } }));
+                                      } catch (err) {
+                                        setSellerChecks((m) => { const n = { ...m }; delete n[item.id]; return n; });
+                                        toast.error(err instanceof Error ? err.message : 'Could not count sellers');
+                                      }
+                                    }}
+                                  >
+                                    {check === "loading" ? 'Counting…' : 'Recheck sellers'}
+                                  </Button>
+                                </>
+                              );
+                            })()}
                             {item.validation_status === 'ACTIVE' && (item.inbound_dry_run_status === 'NOT_RUN' || !item.inbound_dry_run_status || item.inbound_dry_run_status === 'FAILED') && (
                               <Button
                                 type="button"

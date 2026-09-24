@@ -321,6 +321,7 @@ window.addEventListener("message", (e) => {
       state.asin = d.asin;
       $("apx-asin").value = d.asin;
       newListing.bypass = false;
+      clearSellerCount();
     }
   }
   if (d.type === "SOURCING_SESSION" && d.session) {
@@ -557,6 +558,7 @@ $("apx-fetch").addEventListener("click", async () => {
   const asin = ($("apx-asin").value || "").trim().toUpperCase();
   if (!/^[A-Z0-9]{10}$/.test(asin)) { setStatus("apx-fetch-status", "Enter a valid 10-char ASIN", "err"); return; }
   state.asin = asin;
+  clearSellerCount();
   setStatus("apx-fetch-status", "Fetching…");
   const r = await bg("INVSPRNT_INVOKE", { fn: "fetch-listing-snapshot", body: { asin } });
   if (!r?.ok) { setStatus("apx-fetch-status", r?.error || "Failed", "err"); return; }
@@ -868,6 +870,20 @@ $("apx-create").addEventListener("click", async () => {
     const ins = await bg("INVSPRNT_SAVE_LISTING", { row });
     if (!ins?.ok) throw new Error(ins?.error || "DB insert failed");
 
+    // Record the competition as it stands RIGHT NOW, while we still can.
+    // Deliberately not awaited into the failure path: a refused pricing call
+    // must never make a saved listing look like it failed.
+    countSellers({
+      asin: state.asin,
+      marketplace: marketplaceCodeForRow(row),
+      createdListingId: ins?.data?.id || null,
+      reason: 'create',
+    }).then((d) => renderSellerCount(d))
+      .catch((e) => {
+        const noteEl = $("apx-sellers-note");
+        if (noteEl) { noteEl.textContent = `Could not count sellers: ${e.message}`; noteEl.className = "apx-status err"; }
+      });
+
     // Promote any saved supplier into the recent-suppliers list for next time.
     for (const s of supplierLinks) await pushRecentSupplier(s.link);
 
@@ -885,6 +901,83 @@ $("apx-create").addEventListener("click", async () => {
     setStatus("apx-action-status", String(e.message || e), "err");
   } finally {
     $("apx-create").disabled = false;
+  }
+});
+
+/* ─── Sellers on the listing (2026-09-24) ───────────────────────────────────
+ * Amazon publishes no offer-count history, so the number of competitors at the
+ * moment of purchase is unrecoverable once it changes. It is captured when the
+ * listing is created and compared on demand.
+ *
+ * getItemOffers shares the 0.5 req/s pricing quota the repricer runs on, so
+ * this is called ONLY on create and on an explicit Recheck -- never on ASIN
+ * load, which would spend quota on every product the seller merely looks at.
+ */
+function clearSellerCount() {
+  // A count belongs to ONE ASIN. Leaving the previous product's number on
+  // screen while a new ASIN loads would read as this product's competition.
+  const nowEl = $("apx-sellers-now");
+  const noteEl = $("apx-sellers-note");
+  if (nowEl) nowEl.textContent = "—";
+  if (noteEl) { noteEl.textContent = "Press Recheck to count the sellers on this listing."; noteEl.className = "apx-status"; }
+}
+
+async function countSellers({ asin, marketplace, createdListingId = null, reason = 'recheck' }) {
+  const r = await bg("INVSPRNT_INVOKE", {
+    fn: "listing-seller-count",
+    body: { asin, marketplace, createdListingId, reason },
+  });
+  if (!r?.ok) throw new Error(r?.error || "Seller count failed");
+  if (r.data?.error) throw new Error(r.data.error);
+  return r.data;
+}
+
+function renderSellerCount(data) {
+  const nowEl = $("apx-sellers-now");
+  const noteEl = $("apx-sellers-note");
+  if (!nowEl) return;
+  const split = (t, f, m) =>
+    (f == null && m == null) ? `${t}` : `${t} (${f ?? 0} FBA, ${m ?? 0} FBM)`;
+  nowEl.textContent = split(data.total, data.fba, data.fbm);
+
+  const base = data.baseline;
+  if (!noteEl) return;
+  if (!base || base.sellers_at_create == null) {
+    noteEl.textContent = "No count from when this listing was created — this is today's number.";
+    noteEl.className = "apx-status";
+    return;
+  }
+  const then = Number(base.sellers_at_create);
+  const diff = Number(data.total) - then;
+  const when = base.sellers_counted_at ? new Date(base.sellers_counted_at).toLocaleDateString() : "create";
+  const moved = diff === 0 ? "unchanged since" : (diff > 0 ? `+${diff} more since` : `${diff} fewer since`);
+  noteEl.textContent = `At create: ${split(then, base.sellers_fba_at_create, base.sellers_fbm_at_create)} on ${when} — ${moved}.`;
+  // More competitors than when you bought is the case worth noticing.
+  noteEl.className = diff > 0 ? "apx-status err" : "apx-status ok";
+}
+
+$("apx-sellers-recheck")?.addEventListener("click", async () => {
+  const btn = $("apx-sellers-recheck");
+  const noteEl = $("apx-sellers-note");
+  if (!state.asin) {
+    if (noteEl) { noteEl.textContent = "Fetch an ASIN first."; noteEl.className = "apx-status err"; }
+    return;
+  }
+  btn.disabled = true;
+  const prev = btn.textContent;
+  btn.textContent = "Checking…";
+  try {
+    const d = await countSellers({
+      asin: state.asin,
+      marketplace: marketplaceCodeForRow({}),
+      reason: 'recheck',
+    });
+    renderSellerCount(d);
+  } catch (e) {
+    if (noteEl) { noteEl.textContent = String(e.message || e); noteEl.className = "apx-status err"; }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
   }
 });
 

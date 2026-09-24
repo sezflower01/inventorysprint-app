@@ -116,6 +116,18 @@
             </div>
           </div>
 
+          <!-- Sellers on the listing (2026-09-24). Recorded when the listing is
+               created, because Amazon keeps no offer-count history and "how many
+               sellers were on it when I bought" cannot be recovered later. -->
+          <div class="apx-card">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+              <div class="apx-k">Sellers on this listing</div>
+              <button id="apx-sellers-recheck" class="apx-primary ghost" style="font-size:11px;padding:4px 10px">Recheck</button>
+            </div>
+            <div class="apx-v" id="apx-sellers-now" style="margin-top:6px">—</div>
+            <div class="apx-status" id="apx-sellers-note"></div>
+          </div>
+
           <div class="apx-card">
             <div class="apx-k" style="margin-bottom:6px">Supplier links</div>
             <div id="apx-sourcing-banner" class="apx-sourcing-banner hidden"></div>
