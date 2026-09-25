@@ -11,6 +11,7 @@ import {
   Receipt,
   SearchX,
   ShieldAlert,
+  ShieldCheck,
   Tags,
   Truck,
   Warehouse,
@@ -130,6 +131,27 @@ export const MODULE_CATEGORIES: ModuleCategory[] = [
         icon: ShieldAlert,
         color: "from-red-500 to-rose-600",
         ga: "tool_menu_fba_eligibility_issues",
+      },
+      {
+        // Existed since Phase B but was never listed here, so the only way in
+        // was typing the URL. That is why "where do I check hazmat / gated /
+        // restricted" had no answer (2026-09-24).
+        path: "/tools/product-analyzer",
+        label: "Product Analyzer",
+        description:
+          "One ASIN, every gate: sellable, gated or restricted for your account, hazmat, prep required, FBA eligibility, and an on-demand inbound shipment test.",
+        icon: ShieldCheck,
+        color: "from-sky-500 to-blue-600",
+        ga: "tool_menu_product_analyzer",
+      },
+      {
+        path: "/tools/bulk-eligibility",
+        label: "Bulk Eligibility Check",
+        description:
+          "Paste a whole lead list and see which ASINs you can actually sell — sellable, needs approval, restricted, hazmat, prep — before you spend money.",
+        icon: ListChecks,
+        color: "from-teal-500 to-emerald-600",
+        ga: "tool_menu_bulk_eligibility",
       },
     ],
   },

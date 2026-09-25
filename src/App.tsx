@@ -155,6 +155,7 @@ const AmazonConnect = lazyWithRetry(() => import("./pages/tools/AmazonConnect"))
 const ExtHandoff = lazyWithRetry(() => import("./pages/tools/ExtHandoff"));
 const LabelPrinting = lazyWithRetry(() => import("./pages/tools/LabelPrinting"));
 const FbaEligibilityIssues = lazyWithRetry(() => import("./pages/tools/FbaEligibilityIssues"));
+const BulkEligibilityCheck = lazyWithRetry(() => import("./pages/tools/BulkEligibilityCheck"));
 const PrintingWithoutPDF = lazyWithRetry(() => import("./pages/tools/PrintingWithoutPDF"));
 const CreateListing = lazyWithRetry(() => import("./pages/tools/CreateListing"));
 const Inventory = lazyWithRetry(() => import("./pages/tools/Inventory"));
@@ -306,6 +307,7 @@ function App() {
                   <Route path="/tools/tracking" element={<ProtectedRoute><WorldwideTracking /></ProtectedRoute>} />
                   <Route path="/tools/label-printing" element={<ProtectedRoute><LabelPrinting /></ProtectedRoute>} />
                   <Route path="/tools/fba-eligibility-issues" element={<ProtectedRoute><FbaEligibilityIssues /></ProtectedRoute>} />
+                  <Route path="/tools/bulk-eligibility" element={<ProtectedRoute><BulkEligibilityCheck /></ProtectedRoute>} />
                   <Route path="/tools/printing-without-pdf" element={<ProtectedRoute><PrintingWithoutPDF /></ProtectedRoute>} />
                   <Route path="/tools/create-listing" element={<ProtectedRoute><CreateListing /></ProtectedRoute>} />
                   <Route path="/tools/inventory" element={<ProtectedRoute><Inventory /></ProtectedRoute>} />
