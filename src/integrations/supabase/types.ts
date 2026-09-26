@@ -15540,6 +15540,17 @@ export type Database = {
         }
         Returns: undefined
       }
+      seller_watch_productivity: {
+        Args: Record<PropertyKey, never>
+        Returns: {
+          baseline_asins: number
+          detections: number
+          detections_30d: number
+          last_detection: string | null
+          marketplace: string
+          seller_id: string
+        }[]
+      }
       set_shipment_manual_ship_date: {
         Args: { p_ship_date: string; p_shipment_id: string }
         Returns: undefined

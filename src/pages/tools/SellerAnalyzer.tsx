@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { supabase } from "@/integrations/supabase/client";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -96,12 +97,78 @@ export default function SellerAnalyzer() {
 
   const seedingCount = watches.filter((w) => !w.last_checked_at).length;
 
+  /**
+   * How much each watch has actually produced (2026-09-26).
+   *
+   * Counted in the database (seller_watch_productivity), not here: the
+   * detections table holds 147k rows for this account, and PostgREST cannot
+   * GROUP BY, so the browser alternative is downloading all of them to count.
+   */
+  const [productivity, setProductivity] = useState<Record<string, { detections: number; detections30d: number; lastDetection: string | null; baselineAsins: number }>>({});
+  const [productivityLoaded, setProductivityLoaded] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const { data, error } = await supabase.rpc("seller_watch_productivity");
+      if (cancelled) return;
+      if (error) { setProductivityLoaded(false); return; }
+      const map: Record<string, { detections: number; detections30d: number; lastDetection: string | null; baselineAsins: number }> = {};
+      for (const row of (data as Array<{ seller_id: string; marketplace: string; detections: number; detections_30d: number; last_detection: string | null; baseline_asins: number }> | null) ?? []) {
+        map[`${row.seller_id}|${row.marketplace}`] = {
+          detections: Number(row.detections) || 0,
+          detections30d: Number(row.detections_30d) || 0,
+          lastDetection: row.last_detection,
+          baselineAsins: Number(row.baseline_asins) || 0,
+        };
+      }
+      setProductivity(map);
+      setProductivityLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, [watches.length]);
+
+  const prodOf = (w: SellerWatch) => productivity[`${w.seller_id}|${w.marketplace}`];
+
+  /**
+   * "Never added anything" is deliberately NOT one bucket.
+   *
+   * A seller with a stored baseline has been read properly and simply adds
+   * nothing — that is a seller worth replacing. A seller with an EMPTY
+   * baseline was never read at all: either the storefront is dead or we could
+   * not fetch it, which is our problem, not proof the seller is quiet.
+   * Measured 2026-09-26: of 182 sellers with no detections, only 74 had a
+   * baseline. Merging them would delete 108 sellers on the strength of a
+   * failed read.
+   */
+  type WatchFilterMode = "all" | "never" | "no_catalog" | "quiet30" | "active";
+  const [watchMode, setWatchMode] = useState<WatchFilterMode>("all");
+
+  const modeOf = (w: SellerWatch): WatchFilterMode => {
+    const p = prodOf(w);
+    if (!p) return "all";
+    if (p.detections === 0) return p.baselineAsins > 0 ? "never" : "no_catalog";
+    return p.detections30d > 0 ? "active" : "quiet30";
+  };
+
+  const modeCounts = (() => {
+    const c = { never: 0, no_catalog: 0, quiet30: 0, active: 0 };
+    for (const w of watches) {
+      const m = modeOf(w);
+      if (m !== "all") c[m] += 1;
+    }
+    return c;
+  })();
+
   const visibleWatches = (() => {
     const q = watchFilter.trim().toLowerCase();
-    if (!q) return watches;
-    return watches.filter(
-      (w) => w.seller_id.toLowerCase().includes(q) || (w.seller_name || "").toLowerCase().includes(q),
-    );
+    let list = watches;
+    if (q) {
+      list = list.filter(
+        (w) => w.seller_id.toLowerCase().includes(q) || (w.seller_name || "").toLowerCase().includes(q),
+      );
+    }
+    if (watchMode !== "all") list = list.filter((w) => modeOf(w) === watchMode);
+    return list;
   })();
 
   // Deliberately does NOT switch tabs. Newly added sellers appear in the
@@ -456,6 +523,44 @@ export default function SellerAnalyzer() {
                     />
                   )}
 
+                  {/* Productivity filter (2026-09-26). Select-all below acts on
+                      the filtered rows, so "show the ones that never added
+                      anything, select all, remove" is the whole workflow. */}
+                  {productivityLoaded && watches.length > 10 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {([
+                        ["all", `All (${watches.length.toLocaleString()})`],
+                        ["never", `Never added (${modeCounts.never.toLocaleString()})`],
+                        ["no_catalog", `No catalogue read (${modeCounts.no_catalog.toLocaleString()})`],
+                        ["quiet30", `Quiet 30d+ (${modeCounts.quiet30.toLocaleString()})`],
+                        ["active", `Active (${modeCounts.active.toLocaleString()})`],
+                      ] as Array<[WatchFilterMode, string]>).map(([mode, label]) => (
+                        <Button
+                          key={mode}
+                          type="button"
+                          size="sm"
+                          variant={watchMode === mode ? "default" : "outline"}
+                          className="h-7 text-[11px] px-2"
+                          onClick={() => { setWatchMode(mode); setSelected(new Set()); }}
+                        >
+                          {label}
+                        </Button>
+                      ))}
+                    </div>
+                  )}
+                  {watchMode === "never" && (
+                    <p className="mt-2 text-[11px] text-muted-foreground">
+                      Checked for weeks with a catalogue on record, and never added a single product.
+                      These are the ones worth swapping out.
+                    </p>
+                  )}
+                  {watchMode === "no_catalog" && (
+                    <p className="mt-2 text-[11px] text-amber-600 dark:text-amber-400">
+                      We never managed to read a catalogue for these, so "added nothing" may be a dead
+                      storefront or a failed read — not a quiet seller. Worth a look before removing.
+                    </p>
+                  )}
+
                   {/* Select-all acts on the FILTERED rows, not the whole list.
                       That is what makes "swap the Keepa criteria" workable:
                       filter to the batch you no longer want, select all, remove.
@@ -531,6 +636,26 @@ export default function SellerAnalyzer() {
                           />
                           <span className="truncate font-mono text-xs">{w.seller_name || w.seller_id}</span>
                           <span className="text-muted-foreground shrink-0 text-xs">({w.marketplace})</span>
+                          {(() => {
+                            const p = prodOf(w);
+                            if (!p) return null;
+                            if (p.detections === 0) {
+                              return (
+                                <span className={`shrink-0 text-[10px] ${p.baselineAsins > 0 ? "text-muted-foreground" : "text-amber-600 dark:text-amber-400"}`}>
+                                  {p.baselineAsins > 0 ? "nothing added" : "no catalogue read"}
+                                </span>
+                              );
+                            }
+                            const days = p.lastDetection
+                              ? Math.floor((Date.now() - new Date(p.lastDetection).getTime()) / 86400000)
+                              : null;
+                            return (
+                              <span className="shrink-0 text-[10px] text-muted-foreground">
+                                {p.detections.toLocaleString()} found
+                                {days != null && ` · last ${days === 0 ? "today" : `${days}d ago`}`}
+                              </span>
+                            );
+                          })()}
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
                           <WatchStatus watch={w} />
@@ -542,12 +667,12 @@ export default function SellerAnalyzer() {
                     ))}
                     {visibleWatches.length === 0 && (
                       <p className="py-6 text-center text-xs text-muted-foreground">
-                        No sellers match “{watchFilter}”.
+                        {watchFilter.trim() ? `No sellers match “${watchFilter}”.` : "No sellers in this group."}
                       </p>
                     )}
                   </div>
 
-                  {watchFilter.trim() && (
+                  {(watchFilter.trim() || watchMode !== "all") && (
                     <p className="mt-2 text-xs text-muted-foreground">
                       Showing {visibleWatches.length.toLocaleString()} of {watches.length.toLocaleString()}.
                     </p>
