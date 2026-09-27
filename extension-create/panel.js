@@ -939,8 +939,8 @@ function clearSellerCount() {
  * rather than clamped -- a silently capped 100% would look like every unit
  * came back.
  */
-async function loadReturnStats(asin) {
-  const el = $("apx-returns");
+async function loadReturnStats(asin, elId = "apx-returns") {
+  const el = $(elId);
   if (!el) return;
   el.textContent = "Checking your return history…";
   el.className = "apx-status";
@@ -980,8 +980,8 @@ async function loadReturnStats(asin) {
   }
 }
 
-function clearReturnStats() {
-  const el = $("apx-returns");
+function clearReturnStats(elId = "apx-returns") {
+  const el = $(elId);
   if (!el) return;
   el.textContent = "";
   el.className = "apx-status";
@@ -1252,7 +1252,7 @@ function fmtRepNum(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
   return Math.round(Number(n)).toLocaleString();
 }
-function renderReplenish(d) {
+function renderReplenish(d, asin = null) {
   const card = $("apx-p-replenish");
   if (!card) return;
   card.classList.remove("hidden");
@@ -1281,6 +1281,11 @@ function renderReplenish(d) {
     ? ""
     : "Using default lead-time / coverage. Tune in Need to Buy Again → Reorder Planning.";
   $("apx-rep-status").style.color = "var(--muted)";
+  // How many came back, beside how many sold -- the pair the reorder decision
+  // actually rests on. Fire-and-forget: a returns lookup must never delay or
+  // break the forecast that is already on screen.
+  const forAsin = asin || d?.asin;
+  if (forAsin) void loadReturnStats(forAsin, "apx-p-returns");
 }
 async function loadReplenishForecast(asin) {
   const card = $("apx-p-replenish");
@@ -1294,7 +1299,7 @@ async function loadReplenishForecast(asin) {
     const r = await bg("INVSPRNT_REPLENISH_FORECAST", { asin });
     if (!r?.ok) throw new Error(r?.error || "Forecast failed");
     if (purchase.source?.asin !== asin) return; // stale
-    renderReplenish(r.data || {});
+    renderReplenish(r.data || {}, asin);
   } catch (e) {
     $("apx-rep-status").textContent = `Forecast unavailable: ${e.message || e}`;
     $("apx-rep-status").style.color = "var(--bad)";

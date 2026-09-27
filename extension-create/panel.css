@@ -260,3 +260,7 @@ label.apx-field input, label.apx-field select {
   font-size: 11px; color: var(--muted); margin-top: 4px;
 }
 .apx-rep-status { font-size: 11px; margin-top: 4px; }
+/* Returns line in the Add Purchase panel (2026-09-27). Same weight as the
+   ADS/plan meta line it sits beside; colour comes from the ok/err classes
+   loadReturnStats sets, so a high return rate reads at a glance. */
+.apx-rep-returns { font-size: 11px; margin-top: 4px; }
