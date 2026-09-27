@@ -322,6 +322,7 @@ window.addEventListener("message", (e) => {
       $("apx-asin").value = d.asin;
       newListing.bypass = false;
       clearSellerCount();
+      void loadReturnStats(d.asin);
     }
   }
   if (d.type === "SOURCING_SESSION" && d.session) {
@@ -559,12 +560,14 @@ $("apx-fetch").addEventListener("click", async () => {
   if (!/^[A-Z0-9]{10}$/.test(asin)) { setStatus("apx-fetch-status", "Enter a valid 10-char ASIN", "err"); return; }
   state.asin = asin;
   clearSellerCount();
+  clearReturnStats();
   setStatus("apx-fetch-status", "Fetching…");
   const r = await bg("INVSPRNT_INVOKE", { fn: "fetch-listing-snapshot", body: { asin } });
   if (!r?.ok) { setStatus("apx-fetch-status", r?.error || "Failed", "err"); return; }
   state.product = r.data || {};
   setStatus("apx-fetch-status", "");
   renderProduct();
+  void loadReturnStats(asin);
   $("apx-form").classList.remove("hidden");
   if (!$("apx-sku").value) $("apx-sku").value = generateSKU();
   if (state.product.price && !$("apx-sellprice").value) $("apx-sellprice").value = Number(state.product.price).toFixed(2);
@@ -920,6 +923,68 @@ function clearSellerCount() {
   const noteEl = $("apx-sellers-note");
   if (nowEl) nowEl.textContent = "—";
   if (noteEl) { noteEl.textContent = "Press Recheck to count the sellers on this listing."; noteEl.className = "apx-status"; }
+}
+
+/* ─── Returns on this ASIN (2026-09-27) ─────────────────────────────────────
+ * "How many came back" is the number the seller wants before buying more, and
+ * it is the one thing Keepa and the Amazon page cannot tell them -- it is
+ * their OWN history.
+ *
+ * Read from asin_return_stats (sales_orders.refund_quantity, ASIN-keyed).
+ * Financial Events is not usable here: it stores SKU in its asin column, so it
+ * cannot answer per ASIN.
+ *
+ * A refund can post months after the sale, so on ASINs whose sales predate the
+ * stored orders the rate can exceed 100%. That is shown as-is with a "~"
+ * rather than clamped -- a silently capped 100% would look like every unit
+ * came back.
+ */
+async function loadReturnStats(asin) {
+  const el = $("apx-returns");
+  if (!el) return;
+  el.textContent = "Checking your return history…";
+  el.className = "apx-status";
+  try {
+    const r = await bg("INVSPRNT_GET_RETURN_STATS", { asin });
+    if (!r?.ok) throw new Error(r?.error || "lookup failed");
+    const d = r.data;
+    if (!d || !Number(d.units_sold)) {
+      el.textContent = "No sales history for this ASIN yet — no returns to show.";
+      el.className = "apx-status";
+      return;
+    }
+    const sold = Number(d.units_sold) || 0;
+    const ret = Number(d.units_returned) || 0;
+    const rate = Number(d.return_rate_pct);
+    const sold12 = Number(d.units_sold_12m) || 0;
+    const ret12 = Number(d.units_returned_12m) || 0;
+
+    if (ret === 0) {
+      el.textContent = `No returns — ${sold} unit${sold === 1 ? "" : "s"} sold.`;
+      el.className = "apx-status ok";
+      return;
+    }
+    const approx = rate > 100 ? "~" : "";
+    const recent = sold12 > 0 ? ` · last 12 months ${ret12}/${sold12}` : "";
+    const last = d.last_return_date ? ` · last return ${new Date(d.last_return_date).toLocaleDateString()}` : "";
+    el.textContent = `Returns: ${ret} of ${sold} sold (${approx}${isFinite(rate) ? rate : "?"}%)${recent}${last}`;
+    // 10% is the line where a return rate starts eating the margin on a
+    // typical arbitrage buy; above 25% it usually decides the purchase.
+    el.className = rate >= 25 ? "apx-status err" : rate >= 10 ? "apx-status" : "apx-status ok";
+    el.title = rate > 100
+      ? "More units came back than the orders we hold for this ASIN — its earlier sales predate the stored order history, so treat the rate as approximate."
+      : "From your own orders (refunded quantity ÷ units sold).";
+  } catch (e) {
+    el.textContent = `Return history unavailable: ${e.message}`;
+    el.className = "apx-status";
+  }
+}
+
+function clearReturnStats() {
+  const el = $("apx-returns");
+  if (!el) return;
+  el.textContent = "";
+  el.className = "apx-status";
 }
 
 async function countSellers({ asin, marketplace, createdListingId = null, reason = 'recheck' }) {

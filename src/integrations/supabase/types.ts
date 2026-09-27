@@ -14126,6 +14126,23 @@ export type Database = {
       }
     }
     Views: {
+      asin_return_stats: {
+        Row: {
+          asin: string | null
+          first_sale_date: string | null
+          last_return_date: string | null
+          last_sale_date: string | null
+          orders_returned: number | null
+          orders_total: number | null
+          return_rate_pct: number | null
+          units_returned: number | null
+          units_returned_12m: number | null
+          units_sold: number | null
+          units_sold_12m: number | null
+          user_id: string | null
+        }
+        Relationships: []
+      }
       asin_cog_for_repricer: {
         Row: {
           asin: string | null

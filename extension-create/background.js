@@ -312,6 +312,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data: { fnskuRows, inventoryRows, createdListingRows } });
           break;
         }
+        case "INVSPRNT_GET_RETURN_STATS": {
+          // Return history for the ASIN being priced. asin_return_stats is a
+          // security_invoker view over the seller's own sales_orders, so RLS
+          // scopes it to them and no extra filter is needed beyond the ASIN.
+          const s2 = await ensureFreshSession();
+          const uid2 = userIdFromJWT(s2.access_token);
+          const asin2 = encodeURIComponent(String(msg.asin || "").toUpperCase());
+          const rows2 = await restGet(
+            `asin_return_stats?user_id=eq.${uid2}&asin=eq.${asin2}&select=units_sold,units_returned,orders_returned,return_rate_pct,last_return_date,units_sold_12m,units_returned_12m,first_sale_date&limit=1`,
+          );
+          sendResponse({ ok: true, data: Array.isArray(rows2) ? rows2[0] || null : null });
+          break;
+        }
         case "INVSPRNT_LOAD_MARKETPLACES": {
           // List user's connected marketplaces (selling regions).
           const s = await ensureFreshSession();
