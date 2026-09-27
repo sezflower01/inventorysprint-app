@@ -737,25 +737,25 @@ export default function NeedBuyAgain() {
                             <Copy className="h-3 w-3 text-muted-foreground hover:text-foreground" />
                           </button>
                         </span>
-                        <span className="text-[11px] text-muted-foreground">
+                        <span className="text-xs font-bold text-muted-foreground">
                           Stock:{" "}
                           <span className="text-sm font-bold tabular-nums text-foreground">{item.available}</span> avail /{" "}
                           <span className="text-sm font-bold tabular-nums text-foreground">{item.inbound}</span> inbound /{" "}
                           <span className="text-sm font-bold tabular-nums text-foreground">{item.reserved}</span> reserved
                           {b.reservedExcluded && (
                             <span
-                              className="ml-1 text-amber-600 dark:text-amber-400"
+                              className="ml-1 text-xs font-bold text-amber-600 dark:text-amber-400"
                               title="No shipment received in over 7 days — Reserved is treated as already sold to a customer, not counted toward future stock coverage."
                             >
                               (treated as sold)
                             </span>
                           )}
                         </span>
-                        <span className="text-[11px] text-muted-foreground">
+                        <span className="text-xs font-bold text-muted-foreground">
                           Sales:{" "}
-                          <span className="text-sm font-bold tabular-nums text-foreground">{item.sales7d}</span><span className="text-[11px] text-muted-foreground">·7d</span>{" "}
-                          <span className="text-sm font-bold tabular-nums text-foreground">{item.sales30d}</span><span className="text-[11px] text-muted-foreground">·30d</span>{" "}
-                          <span className="text-sm font-bold tabular-nums text-foreground">{item.sales90d}</span><span className="text-[11px] text-muted-foreground">·90d</span>
+                          <span className="text-sm font-bold tabular-nums text-foreground">{item.sales7d}</span><span className="text-xs text-muted-foreground">·7d</span>{" "}
+                          <span className="text-sm font-bold tabular-nums text-foreground">{item.sales30d}</span><span className="text-xs text-muted-foreground">·30d</span>{" "}
+                          <span className="text-sm font-bold tabular-nums text-foreground">{item.sales90d}</span><span className="text-xs text-muted-foreground">·90d</span>
                         </span>
                       </div>
 
@@ -855,8 +855,8 @@ export default function NeedBuyAgain() {
  */
 function Metric({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
   return (
-    <span className="inline-flex items-baseline gap-1">
-      <span className="text-[11px] text-muted-foreground">{label}:</span>
+    <span className="inline-flex items-baseline gap-1 whitespace-nowrap">
+      <span className="text-xs font-bold text-muted-foreground">{label}:</span>
       <span className={`text-sm font-bold tabular-nums ${highlight ? 'text-destructive' : 'text-foreground'}`}>{value}</span>
     </span>
   );
