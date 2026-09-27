@@ -500,12 +500,24 @@
   const MAX_CACHE_ENTRIES = 25;
   const cacheKey = (a, m, r) => `${CACHE_PREFIX}${m}:${a}:r${r}`;
   async function readCache(a, m, r) {
-    const k = cacheKey(a, m, r);
-    const obj = await chrome.storage.local.get(k);
-    const entry = obj[k];
-    if (!entry) return null;
-    if (Date.now() - entry.t > CFG.CACHE_TTL_MS) return null;
-    return entry.v;
+    // chrome.storage REJECTS once the extension context is invalidated -- the
+    // state a panel lands in after the extension updates or is reloaded while
+    // an Amazon tab stays open. This is awaited early in loadData(), so an
+    // unhandled rejection here aborted the whole load with state.summaryLoading
+    // still true: the panel sat on "Analyzing…" until the 35s watchdog, which
+    // is exactly the stranded-summary warning reported 2026-09-27 on
+    // B0CND15112. A missing cache is nothing; a dead load is everything.
+    try {
+      const k = cacheKey(a, m, r);
+      const obj = await chrome.storage.local.get(k);
+      const entry = obj[k];
+      if (!entry) return null;
+      if (Date.now() - entry.t > CFG.CACHE_TTL_MS) return null;
+      return entry.v;
+    } catch (e) {
+      console.debug("[InvSPRNT] cache read skipped:", e?.message || e);
+      return null;
+    }
   }
   /** Drop expired scans, then any beyond `keepAtMost` newest. Returns keys removed. */
   async function pruneCache(keepAtMost = MAX_CACHE_ENTRIES) {
@@ -1317,7 +1329,10 @@
     // Each task below removes its name as it settles (with or without data),
     // so the summary can fill row by row -- see renderSellerAmpSummary().
     state.pendingSources = new Set(SUMMARY_SOURCES);
-    renderSellerAmpSummary();
+    // Guarded: this runs BEFORE the try below, so a throw here would strand
+    // the flag the same way. renderAll() isolates its eleven renderers for
+    // the same reason.
+    try { renderSellerAmpSummary(); } catch (e) { console.error("[InvSPRNT] initial summary paint failed", e); }
 
     // Safety net. Every task settles on its own (withTimeout resolves rather
     // than rejecting, so Promise.allSettled below cannot hang), but the clear
@@ -1335,12 +1350,24 @@
     const watchdogFor = loadingFor;
     setTimeout(() => {
       if (state.summaryLoading && loadingFor === watchdogFor) {
-        console.warn(`[InvSPRNT] summary watchdog fired for ${watchdogFor} — summaryLoading was stranded, clearing`);
+        // With the try/finally below, reaching this means the load is still
+        // genuinely in flight past 35s (every task caps at 30s), not that it
+        // threw -- a throw now clears the flag itself and logs the cause.
+        console.warn(`[InvSPRNT] summary watchdog fired for ${watchdogFor} — still loading after 35s, clearing`);
         state.summaryLoading = false;
         renderSellerAmpSummary();
       }
     }, 35000);
 
+    // EVERYTHING below runs inside try/finally (2026-09-27).
+    //
+    // The watchdog above was a safety net for exactly one failure mode: a
+    // throw between here and the clear at the end leaves summaryLoading true
+    // and the panel showing a skeleton for 35 seconds. Catching it here fixes
+    // the cause instead of waiting for the net, and -- the part that matters
+    // when it happens again -- names the error rather than reporting only that
+    // something was "stranded".
+    try {
     const r = state.range;
     let servedFromCache = false;
     if (!force) {
@@ -1411,7 +1438,7 @@
     const stillCurrent = () => loadingFor === `${a}|${m}|${r}`;
     state.fbaComplianceLoading = true;
     state.fbaComplianceError = null;
-    renderFbaCompliance();
+    try { renderFbaCompliance(); } catch (e) { console.error("[InvSPRNT] compliance paint failed", e); }
     const tasks = [
       safeInvoke("fetch-listing-snapshot", { asin: a, marketplaceId: marketplaceIdFor(m) }, 20000).then((prod) => {
         if (!stillCurrent()) return;
@@ -1546,6 +1573,16 @@
     renderAll();
     // Auto-record this view to scan history (deduped per ASIN+marketplace)
     autoRecordHistory().catch((e) => console.warn("[InvSPRNT] auto-record failed", e?.message));
+    } catch (e) {
+      console.error(`[InvSPRNT] loadData failed for ${watchdogFor}:`, e);
+    } finally {
+      // Only for THIS scan: a newer one owns the flag now and is entitled to
+      // its own skeleton.
+      if (loadingFor === watchdogFor && state.summaryLoading) {
+        state.summaryLoading = false;
+        try { renderSellerAmpSummary(); } catch (e2) { console.error("[InvSPRNT] summary repaint failed", e2); }
+      }
+    }
   }
 
   // Build a mobile_scan_history row from current state
