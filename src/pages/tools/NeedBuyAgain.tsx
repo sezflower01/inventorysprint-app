@@ -15,6 +15,7 @@ import ReorderPlanningPanel, {
   type ReorderPlanningSettings,
 } from "@/components/inventory/ReorderPlanningPanel";
 import { calculateEstimatedFeesFromCache } from "@/lib/salesCalculations";
+import { getInventoryUnitCostSafe } from "@/lib/cost-contract";
 
 // Deliberately narrower than the canonical public.is_ghost_inventory_row()
 // SQL function used elsewhere (active_inventory / active_created_listings):
@@ -162,7 +163,7 @@ export default function NeedBuyAgain() {
       const [inventoryData, recentSalesData, historicalSalesData, listingsData, feeCacheData, shipmentsData, shipmentItemsData] = await Promise.all([
         fetchAllPaged((from, to) =>
           supabase.from("inventory")
-            .select("asin, title, image_url, available, inbound, reserved, sku, amazon_price, my_price, price, cost, listing_status")
+            .select("asin, title, image_url, available, inbound, reserved, sku, amazon_price, my_price, price, cost, amount, units, listing_status")
             .eq("user_id", userId)
             .range(from, to)
         ),
@@ -246,6 +247,43 @@ export default function NeedBuyAgain() {
           referralRate: Number(f.referral_rate) || 0,
           isMedia: !!f.is_media,
         });
+      }
+
+      /**
+       * COG ON RECORD FIRST (2026-09-27).
+       *
+       * This page showed "Cost: $589.10" against a $26.00 sale price and an
+       * ROI of -97%, because inventory.cost holds what a BATCH cost, not what
+       * one unit cost. Reported on B09SYRPK9K.
+       *
+       * Every other surface — repricer, Inventory Valuation, Shipment Builder
+       * — reads the seller's single COG per ASIN through asin_cog_for_repricer,
+       * which already drops flagged and placeholder costs. Reading anything
+       * else here is how two pages end up quoting different costs for the same
+       * product.
+       *
+       * Paged deliberately: PostgREST caps a response at 1,000 rows whatever
+       * .limit() says, and a short read here silently prices stock from the
+       * wrong source rather than failing.
+       */
+      const cogMap = new Map<string, number>();
+      {
+        const PAGE = 1000;
+        for (let from = 0; from < 50 * PAGE; from += PAGE) {
+          const { data: cogRows, error: cogErr } = await supabase
+            .from("asin_cog_for_repricer")
+            .select("asin, unit_cost")
+            .eq("user_id", user.id)
+            .not("unit_cost", "is", null)
+            .range(from, from + PAGE - 1);
+          if (cogErr) { console.warn("[NeedBuyAgain] COG read failed:", cogErr.message); break; }
+          if (!cogRows) break;
+          for (const row of cogRows as { asin: string; unit_cost: number }[]) {
+            const c = Number(row.unit_cost);
+            if (row.asin && Number.isFinite(c) && c > 0 && !cogMap.has(row.asin)) cogMap.set(row.asin, c);
+          }
+          if (cogRows.length < PAGE) break;
+        }
       }
 
       // Build cost map from created_listings (Contract A: amount = unit, cost/units = derived)
@@ -345,7 +383,13 @@ export default function NeedBuyAgain() {
           const prev = inventoryPriceMap.get(item.asin) ?? 0;
           if (p > prev) inventoryPriceMap.set(item.asin, p);
         }
-        const c = Number(item.cost) > 0 ? Number(item.cost) : 0;
+        // inventory.cost is NOT reliably a unit cost: created_listings and
+        // inventory disagree about whether cost or amount is the total, which
+        // is why $589.10 (a batch) was shown against a $26.00 sale price.
+        // getInventoryUnitCostSafe is the shared arbiter -- it cross-checks
+        // cost against amount x units and returns null rather than guessing
+        // when the two cannot both be true.
+        const c = getInventoryUnitCostSafe({ cost: item.cost, amount: item.amount, units: item.units }) ?? 0;
         if (c > 0 && !inventoryCostMap.has(item.asin)) inventoryCostMap.set(item.asin, c);
       }
 
@@ -429,7 +473,12 @@ export default function NeedBuyAgain() {
 
           // Compute ROI from current Amazon price, fee cache, and unit cost
           const price = inventoryPriceMap.get(item.asin) ?? null;
-          const cost = inventoryCostMap.get(item.asin) ?? listingCostMap.get(item.asin) ?? null;
+          // COG on record wins, then the purchase record, then inventory --
+          // the same order the repricer and Inventory Valuation use.
+          const cost = cogMap.get(item.asin)
+            ?? listingCostMap.get(item.asin)
+            ?? inventoryCostMap.get(item.asin)
+            ?? null;
           const feeCache = feeCacheMap.get(item.asin) ?? null;
           let roiInfo: RoiInfo;
           if (price && price > 0 && cost && cost > 0 && feeCache) {
@@ -688,8 +737,11 @@ export default function NeedBuyAgain() {
                             <Copy className="h-3 w-3 text-muted-foreground hover:text-foreground" />
                           </button>
                         </span>
-                        <span className="text-xs text-muted-foreground">
-                          Stock: {item.available} avail / {item.inbound} inbound / {item.reserved} reserved
+                        <span className="text-[11px] text-muted-foreground">
+                          Stock:{" "}
+                          <span className="text-sm font-bold tabular-nums text-foreground">{item.available}</span> avail /{" "}
+                          <span className="text-sm font-bold tabular-nums text-foreground">{item.inbound}</span> inbound /{" "}
+                          <span className="text-sm font-bold tabular-nums text-foreground">{item.reserved}</span> reserved
                           {b.reservedExcluded && (
                             <span
                               className="ml-1 text-amber-600 dark:text-amber-400"
@@ -699,28 +751,29 @@ export default function NeedBuyAgain() {
                             </span>
                           )}
                         </span>
-                        <span className="text-xs text-muted-foreground/70">
-                          Sales: <span className="font-medium text-foreground/70">{item.sales7d}</span><span className="text-muted-foreground/50">·7d</span>{" "}
-                          <span className="font-medium text-foreground/70">{item.sales30d}</span><span className="text-muted-foreground/50">·30d</span>{" "}
-                          <span className="font-medium text-foreground/70">{item.sales90d}</span><span className="text-muted-foreground/50">·90d</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          Sales:{" "}
+                          <span className="text-sm font-bold tabular-nums text-foreground">{item.sales7d}</span><span className="text-[11px] text-muted-foreground">·7d</span>{" "}
+                          <span className="text-sm font-bold tabular-nums text-foreground">{item.sales30d}</span><span className="text-[11px] text-muted-foreground">·30d</span>{" "}
+                          <span className="text-sm font-bold tabular-nums text-foreground">{item.sales90d}</span><span className="text-[11px] text-muted-foreground">·90d</span>
                         </span>
                       </div>
 
                       {/* Lead-time aware metrics */}
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-[11px]">
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-2">
                         <Metric label="Days until stockout" value={dusLabel}
                           highlight={b.riskLevel === 'critical' || b.riskLevel === 'high'} />
                         <Metric label="Lead time" value={`${b.totalLeadTimeDays}d`} />
                         <Metric label="Coverage" value={`${(b.planningDays - b.totalLeadTimeDays)}d`} />
                         <Metric label="ADS" value={b.ads.toFixed(2)} />
-                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold ${RISK_BADGE[b.riskLevel]}`}>
+                        <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold ${RISK_BADGE[b.riskLevel]}`}>
                           {b.riskLevel === 'critical' && <AlertTriangle className="h-3 w-3" />}
                           {b.riskLabel}
                         </span>
                       </div>
 
                       {/* ROI metrics */}
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-[11px]">
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 mt-2">
                         {item.roi.available && item.roi.roi !== null ? (
                           <>
                             <Metric label="Price" value={`$${item.roi.price!.toFixed(2)}`} />
@@ -731,7 +784,7 @@ export default function NeedBuyAgain() {
                               value={`$${item.roi.profit!.toFixed(2)}`}
                               highlight={item.roi.profit! < 0}
                             />
-                            <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                            <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold tabular-nums ${
                               item.roi.roi < 0
                                 ? 'bg-destructive/15 text-destructive border border-destructive/30'
                                 : item.roi.roi < 10
@@ -791,11 +844,20 @@ export default function NeedBuyAgain() {
   );
 }
 
+/**
+ * Label quiet, number loud (2026-09-27).
+ *
+ * Every figure on this card was 11px in the same weight as its label, so the
+ * numbers a reorder decision rests on — days of stock, cost, profit — read as
+ * body text. The label is the part you already know; the value is the part you
+ * are scanning for, so it gets the size (14px), the weight (bold) and
+ * tabular-nums, which keeps columns of digits aligned across rows.
+ */
 function Metric({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
   return (
-    <span className="text-muted-foreground">
-      {label}:{" "}
-      <span className={`font-semibold ${highlight ? 'text-destructive' : 'text-foreground'}`}>{value}</span>
+    <span className="inline-flex items-baseline gap-1">
+      <span className="text-[11px] text-muted-foreground">{label}:</span>
+      <span className={`text-sm font-bold tabular-nums ${highlight ? 'text-destructive' : 'text-foreground'}`}>{value}</span>
     </span>
   );
 }
