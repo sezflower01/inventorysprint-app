@@ -1,10 +1,10 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>InventorySprint</title>
-  <!-- Extension pages don't share the main site's index.html font loading —
+  <!-- Extension pages don't share the main site's index.html font loading â€”
        load the same pairing (Inter body / Space Grotesk headlines) directly. -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -16,13 +16,13 @@
     <header class="apx-header" id="apx-drag">
       <div class="apx-brand">
         <img class="apx-logo" src="icons/icon48.png" alt="" />
-        <span class="apx-version" title="Extension version">v1.4.8</span>
+        <span class="apx-version" title="Extension version">v1.4.9</span>
       </div>
       <div class="apx-actions">
-        <button id="apx-refresh" title="Refresh">↻</button>
-        <button id="apx-reset" title="Reset position">⌂</button>
-        <button id="apx-collapse" title="Collapse (Alt+A to hide)">–</button>
-        <button id="apx-close" title="Close (Alt+A to toggle)">×</button>
+        <button id="apx-refresh" title="Refresh">â†»</button>
+        <button id="apx-reset" title="Reset position">âŒ‚</button>
+        <button id="apx-collapse" title="Collapse (Alt+A to hide)">â€“</button>
+        <button id="apx-close" title="Close (Alt+A to toggle)">Ã—</button>
       </div>
     </header>
 
@@ -40,55 +40,55 @@
       <div id="apx-content" class="hidden">
         <!-- Tight meta row -->
         <div class="apx-meta">
-          <div><span class="apx-k">ASIN</span><span id="apx-asin">—</span></div>
-          <div><span class="apx-k">Market</span><span id="apx-mkt">—</span></div>
-          <div><span class="apx-k">Status</span><span id="apx-elig" class="apx-pill">…</span></div>
+          <div><span class="apx-k">ASIN</span><span id="apx-asin">â€”</span></div>
+          <div><span class="apx-k">Market</span><span id="apx-mkt">â€”</span></div>
+          <div><span class="apx-k">Status</span><span id="apx-elig" class="apx-pill">â€¦</span></div>
           <button id="apx-meta-recheck" class="apx-fba-recheck" type="button" title="Re-run the Amazon SP-API gating/compliance check">Recheck</button>
         </div>
         <div id="apx-mkt-chips" class="apx-mkt-chips"></div>
 
-        <!-- ───────── Sticky decision strip ───────── -->
+        <!-- â”€â”€â”€â”€â”€â”€â”€â”€â”€ Sticky decision strip â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
         <section class="apx-strip">
           <div class="apx-strip-row apx-strip-decision">
-            <span class="apx-fd-emoji" id="apx-fd-emoji">⏳</span>
+            <span class="apx-fd-emoji" id="apx-fd-emoji">â³</span>
             <div class="apx-strip-decision-text">
-              <div class="apx-fd-action" id="apx-dm-action">Analyzing…</div>
-              <div class="apx-strip-sub"><span class="apx-k">Decision Confidence:</span> <span id="apx-fd-confidence">—</span></div>
+              <div class="apx-fd-action" id="apx-dm-action">Analyzingâ€¦</div>
+              <div class="apx-strip-sub"><span class="apx-k">Decision Confidence:</span> <span id="apx-fd-confidence">â€”</span></div>
             </div>
           </div>
 
           <table class="apx-decision-table">
             <tbody>
               <tr>
-                <td class="apx-dt-label">Eligible to list <span id="apx-sa-eligible-info" class="apx-info-dot" title="">ⓘ</span></td>
-                <td class="apx-dt-value"><span id="apx-sa-eligible" class="apx-sa-chip apx-sa-unknown">…</span></td>
+                <td class="apx-dt-label">Eligible to list <span id="apx-sa-eligible-info" class="apx-info-dot" title="">â“˜</span></td>
+                <td class="apx-dt-value"><span id="apx-sa-eligible" class="apx-sa-chip apx-sa-unknown">â€¦</span></td>
               </tr>
               <tr>
-                <td class="apx-dt-label">Private-label risk <span id="apx-sa-pl-info" class="apx-info-dot" title="">ⓘ</span></td>
-                <td class="apx-dt-value"><span id="apx-sa-pl" class="apx-sa-chip apx-sa-unknown">—</span></td>
+                <td class="apx-dt-label">Private-label risk <span id="apx-sa-pl-info" class="apx-info-dot" title="">â“˜</span></td>
+                <td class="apx-dt-value"><span id="apx-sa-pl" class="apx-sa-chip apx-sa-unknown">â€”</span></td>
               </tr>
               <tr>
-                <td class="apx-dt-label">Active alerts <span id="apx-sa-alerts-info" class="apx-info-dot" title="">ⓘ</span></td>
-                <td class="apx-dt-value"><span id="apx-sa-alerts" class="apx-sa-badge">—</span></td>
+                <td class="apx-dt-label">Active alerts <span id="apx-sa-alerts-info" class="apx-info-dot" title="">â“˜</span></td>
+                <td class="apx-dt-value"><span id="apx-sa-alerts" class="apx-sa-badge">â€”</span></td>
               </tr>
             </tbody>
           </table>
 
           <div class="apx-strip-row apx-strip-money">
-            <div><span class="apx-k">Fees</span><span id="apx-fees">—</span></div>
-            <div><span class="apx-k">Profit</span><span id="apx-profit">—</span></div>
-            <div><span class="apx-k">ROI</span><span id="apx-roi-out">—</span></div>
-            <div><span class="apx-k">Max Cost</span><span id="apx-sa-maxcost" class="apx-sa-v apx-good">—</span></div>
+            <div><span class="apx-k">Fees</span><span id="apx-fees">â€”</span></div>
+            <div><span class="apx-k">Profit</span><span id="apx-profit">â€”</span></div>
+            <div><span class="apx-k">ROI</span><span id="apx-roi-out">â€”</span></div>
+            <div><span class="apx-k">Max Cost</span><span id="apx-sa-maxcost" class="apx-sa-v apx-good">â€”</span></div>
           </div>
 
           <div class="apx-strip-row apx-strip-market">
-            <div><span class="apx-k">BSR</span><span id="apx-sa-bsr" class="apx-sa-v">—</span></div>
-            <div><span class="apx-k">Est/mo</span><span id="apx-sa-sales" class="apx-sa-v">—</span></div>
-            <div><span class="apx-k">Margin</span><span id="apx-sa-margin" class="apx-sa-v">—</span></div>
+            <div><span class="apx-k">BSR</span><span id="apx-sa-bsr" class="apx-sa-v">â€”</span></div>
+            <div><span class="apx-k">Est/mo</span><span id="apx-sa-sales" class="apx-sa-v">â€”</span></div>
+            <div><span class="apx-k">Margin</span><span id="apx-sa-margin" class="apx-sa-v">â€”</span></div>
           </div>
-          <!-- apx-sa-sale / apx-sa-cost removed — already shown in the Profit
+          <!-- apx-sa-sale / apx-sa-cost removed â€” already shown in the Profit
                calculator below (Sale / Total cost). apx-unit-cost /
-               apx-sa-roi / apx-sa-profit removed — duplicated Cost / ROI /
+               apx-sa-roi / apx-sa-profit removed â€” duplicated Cost / ROI /
                Profit already shown in .apx-strip-money above. Elements kept
                hidden so panel.js's existing $("id") lookups don't need to
                change. -->
@@ -102,19 +102,19 @@
             <!-- Hidden 2026-07-15: user asked to hide the Full Analysis button
                  from the extension analyzer. Left in the DOM (just `hidden`)
                  so panel.js's renderMeta() can keep setting .href without
-                 needing changes — quick re-add by removing `hidden`. -->
-            <a id="apx-open-analyzer-btn" class="apx-strip-link" target="_blank" rel="noopener" hidden>🔍 Full Analysis ↗</a>
-            <a id="apx-open-history-btn" class="apx-strip-link" target="_blank" rel="noopener">📜 History ↗</a>
+                 needing changes â€” quick re-add by removing `hidden`. -->
+            <a id="apx-open-analyzer-btn" class="apx-strip-link" target="_blank" rel="noopener" hidden>ðŸ” Full Analysis â†—</a>
+            <a id="apx-open-history-btn" class="apx-strip-link" target="_blank" rel="noopener">ðŸ“œ History â†—</a>
           </div>
         </section>
 
-        <!-- ───────── Profit calculator (primary input) ───────── -->
+        <!-- â”€â”€â”€â”€â”€â”€â”€â”€â”€ Profit calculator (primary input) â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
         <section class="apx-roi">
           <h3>Profit calculator</h3>
           <div class="apx-row">
             <label>Total cost (USD) <input id="apx-cost" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" /><span id="apx-cost-converted" class="apx-conv-hint"></span></label>
             <label class="hidden">Units <input id="apx-units" type="text" inputmode="numeric" autocomplete="off" value="1" /></label>
-            <label>Sale <input id="apx-sale" type="text" inputmode="decimal" autocomplete="off" readonly title="Live sale price — read-only, refreshes automatically" /></label>
+            <label>Sale <input id="apx-sale" type="text" inputmode="decimal" autocomplete="off" readonly title="Live sale price â€” read-only, refreshes automatically" /></label>
             <label>I sell as
               <select id="apx-seller-mode">
                 <option value="FBA">FBA</option>
@@ -129,13 +129,13 @@
             <div class="apx-sim">
               <div class="apx-spark-head">
                 <span class="apx-k">Amazon price</span>
-                <span class="apx-k" id="apx-sim-val">—</span>
+                <span class="apx-k" id="apx-sim-val">â€”</span>
               </div>
               <input id="apx-sim-slider" type="range" min="0" max="100" value="50" />
               <div class="apx-row apx-out">
-                <div><span class="apx-k">Sim sale</span><span id="apx-sim-sale">—</span></div>
-                <div><span class="apx-k">Sim profit</span><span id="apx-sim-profit">—</span></div>
-                <div><span class="apx-k">Sim ROI</span><span id="apx-sim-roi">—</span></div>
+                <div><span class="apx-k">Sim sale</span><span id="apx-sim-sale">â€”</span></div>
+                <div><span class="apx-k">Sim profit</span><span id="apx-sim-profit">â€”</span></div>
+                <div><span class="apx-k">Sim ROI</span><span id="apx-sim-roi">â€”</span></div>
               </div>
               <div class="apx-sim-alert-row">
                 <input id="apx-sim-alert-email" type="email" autocomplete="off" placeholder="Notify email (any address)" />
@@ -146,7 +146,7 @@
           </details>
         </section>
 
-        <!-- Hidden legacy banner — kept so panel.js wiring doesn't break -->
+        <!-- Hidden legacy banner â€” kept so panel.js wiring doesn't break -->
         <div id="apx-signal" hidden aria-hidden="true" style="display:none!important">
           <span id="apx-signal-emoji" hidden></span>
           <span id="apx-signal-label" hidden></span>
@@ -154,61 +154,61 @@
           <button id="apx-signal-retry" type="button" hidden></button>
         </div>
 
-        <!-- ───────── Final decision explanation (collapsible) ───────── -->
+        <!-- â”€â”€â”€â”€â”€â”€â”€â”€â”€ Final decision explanation (collapsible) â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
         <details class="apx-details" open>
-          <summary>💡 Why this decision</summary>
+          <summary>ðŸ’¡ Why this decision</summary>
           <div class="apx-final-decision unknown" id="apx-final-decision">
-            <p class="apx-fd-explanation" id="apx-dm-why">Gathering data to evaluate this opportunity…</p>
+            <p class="apx-fd-explanation" id="apx-dm-why">Gathering data to evaluate this opportunityâ€¦</p>
             <div class="apx-fd-pills">
-              <div class="apx-fd-pill"><span class="apx-k">Profitability</span><span class="apx-dm-pill" id="apx-dm-profit">—</span></div>
-              <div class="apx-fd-pill"><span class="apx-k">Market</span><span class="apx-dm-pill" id="apx-dm-trend">—</span></div>
-              <div class="apx-fd-pill"><span class="apx-k">Competition</span><span class="apx-dm-pill" id="apx-dm-comp">—</span></div>
-              <div class="apx-fd-pill"><span class="apx-k">Eligibility</span><span class="apx-dm-pill" id="apx-dm-elig">—</span></div>
-              <div class="apx-fd-pill"><span class="apx-k">Sales</span><span class="apx-dm-pill" id="apx-dm-sales">—</span></div>
+              <div class="apx-fd-pill"><span class="apx-k">Profitability</span><span class="apx-dm-pill" id="apx-dm-profit">â€”</span></div>
+              <div class="apx-fd-pill"><span class="apx-k">Market</span><span class="apx-dm-pill" id="apx-dm-trend">â€”</span></div>
+              <div class="apx-fd-pill"><span class="apx-k">Competition</span><span class="apx-dm-pill" id="apx-dm-comp">â€”</span></div>
+              <div class="apx-fd-pill"><span class="apx-k">Eligibility</span><span class="apx-dm-pill" id="apx-dm-elig">â€”</span></div>
+              <div class="apx-fd-pill"><span class="apx-k">Sales</span><span class="apx-dm-pill" id="apx-dm-sales">â€”</span></div>
             </div>
             <div class="apx-fd-score" id="apx-sa-verdict-score" hidden style="display:none"></div>
             <span id="apx-sa-verdict-emoji" hidden></span>
             <span id="apx-sa-verdict-label" hidden></span>
-            <!-- Brand History — pooled across ALL extension users' scans
+            <!-- Brand History â€” pooled across ALL extension users' scans
                  (analyzer_decision_log via brand-history-lookup), not just
                  this one ASIN. Hidden until a brand is resolved and the
                  lookup returns something to show. -->
             <div class="apx-brand-history" id="apx-brand-history" hidden></div>
-            <!-- Admin-only — visibility toggled by applyAdminOnlyVisibility()
+            <!-- Admin-only â€” visibility toggled by applyAdminOnlyVisibility()
                  in panel.js once INVSPRNT_CHECK_ADMIN resolves. Starts hidden
                  so it never flashes visible for a non-admin before that
                  check completes. -->
-            <button type="button" class="apx-dm-export-btn" id="apx-fd-copy-debug" title="Copy the full decision engine payload (inputs + verdict + compliance flags) to clipboard" style="margin-top:8px;width:100%;" hidden>🐞 Copy decision JSON (debug)</button>
+            <button type="button" class="apx-dm-export-btn" id="apx-fd-copy-debug" title="Copy the full decision engine payload (inputs + verdict + compliance flags) to clipboard" style="margin-top:8px;width:100%;" hidden>ðŸž Copy decision JSON (debug)</button>
           </div>
 
         </details>
 
-        <!-- Decision memory hidden — kept in the DOM so panel.js wiring
+        <!-- Decision memory hidden â€” kept in the DOM so panel.js wiring
              (wireDecisionMemoryButtons, export handlers) doesn't break. -->
         <div class="apx-dm-memory" id="apx-dm-memory" hidden>
           <div class="apx-dm-memory-head">
-            <span>🧠 Decision Memory</span>
-            <span class="apx-dm-memory-status" id="apx-dm-memory-status">Saving scan…</span>
+            <span>ðŸ§  Decision Memory</span>
+            <span class="apx-dm-memory-status" id="apx-dm-memory-status">Saving scanâ€¦</span>
           </div>
           <div class="apx-dm-memory-btns">
-            <button type="button" class="apx-dm-btn" data-action="buy" id="apx-dm-buy">🛒 Buy</button>
-            <button type="button" class="apx-dm-btn" data-action="skip" id="apx-dm-skip">✕ Skip</button>
-            <button type="button" class="apx-dm-btn" data-action="watch" id="apx-dm-watch">👁 Watch</button>
+            <button type="button" class="apx-dm-btn" data-action="buy" id="apx-dm-buy">ðŸ›’ Buy</button>
+            <button type="button" class="apx-dm-btn" data-action="skip" id="apx-dm-skip">âœ• Skip</button>
+            <button type="button" class="apx-dm-btn" data-action="watch" id="apx-dm-watch">ðŸ‘ Watch</button>
           </div>
           <details class="apx-details apx-details-inline">
             <summary>Export memory</summary>
             <div class="apx-dm-export-row">
-              <button type="button" class="apx-dm-export-btn" id="apx-dm-export-json" title="Download all decisions + actions as JSON">📤 JSON</button>
-              <button type="button" class="apx-dm-export-btn" id="apx-dm-export-csv" title="Download all decisions + actions as CSV">📊 CSV</button>
+              <button type="button" class="apx-dm-export-btn" id="apx-dm-export-json" title="Download all decisions + actions as JSON">ðŸ“¤ JSON</button>
+              <button type="button" class="apx-dm-export-btn" id="apx-dm-export-csv" title="Download all decisions + actions as CSV">ðŸ“Š CSV</button>
             </div>
             <div class="apx-dm-export-status" id="apx-dm-export-status"></div>
           </details>
         </div>
 
-        <!-- ───────── Price History (replaces Decision Memory) ───────── -->
+        <!-- â”€â”€â”€â”€â”€â”€â”€â”€â”€ Price History (replaces Decision Memory) â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
         <section class="apx-history-section">
           <div class="apx-spark-head">
-            <span class="apx-k" style="font-weight:600;">📈 Price History</span>
+            <span class="apx-k" style="font-weight:600;">ðŸ“ˆ Price History</span>
             <div class="apx-range-tabs" role="tablist">
               <button class="apx-range-tab" data-range="90">3M</button>
               <button class="apx-range-tab" data-range="180">6M</button>
@@ -228,44 +228,44 @@
             <span class="apx-hl-item"><i class="apx-hl-dot" style="background:#60a5fa"></i>FBA</span>
             <span class="apx-hl-item"><i class="apx-hl-dot" style="background:#a78bfa"></i>FBM</span>
           </div>
-          <div id="apx-history-verdict" class="apx-history-verdict apx-sa-unknown">—</div>
+          <div id="apx-history-verdict" class="apx-history-verdict apx-sa-unknown">â€”</div>
         </section>
 
-        <!-- ───────── Icon row: tap any icon to open a popover ───────── -->
+        <!-- â”€â”€â”€â”€â”€â”€â”€â”€â”€ Icon row: tap any icon to open a popover â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
         <div class="apx-iconbar" role="toolbar" aria-label="Details">
           <details class="apx-pop">
-            <summary title="Competition (Buy Box, FBA, FBM, sellers)">👥<span class="apx-pop-cap">Competition</span></summary>
+            <summary title="Competition (Buy Box, FBA, FBM, sellers)">ðŸ‘¥<span class="apx-pop-cap">Competition</span></summary>
             <div class="apx-pop-panel">
               <div class="apx-grid">
-                <div class="apx-card"><div class="apx-k">Buy Box</div><div class="apx-v" id="apx-bb">—</div></div>
-                <div class="apx-card"><div class="apx-k">Lowest FBA</div><div class="apx-v" id="apx-fba">—</div></div>
-                <div class="apx-card"><div class="apx-k">Lowest FBM</div><div class="apx-v" id="apx-fbm">—</div></div>
-                <div class="apx-card"><div class="apx-k">Amazon</div><div class="apx-v" id="apx-amz">—</div></div>
-                <div class="apx-card"><div class="apx-k">Sellers FBA/FBM</div><div class="apx-v" id="apx-sellers">—</div></div>
-                <div class="apx-card"><div class="apx-k" id="apx-swing-label">3M swing</div><div class="apx-v" id="apx-swing">—</div></div>
-                <div class="apx-card"><div class="apx-k">BSR</div><div class="apx-v" id="apx-bsr">—</div></div>
+                <div class="apx-card"><div class="apx-k">Buy Box</div><div class="apx-v" id="apx-bb">â€”</div></div>
+                <div class="apx-card"><div class="apx-k">Lowest FBA</div><div class="apx-v" id="apx-fba">â€”</div></div>
+                <div class="apx-card"><div class="apx-k">Lowest FBM</div><div class="apx-v" id="apx-fbm">â€”</div></div>
+                <div class="apx-card"><div class="apx-k">Amazon</div><div class="apx-v" id="apx-amz">â€”</div></div>
+                <div class="apx-card"><div class="apx-k">Sellers FBA/FBM</div><div class="apx-v" id="apx-sellers">â€”</div></div>
+                <div class="apx-card"><div class="apx-k" id="apx-swing-label">3M swing</div><div class="apx-v" id="apx-swing">â€”</div></div>
+                <div class="apx-card"><div class="apx-k">BSR</div><div class="apx-v" id="apx-bsr">â€”</div></div>
               </div>
             </div>
           </details>
 
           <details class="apx-pop">
-            <summary title="Package dimensions & weight">📦<span class="apx-pop-cap">Size</span></summary>
+            <summary title="Package dimensions & weight">ðŸ“¦<span class="apx-pop-cap">Size</span></summary>
             <div class="apx-pop-panel">
               <div class="apx-spark-head">
                 <span class="apx-k">Dimensions &amp; weight</span>
-                <span class="apx-k" id="apx-dims-source">—</span>
+                <span class="apx-k" id="apx-dims-source">â€”</span>
               </div>
               <div class="apx-row apx-out">
-                <div><span class="apx-k">Pkg L×W×H</span><span id="apx-dims-pkg">—</span></div>
-                <div><span class="apx-k">Pkg weight</span><span id="apx-dims-pkg-wt">—</span></div>
-                <div><span class="apx-k">Item L×W×H</span><span id="apx-dims-item">—</span></div>
-                <div><span class="apx-k">Item weight</span><span id="apx-dims-item-wt">—</span></div>
+                <div><span class="apx-k">Pkg LÃ—WÃ—H</span><span id="apx-dims-pkg">â€”</span></div>
+                <div><span class="apx-k">Pkg weight</span><span id="apx-dims-pkg-wt">â€”</span></div>
+                <div><span class="apx-k">Item LÃ—WÃ—H</span><span id="apx-dims-item">â€”</span></div>
+                <div><span class="apx-k">Item weight</span><span id="apx-dims-item-wt">â€”</span></div>
               </div>
             </div>
           </details>
 
           <details class="apx-pop">
-            <summary title="FBA compliance & hazmat">🛡️<span class="apx-pop-cap">Compliance</span></summary>
+            <summary title="FBA compliance & hazmat">ðŸ›¡ï¸<span class="apx-pop-cap">Compliance</span></summary>
             <div class="apx-pop-panel">
               <section id="apx-fba-compliance" class="apx-fba-card"></section>
               <div id="apx-fba-elig" style="display:none;"></div>
@@ -273,7 +273,7 @@
           </details>
 
           <details class="apx-pop">
-            <summary title="Diagnostics">🔬<span class="apx-pop-cap">Diag</span></summary>
+            <summary title="Diagnostics">ðŸ”¬<span class="apx-pop-cap">Diag</span></summary>
             <div class="apx-pop-panel">
               <div class="apx-diag-grid" id="apx-diag-grid"></div>
             </div>
@@ -281,14 +281,14 @@
 
         </div>
 
-        <!-- ───────── Competitors (always visible) ───────── -->
+        <!-- â”€â”€â”€â”€â”€â”€â”€â”€â”€ Competitors (always visible) â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
         <section class="apx-sellers-section">
           <div class="apx-spark-head">
             <span class="apx-k" style="font-weight:600;">Competitors</span>
-            <span class="apx-k" id="apx-sellers-count">—</span>
+            <span class="apx-k" id="apx-sellers-count">â€”</span>
           </div>
           <div id="apx-sellers-list" class="apx-sellers-list">
-            <div class="apx-sellers-empty apx-k">Loading offers…</div>
+            <div class="apx-sellers-empty apx-k">Loading offersâ€¦</div>
           </div>
         </section>
 

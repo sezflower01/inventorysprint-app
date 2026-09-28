@@ -820,7 +820,12 @@ Deno.serve(async (req) => {
       marketplaceId: string;
       name: string;
       flag: string;
+      /** What the seller may DO: includes the active-listing override below. */
       status: string;
+      /** What Amazon actually said, before any override. Restock decisions read this. */
+      rawStatus?: string;
+      /** True when status says APPROVED only because the seller already lists it. */
+      restockBlocked?: boolean;
       reasons: string[];
     }
     const marketplaceGating: MarketplaceGating[] = [];
@@ -987,6 +992,20 @@ Deno.serve(async (req) => {
           let hasActionableRestriction = false;
           let status = 'APPROVED';
           const reasons: string[] = [];
+          // AMAZON'S UNMODIFIED ANSWER, kept beside the override.
+          //
+          // The override below says: you already have an active listing, so
+          // Amazon has clearly let you sell this. True for SELLING, false for
+          // RESTOCKING -- Amazon can gate an ASIN after you are already listed
+          // on it, then refuse new inbound while your existing units sell on.
+          //
+          // B08CRM22W8, 2026-09-28: the extension read "Approved" from this
+          // override while Seller Central refused to replenish it and the
+          // inbound plan failed with "Approval is required before this item
+          // can be sent to Amazon". Anything deciding whether to SEND stock
+          // must read rawStatus.
+          let rawStatus = 'APPROVED';
+          let overriddenByActiveListing = false;
 
           for (const restriction of restrictions) {
             const reasonList = restriction?.reasons || [];
@@ -995,7 +1014,9 @@ Deno.serve(async (req) => {
               const reasonCode = String(reason.reasonCode || '').toUpperCase();
 
               if (reasonCode === 'APPROVAL_REQUIRED' && sellerVerifiedApproved) {
-                reasons.push(`Amazon returned "${message}" but you already have an active listing for this ASIN in ${mp.id} — approval is verified at the seller-account level.`);
+                rawStatus = 'APPROVAL_REQUIRED';
+                overriddenByActiveListing = true;
+                reasons.push(`Amazon returned "${message}" but you already have an active listing for this ASIN in ${mp.id} — approval is verified at the seller-account level. Amazon may still refuse NEW inbound stock for it.`);
                 console.log(`[${mp.id}] APPROVAL_REQUIRED overridden — seller already has an active listing for ${asin}`);
                 continue;
               }
@@ -1005,8 +1026,10 @@ Deno.serve(async (req) => {
                 reasons.push(message);
                 if (reasonCode === 'APPROVAL_REQUIRED') {
                   status = 'APPROVAL_REQUIRED';
+                  rawStatus = 'APPROVAL_REQUIRED';
                 } else {
                   status = 'RESTRICTED';
+                  rawStatus = 'RESTRICTED';
                 }
               } else {
                 reasons.push(message);
@@ -1018,10 +1041,17 @@ Deno.serve(async (req) => {
           // If no actionable restrictions found, seller is approved
           if (!hasActionableRestriction) {
             console.log(`[${mp.id}] No actionable restrictions - seller is approved`);
-            return { marketplace: mp.id, marketplaceId: mp.marketplaceId, name: mp.name, flag: mp.flag, status: 'APPROVED', reasons: [] };
+            return {
+              marketplace: mp.id, marketplaceId: mp.marketplaceId, name: mp.name, flag: mp.flag,
+              status: 'APPROVED', rawStatus, restockBlocked: overriddenByActiveListing,
+              reasons: overriddenByActiveListing ? reasons : [],
+            };
           }
           
-          return { marketplace: mp.id, marketplaceId: mp.marketplaceId, name: mp.name, flag: mp.flag, status, reasons };
+          return {
+            marketplace: mp.id, marketplaceId: mp.marketplaceId, name: mp.name, flag: mp.flag,
+            status, rawStatus, restockBlocked: overriddenByActiveListing, reasons,
+          };
         } catch (err) {
           console.error(`Error checking ${mp.id}:`, err);
           return { marketplace: mp.id, marketplaceId: mp.marketplaceId, name: mp.name, flag: mp.flag, status: 'ERROR', reasons: [String(err)] };

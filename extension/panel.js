@@ -883,6 +883,18 @@
     }
 
     if (e === "approved" || e === "eligible") {
+      // "Approved" here can be OUR override of an APPROVAL_REQUIRED that Amazon
+      // still enforces on new inbound (fetch-listing-snapshot now returns its
+      // raw answer). Selling what you hold and sending more in are different
+      // permissions: B08CRM22W8 read Approved while Amazon refused the
+      // shipment. Say so, rather than let the seller buy more of it.
+      const gateRow = gates.find((g) => String(g.marketplace || "").toUpperCase() === String(state.marketplace || "US").toUpperCase());
+      if (gateRow?.restockBlocked || String(gateRow?.rawStatus || "").toUpperCase() === "APPROVAL_REQUIRED") {
+        el.innerHTML = "✅ Sell OK · ⚠️ restock gated";
+        el.classList.add("apx-elig-needs");
+        el.title = "You can sell the units you already hold, but Amazon still requires approval for this ASIN — a new inbound shipment containing it will be rejected.";
+        return;
+      }
       el.innerHTML = "✅ Approved";
       el.classList.add("apx-elig-approved");
     } else if (e === "restricted" || e === "not_eligible" || e === "ineligible") {
