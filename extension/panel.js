@@ -890,7 +890,12 @@
       // shipment. Say so, rather than let the seller buy more of it.
       const gateRow = gates.find((g) => String(g.marketplace || "").toUpperCase() === String(state.marketplace || "US").toUpperCase());
       if (gateRow?.restockBlocked || String(gateRow?.rawStatus || "").toUpperCase() === "APPROVAL_REQUIRED") {
-        el.innerHTML = "✅ Sell OK · ⚠️ restock gated";
+        // The Apply link belongs here MORE than on a plain "needs approval":
+        // this is the state where the seller already has money in the product
+        // and needs the gate opened to send more.
+        const rsHost = approvalHost(state.marketplace);
+        const rsUrl = `https://${rsHost}/hz/approvalrequest/restrictions/approve?asin=${encodeURIComponent(state.asin || "")}&itemcondition=new&ref_=xx_addlisting_dnav_xx`;
+        el.innerHTML = `✅ Sell OK · ⚠️ restock gated <a href="${rsUrl}" target="_blank" rel="noopener" class="apx-approval-btn" title="Apply for approval on Seller Central">Apply →</a>`;
         el.classList.add("apx-elig-needs");
         el.title = "You can sell the units you already hold, but Amazon still requires approval for this ASIN — a new inbound shipment containing it will be rejected.";
         return;
