@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 import { toast } from "sonner";
 import {
+  AlertTriangle,
   Archive,
   ArrowLeft,
   ArrowRight,
@@ -211,7 +212,7 @@ type ShipmentItem = {
    * catches restricted-brand ASINs before they reach shipment-plan
    * submission, where Amazon would reject them.
    */
-  gatingStatus?: "checking" | "approved" | "restricted" | "unknown";
+  gatingStatus?: "checking" | "approved" | "restock_gated" | "restricted" | "unknown";
   gatingReason?: string | null;
 };
 
@@ -2750,6 +2751,39 @@ export default function ShipmentBuilder() {
         return;
       }
       const status = String((data as any).gatingStatus || "").toUpperCase();
+
+      /**
+       * A LISTED ASIN CAN STILL BE GATED FOR RESTOCK (2026-09-28).
+       *
+       * fetch-listing-snapshot reports APPROVED when the seller already has an
+       * active listing, even where Amazon answered APPROVAL_REQUIRED — right
+       * for "can I sell this", wrong for "can I send more in". B08CRM22W8 read
+       * Ungated here while Amazon refused the whole inbound plan with
+       * "Approval is required before this item can be sent to Amazon", with no
+       * indication which of 40 SKUs was at fault.
+       *
+       * The snapshot now returns its raw answer beside the override, so this
+       * check reads that instead. The badge says restock gated and offers the
+       * approval link, rather than a green Ungated on an item that will kill
+       * the shipment.
+       */
+      type GateRow = { marketplace?: string; rawStatus?: string; restockBlocked?: boolean; reasons?: string[] };
+      const snapshot = data as { marketplaceGating?: GateRow[] };
+      const gateRows: GateRow[] = Array.isArray(snapshot.marketplaceGating) ? snapshot.marketplaceGating : [];
+      const usGate = gateRows.find((g) => String(g?.marketplace || "").toUpperCase() === "US") || gateRows[0];
+      const rawStatus = String(usGate?.rawStatus || "").toUpperCase();
+      const restockBlocked = usGate?.restockBlocked === true || rawStatus === "APPROVAL_REQUIRED";
+
+      if (status === "APPROVED" && restockBlocked) {
+        setItemGating(itemId, {
+          gatingStatus: "restock_gated",
+          gatingReason:
+            (Array.isArray(usGate?.reasons) && usGate.reasons[0]) ||
+            "You can sell the units you already hold, but Amazon still requires approval for this ASIN — a shipment containing it will be rejected.",
+        });
+        return;
+      }
+
       if (status === "APPROVED") {
         setItemGating(itemId, { gatingStatus: "approved", gatingReason: null });
       } else if (status === "APPROVAL_REQUIRED" || status === "RESTRICTED" || status === "NOT_ELIGIBLE") {
@@ -5688,14 +5722,48 @@ export default function ShipmentBuilder() {
                                       Ungated
                                     </Badge>
                                   )}
+                                  {item.gatingStatus === "restock_gated" && (
+                                    <div className="flex flex-col items-center gap-0.5">
+                                      <Badge
+                                        className="gap-1 bg-amber-500/20 text-amber-200 border border-amber-400/40"
+                                        title={item.gatingReason || "Amazon still requires approval for this ASIN — a shipment containing it will be rejected."}
+                                      >
+                                        <AlertTriangle className="h-3 w-3" />
+                                        Restock gated
+                                      </Badge>
+                                      {/* The link belongs on the row, next to the item that
+                                          will stop the shipment — not in a toast that has
+                                          already gone by the time the plan is built. */}
+                                      <a
+                                        href={`https://sellercentral.amazon.com/hz/approvalrequest/restrictions/approve?asin=${encodeURIComponent(item.asin || "")}&itemcondition=new&ref_=xx_addlisting_dnav_xx`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-[10px] underline text-amber-200 hover:text-amber-100"
+                                        title="Apply for approval on Seller Central"
+                                      >
+                                        Apply →
+                                      </a>
+                                    </div>
+                                  )}
                                   {item.gatingStatus === "restricted" && (
-                                    <Badge
-                                      className="gap-1 bg-red-500/20 text-red-200 border border-red-400/40"
-                                      title={item.gatingReason || "Amazon requires approval to list this ASIN in this brand."}
-                                    >
-                                      <XCircle className="h-3 w-3" />
-                                      Approval required
-                                    </Badge>
+                                    <div className="flex flex-col items-center gap-0.5">
+                                      <Badge
+                                        className="gap-1 bg-red-500/20 text-red-200 border border-red-400/40"
+                                        title={item.gatingReason || "Amazon requires approval to list this ASIN in this brand."}
+                                      >
+                                        <XCircle className="h-3 w-3" />
+                                        Approval required
+                                      </Badge>
+                                      <a
+                                        href={`https://sellercentral.amazon.com/hz/approvalrequest/restrictions/approve?asin=${encodeURIComponent(item.asin || "")}&itemcondition=new&ref_=xx_addlisting_dnav_xx`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-[10px] underline text-red-200 hover:text-red-100"
+                                        title="Apply for approval on Seller Central"
+                                      >
+                                        Apply →
+                                      </a>
+                                    </div>
                                   )}
                                 </div>
                               </TableCell>
