@@ -3812,22 +3812,69 @@ export default function ShipmentBuilder() {
           .map((i) => i.asin!.toUpperCase()),
       ));
       if (shipAsins.length > 0) {
-        const blocked: { asin: string; status: string; sku: string }[] = [];
-        // Chunked: supabase-js writes .in() straight into the query string, so
-        // a few hundred ASINs builds a URL the server rejects.
-        for (let i = 0; i < shipAsins.length; i += 100) {
-          const chunk = shipAsins.slice(i, i + 100);
-          const { data: approvals } = await supabase
-            .from("user_approved_products")
-            .select("asin, approval_status")
-            .eq("user_id", user.id)
-            .in("asin", chunk);
-          for (const row of (approvals ?? []) as { asin: string; approval_status: string | null }[]) {
-            const status = (row.approval_status || "").toLowerCase();
-            if (status && status !== "approved") {
-              const item = draft.items.find((it) => it.asin?.toUpperCase() === row.asin && it.qtyToShip > 0);
-              blocked.push({ asin: row.asin, status, sku: item?.sku || "" });
+        const readApprovals = async (asins: string[]) => {
+          const out = new Map<string, { status: string; checkedAt: string | null }>();
+          // Chunked: supabase-js writes .in() straight into the query string,
+          // so a few hundred ASINs builds a URL the server rejects.
+          for (let i = 0; i < asins.length; i += 100) {
+            const { data } = await supabase
+              .from("user_approved_products")
+              .select("asin, approval_status, checked_at")
+              .eq("user_id", user.id)
+              .in("asin", asins.slice(i, i + 100));
+            for (const row of (data ?? []) as { asin: string; approval_status: string | null; checked_at: string | null }[]) {
+              out.set(row.asin.toUpperCase(), {
+                status: (row.approval_status || "").toLowerCase(),
+                checkedAt: row.checked_at,
+              });
             }
+          }
+          return out;
+        };
+
+        let approvals = await readApprovals(shipAsins);
+
+        /**
+         * A STORED "approved" EXPIRES (2026-09-28).
+         *
+         * The shipment Amazon refused held 40 items: 39 approved, 1 never
+         * checked. The never-checked one turned out to be fine. The blocker
+         * was B08CRM22W8, stored as approved on 2026-05-31 — Amazon had gated
+         * it in the four months since, and nothing re-asked. A stale yes is
+         * therefore more dangerous than a missing answer, because it looks
+         * settled.
+         *
+         * So anything unknown or older than 30 days is re-asked here, before
+         * submission. check-product-eligibility batches and caches, and this
+         * runs once per shipment creation — not per render.
+         */
+        const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+        const needsFresh = shipAsins.filter((asin) => {
+          const a = approvals.get(asin);
+          if (!a || !a.checkedAt) return true;
+          return Date.now() - new Date(a.checkedAt).getTime() > THIRTY_DAYS_MS;
+        });
+        if (needsFresh.length > 0) {
+          toast.info(`Checking Amazon approval for ${needsFresh.length} item${needsFresh.length === 1 ? "" : "s"}…`);
+          try {
+            await supabase.functions.invoke("check-product-eligibility", {
+              body: { marketplace: "US", asins: needsFresh, force_rescan: true },
+            });
+            approvals = await readApprovals(shipAsins);
+          } catch (e) {
+            // A failed re-check must not block a shipment on its own: fall
+            // through to whatever is on record and let Amazon have the last
+            // word, as it did before this gate existed.
+            console.warn("[ShipmentBuilder] approval re-check failed:", e);
+          }
+        }
+
+        const blocked: { asin: string; status: string; sku: string }[] = [];
+        for (const asin of shipAsins) {
+          const status = approvals.get(asin)?.status || "";
+          if (status && status !== "approved") {
+            const item = draft.items.find((it) => it.asin?.toUpperCase() === asin && it.qtyToShip > 0);
+            blocked.push({ asin, status, sku: item?.sku || "" });
           }
         }
         if (blocked.length > 0) {
