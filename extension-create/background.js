@@ -312,6 +312,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data: { fnskuRows, inventoryRows, createdListingRows } });
           break;
         }
+        case "INVSPRNT_GET_FEE_CACHE": {
+          // asin_fee_cache is maintained by the order sync and the repricer.
+          // Reading it costs nothing; asking SP-API for fees again would spend
+          // the same pricing quota the repricer runs on.
+          const s3 = await ensureFreshSession();
+          const uid3 = userIdFromJWT(s3.access_token);
+          const asin3 = encodeURIComponent(String(msg.asin || "").toUpperCase());
+          const mk3 = encodeURIComponent(String(msg.marketplace || "US").toUpperCase());
+          const rows3 = await restGet(
+            `asin_fee_cache?user_id=eq.${uid3}&asin=eq.${asin3}&marketplace=eq.${mk3}&select=fba_fee_fixed,referral_rate,is_media&limit=1`,
+          );
+          sendResponse({ ok: true, data: Array.isArray(rows3) ? rows3[0] || null : null });
+          break;
+        }
         case "INVSPRNT_GET_RETURN_STATS": {
           // Return history for the ASIN being priced. asin_return_stats is a
           // security_invoker view over the seller's own sales_orders, so RLS

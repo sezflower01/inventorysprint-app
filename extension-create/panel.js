@@ -322,7 +322,8 @@ window.addEventListener("message", (e) => {
       $("apx-asin").value = d.asin;
       newListing.bypass = false;
       clearSellerCount();
-      void loadReturnStats(d.asin);
+      state.returnStats = null;
+      void loadReturnStats(d.asin, "apx-returns", (st) => { state.returnStats = st; recalcRoi(); });
     }
   }
   if (d.type === "SOURCING_SESSION" && d.session) {
@@ -567,7 +568,8 @@ $("apx-fetch").addEventListener("click", async () => {
   state.product = r.data || {};
   setStatus("apx-fetch-status", "");
   renderProduct();
-  void loadReturnStats(asin);
+  state.returnStats = null;
+  void loadReturnStats(asin, "apx-returns", (d) => { state.returnStats = d; recalcRoi(); });
   $("apx-form").classList.remove("hidden");
   if (!$("apx-sku").value) $("apx-sku").value = generateSKU();
   if (state.product.price && !$("apx-sellprice").value) $("apx-sellprice").value = Number(state.product.price).toFixed(2);
@@ -645,6 +647,15 @@ function recalcRoi() {
   $("apx-cog").textContent = `$${cog.toFixed(2)}`;
   $("apx-profit").textContent = `$${profit.toFixed(2)}`;
   $("apx-roi").textContent = cog > 0 ? `${roi.toFixed(0)}%` : "—";
+  // Same figures, discounted by how often this product comes back. Recomputed
+  // here rather than once on fetch, so it tracks the cost the seller is typing.
+  renderAfterReturns("apx-after-returns", computeAfterReturns({
+    price, cog,
+    referralFee: Number(fees.referralFee) || 0,
+    fbaFee: Number(fees.fbaFee) || 0,
+    closingFee: Number(fees.variableClosingFee) || 0,
+    stats: state.returnStats,
+  }));
 }
 
 /* ─── Validate / Create ─── */
@@ -939,7 +950,7 @@ function clearSellerCount() {
  * rather than clamped -- a silently capped 100% would look like every unit
  * came back.
  */
-async function loadReturnStats(asin, elId = "apx-returns") {
+async function loadReturnStats(asin, elId = "apx-returns", onStats = null) {
   const el = $(elId);
   if (!el) return;
   el.textContent = "Checking your return history…";
@@ -951,8 +962,10 @@ async function loadReturnStats(asin, elId = "apx-returns") {
     if (!d || !Number(d.units_sold)) {
       el.textContent = "No sales history for this ASIN yet — no returns to show.";
       el.className = "apx-status";
+      if (onStats) onStats(null);
       return;
     }
+    if (onStats) onStats(d);
     const sold = Number(d.units_sold) || 0;
     const ret = Number(d.units_returned) || 0;
     const rate = Number(d.return_rate_pct);
@@ -985,6 +998,75 @@ function clearReturnStats(elId = "apx-returns") {
   if (!el) return;
   el.textContent = "";
   el.className = "apx-status";
+}
+
+/* ─── Profit after returns (2026-09-27) ─────────────────────────────────────
+ * A return does not cancel a sale, it delays it: the unit comes back, you send
+ * it in again and it sells later. What it actually costs you is the fees that
+ * do not come back —
+ *
+ *   Amazon's refund administration fee: min($5.00, 20% of the referral fee)
+ *   the FBA fulfilment fee on the refunded order, which is not returned
+ *
+ * so, per unit sold:
+ *
+ *   after = profit − returnRate × (fbaFee + refundAdmin)
+ *
+ * NOT profit × (1 − rate): that writes the unit off entirely, which is the
+ * "unsellable" assumption the seller explicitly did not pick (2026-09-27).
+ * Beauty/food/liquids behave that way and this model will read optimistically
+ * for them — hence the tooltip saying so rather than a silent number.
+ *
+ * Rate comes from the last 12 months when that window holds enough sales,
+ * because a product's return behaviour changes; otherwise all-time.
+ */
+function computeAfterReturns({ price, cog, referralFee, fbaFee, closingFee = 0, stats }) {
+  if (!(price > 0) || !(cog > 0) || !stats) return null;
+  const sold12 = Number(stats.units_sold_12m) || 0;
+  const ret12 = Number(stats.units_returned_12m) || 0;
+  const soldAll = Number(stats.units_sold) || 0;
+  const retAll = Number(stats.units_returned) || 0;
+  // 20 units is where a rate stops being one or two orders of noise.
+  const useRecent = sold12 >= 20;
+  const sold = useRecent ? sold12 : soldAll;
+  const returned = useRecent ? ret12 : retAll;
+  if (!(sold > 0)) return null;
+  // Cap at 1: more returns than sales means refunds posted against sales older
+  // than the orders we hold, not a >100% rate.
+  const rate = Math.min(1, returned / sold);
+
+  const fees = (Number(referralFee) || 0) + (Number(fbaFee) || 0) + (Number(closingFee) || 0);
+  const profit = price - fees - cog;
+  const refundAdmin = Math.min(5, 0.2 * (Number(referralFee) || 0));
+  const lossPerReturn = (Number(fbaFee) || 0) + refundAdmin;
+  const afterProfit = profit - rate * lossPerReturn;
+  return {
+    rate,
+    window: useRecent ? "last 12 months" : "all time",
+    sold,
+    returned,
+    profit,
+    roi: (profit / cog) * 100,
+    afterProfit,
+    afterRoi: (afterProfit / cog) * 100,
+    lossPerReturn,
+  };
+}
+
+function renderAfterReturns(elId, calc) {
+  const el = $(elId);
+  if (!el) return;
+  if (!calc || !(calc.returned > 0)) { el.textContent = ""; return; }
+  const money = (n) => `${n < 0 ? "-" : ""}$${Math.abs(n).toFixed(2)}`;
+  el.textContent =
+    `After returns: ${money(calc.afterProfit)}/unit · ROI ${calc.afterRoi.toFixed(0)}% ` +
+    `(from ${money(calc.profit)} · ${calc.roi.toFixed(0)}%, ${(calc.rate * 100).toFixed(1)}% returned, ${calc.window})`;
+  el.className = calc.afterProfit <= 0 ? "apx-status err" : "apx-status";
+  el.title =
+    `Each return costs ${money(calc.lossPerReturn)} — the FBA fulfilment fee, which Amazon does not refund, ` +
+    `plus the refund administration fee (20% of the referral fee, capped at $5). ` +
+    `Assumes the returned unit is sellable again. For opened beauty, food or liquids it will not be, ` +
+    `and the real figure is lower.`;
 }
 
 async function countSellers({ asin, marketplace, createdListingId = null, reason = 'recheck' }) {
@@ -1285,7 +1367,31 @@ function renderReplenish(d, asin = null) {
   // actually rests on. Fire-and-forget: a returns lookup must never delay or
   // break the forecast that is already on screen.
   const forAsin = asin || d?.asin;
-  if (forAsin) void loadReturnStats(forAsin, "apx-p-returns");
+  if (forAsin) {
+    void loadReturnStats(forAsin, "apx-p-returns", async (stats) => {
+      // This panel knows the price and the COG but not the fees, so read the
+      // fee cache the order sync and repricer already maintain. Free, and the
+      // same numbers the web app's Need to Buy Again uses.
+      if (!stats) { renderAfterReturns("apx-p-after", null); return; }
+      const price = Number(purchase.source?.price) || 0;
+      const cog = Number(purchase.source?.amount) || 0;
+      let referralFee = 0, fbaFee = 0;
+      try {
+        const fc = await bg("INVSPRNT_GET_FEE_CACHE", { asin: forAsin, marketplace: "US" });
+        const row = fc?.ok ? fc.data : null;
+        if (row) {
+          referralFee = price * (Number(row.referral_rate) || 0);
+          fbaFee = Number(row.fba_fee_fixed) || 0;
+        }
+      } catch (e) {
+        console.debug("[InvSPRNT] fee cache unavailable:", e?.message || e);
+      }
+      // No fees means no honest profit line -- better blank than a number
+      // computed from a 15% guess.
+      if (!(referralFee > 0) && !(fbaFee > 0)) { renderAfterReturns("apx-p-after", null); return; }
+      renderAfterReturns("apx-p-after", computeAfterReturns({ price, cog, referralFee, fbaFee, stats }));
+    });
+  }
 }
 async function loadReplenishForecast(asin) {
   const card = $("apx-p-replenish");
