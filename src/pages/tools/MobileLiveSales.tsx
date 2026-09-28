@@ -811,8 +811,31 @@ const MobileLiveSales = () => {
   // leaving revalidating stuck true forever (every completing call finding
   // itself "stale" relative to the next one that already started).
   const fetchInFlightRef = useRef(false);
+  /**
+   * When the in-flight fetch started (2026-09-28).
+   *
+   * fetchInFlightRef gates the poll: a tick is skipped while a read is
+   * running. It is cleared in a finally — but only when the promise SETTLES,
+   * and a Supabase query on a phone that loses signal mid-request can hang
+   * indefinitely. The flag then stays true for the life of the page and the
+   * poll never fires again, which looks exactly like "it only updates when I
+   * touch it": the manual actions call fetchToday directly and bypass the gate.
+   *
+   * So the gate now expires. A read still running after STALE_FETCH_MS is
+   * treated as lost and the next tick proceeds.
+   */
+  const fetchStartedAtRef = useRef(0);
   /** When the page last re-read on being shown again; throttles that re-read. */
   const lastShownReadRef = useRef(0);
+
+  /**
+   * A read older than this is assumed lost, not slow. The heaviest period
+   * (MTD on a cold cache) resolves well inside a minute; past that, waiting
+   * costs more than a duplicate read.
+   */
+  const STALE_FETCH_MS = 45_000;
+  const fetchIsBlocking = () =>
+    fetchInFlightRef.current && Date.now() - fetchStartedAtRef.current < STALE_FETCH_MS;
   const latestReconciledRequestIdRef = useRef("");
   const lastProfitRenderRef = useRef<any>(null);
   const lastSyncKickRef = useRef(0);
@@ -1180,6 +1203,7 @@ const MobileLiveSales = () => {
     const myFetchId = ++fetchIdRef.current;
     const isStale = () => fetchIdRef.current !== myFetchId;
     fetchInFlightRef.current = true;
+    fetchStartedAtRef.current = Date.now();
     // SWR: if we already have data on screen (cache hydrated or prior fetch),
     // revalidate silently instead of blanking the UI with a full-screen loader.
     // Fully silent (background poll) calls skip this entirely -- no skeleton,
@@ -2146,7 +2170,7 @@ const MobileLiveSales = () => {
     if (!user?.id) return;
     const intervalMs = FAST_POLL_PERIODS.includes(period) ? 5000 : 60000;
     const tick = () => {
-      if (document.visibilityState === "visible" && !fetchInFlightRef.current) void fetchToday({ silent: true });
+      if (document.visibilityState === "visible" && !fetchIsBlocking()) void fetchToday({ silent: true });
     };
     const id = setInterval(tick, intervalMs);
     return () => clearInterval(id);
@@ -2169,7 +2193,7 @@ const MobileLiveSales = () => {
   useEffect(() => {
     if (!user?.id) return;
     const onShow = () => {
-      if (document.visibilityState !== "visible" || fetchInFlightRef.current) return;
+      if (document.visibilityState !== "visible" || fetchIsBlocking()) return;
       if (Date.now() - lastShownReadRef.current < 10_000) return;
       lastShownReadRef.current = Date.now();
       void fetchToday({ silent: true });
