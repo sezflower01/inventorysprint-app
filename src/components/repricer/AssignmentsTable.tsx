@@ -6004,6 +6004,27 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
   // reloads AND syncs across browsers / devices.
   const [lockedIds, setLockedIds] = useState<Set<string>>(new Set());
 
+  /**
+   * Rows the seller has opened for manual pricing (2026-09-28).
+   *
+   * Set Price is read-only while the AI is actively deciding the price, and
+   * only unlocks by itself during a cooldown. That is the right DEFAULT -- it
+   * stops a typed price being overwritten minutes later without explanation --
+   * but it left no way to intervene on purpose. Pressing Set opens the field
+   * for that row.
+   *
+   * Deliberately NOT persisted. This is "let me type a price now", not a
+   * setting: it lasts for the visit, and the padlock (ui_edit_locked) is the
+   * durable control that already exists and still overrides it.
+   */
+  const [manualPriceOpen, setManualPriceOpen] = useState<Set<string>>(new Set());
+  const openManualPrice = (itemId: string) =>
+    setManualPriceOpen(prev => {
+      const next = new Set(prev);
+      if (next.has(itemId)) next.delete(itemId); else next.add(itemId);
+      return next;
+    });
+
   // Hydrate locked set from DB whenever items load for this marketplace.
   useEffect(() => {
     const assignmentIds = items.map(i => i.assignment_id).filter(Boolean) as string[];
@@ -8286,7 +8307,10 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                               const oscillationReasonFallback = reasonText.includes("guard:") && reasonText.includes("oscillation");
                               const routineCooldown = reasonText.includes("cooldown");
                               const cooldownBannerActive = oscillationTimestampActive || oscillationReasonFallback || routineCooldown;
-                              const setPriceDisabled = syncingMinMax.has(item.id) || isItemLocked(item) || !cooldownBannerActive;
+                              // Opened by hand with the Set button, or by a cooldown as before.
+                              // The padlock still wins over both.
+                              const manuallyOpen = manualPriceOpen.has(item.id);
+                              const setPriceDisabled = syncingMinMax.has(item.id) || isItemLocked(item) || (!cooldownBannerActive && !manuallyOpen);
                               return (
                             <div className="flex flex-col items-end gap-0.5">
                               <Input
@@ -8308,8 +8332,10 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                                 title={
                                   isItemLocked(item)
                                     ? "Locked — click the lock icon to unlock"
+                                    : manuallyOpen
+                                    ? "Opened for manual pricing. The repricer will keep evaluating this listing and may move the price again on its next pass."
                                     : !cooldownBannerActive
-                                    ? "AI-managed — unlocks for manual entry while a cooldown banner is showing"
+                                    ? "AI-managed — press Set to price it yourself, or wait for a cooldown"
                                     : "AI has paused (cooldown) — you may set a price manually"
                                 }
                                 value={editingNewPrice[item.id] ?? ""}
@@ -8357,6 +8383,23 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                                 }}
                                 placeholder={marketplaceConfig.currencySymbol}
                               />
+                              {/* Open / close manual pricing for this row. Hidden while the
+                                  padlock is on (that is the deliberate "hands off" state) and
+                                  while a cooldown already grants entry. */}
+                              {!isItemLocked(item) && !cooldownBannerActive && (
+                                <Button
+                                  type="button"
+                                  variant={manuallyOpen ? "secondary" : "ghost"}
+                                  size="sm"
+                                  className="h-5 px-1.5 text-[10px] font-semibold"
+                                  onClick={() => openManualPrice(item.id)}
+                                  title={manuallyOpen
+                                    ? "Hand this price back to the repricer"
+                                    : "Open this field so you can type a price yourself"}
+                                >
+                                  {manuallyOpen ? "Auto" : "Set"}
+                                </Button>
+                              )}
                               {/* Validation message for new price outside bounds */}
                               {(() => {
                                 const newP = pendingNewPrice[item.id];
