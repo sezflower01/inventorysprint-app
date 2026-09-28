@@ -3789,6 +3789,69 @@ export default function ShipmentBuilder() {
       const payload = buildShipmentPayload();
       const stepDiagnostics: AmazonStepDiagnostic[] = [];
 
+      /**
+       * APPROVAL PRE-FLIGHT (2026-09-28).
+       *
+       * Amazon rejects the WHOLE inbound plan when one item needs approval,
+       * and its error does not say which: "Approval is required before this
+       * item can be sent to Amazon" (plan wfdaaf7e62-…, HTTP 202, after
+       * setPrepDetails had already accepted 37 MSKUs). The seller is then left
+       * to find one gated SKU among forty by hand.
+       *
+       * We already hold Amazon's own answer per ASIN in user_approved_products,
+       * written by check-product-eligibility. Checking it first costs one
+       * database read and names the offender before anything is sent.
+       *
+       * Only KNOWN-bad statuses block. An ASIN we have never checked is not
+       * evidence of a problem, and blocking on absent data would stop
+       * legitimate shipments.
+       */
+      const shipAsins = Array.from(new Set(
+        draft.items
+          .filter((i) => i.qtyToShip > 0 && i.asin)
+          .map((i) => i.asin!.toUpperCase()),
+      ));
+      if (shipAsins.length > 0) {
+        const blocked: { asin: string; status: string; sku: string }[] = [];
+        // Chunked: supabase-js writes .in() straight into the query string, so
+        // a few hundred ASINs builds a URL the server rejects.
+        for (let i = 0; i < shipAsins.length; i += 100) {
+          const chunk = shipAsins.slice(i, i + 100);
+          const { data: approvals } = await supabase
+            .from("user_approved_products")
+            .select("asin, approval_status")
+            .eq("user_id", user.id)
+            .in("asin", chunk);
+          for (const row of (approvals ?? []) as { asin: string; approval_status: string | null }[]) {
+            const status = (row.approval_status || "").toLowerCase();
+            if (status && status !== "approved") {
+              const item = draft.items.find((it) => it.asin?.toUpperCase() === row.asin && it.qtyToShip > 0);
+              blocked.push({ asin: row.asin, status, sku: item?.sku || "" });
+            }
+          }
+        }
+        if (blocked.length > 0) {
+          const named = blocked
+            .slice(0, 3)
+            .map((b) => `${b.sku || b.asin} (${b.status === "restricted" ? "restricted" : "needs approval"})`)
+            .join(", ");
+          const more = blocked.length > 3 ? ` and ${blocked.length - 3} more` : "";
+          toast.error(
+            `Amazon will reject this shipment: ${named}${more}. Remove ${blocked.length === 1 ? "it" : "them"} or get approval first.`,
+            { duration: 12000 },
+          );
+          setDraft((current) => ({
+            ...current,
+            amazonWorkflowMessage:
+              `Not sent. ${blocked.length} item${blocked.length === 1 ? "" : "s"} in this shipment ${blocked.length === 1 ? "is" : "are"} not approved for your account: ` +
+              blocked.map((b) => `${b.sku || b.asin} — ${b.status === "restricted" ? "restricted" : "needs approval"}`).join("; ") +
+              ". Amazon rejects the entire plan when one item is gated, so the shipment was not submitted.",
+          }));
+          setShipmentSubmitting(false);
+          return;
+        }
+      }
+
       const { data: inboundData, error: inboundError } = await supabase.functions.invoke("create-inbound-plan", {
         body: payload,
       });
