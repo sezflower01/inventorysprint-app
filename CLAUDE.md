@@ -109,38 +109,45 @@ Wrap long fan-out jobs in `withCronLock(...)` from `_shared/cron-lock.ts` — it
 ## Deployment
 
 - **Frontend** — Vercel auto-deploys from GitHub `main`.
-- **Edge functions** — ⚠️ **committing an edge function does NOT ship it. Deploy by hand:**
+- **Edge functions** — `.github/workflows/deploy-edge-functions.yml` **does now really deploy** on
+  push to `main`, for the functions the push changed.
+
+  ⚠️ This section previously read "committing an edge function does NOT ship it — deploy by hand"
+  and "the repo secret `SUPABASE_ACCESS_TOKEN` has never been set". Both were true when written and
+  are **false as of 2026-09-29**. The token was added, and the guard was changed from
+  `::warning::` + `exit 0` to `::error::` + `exit 1` in `3c8743c`, so a missing token can no longer
+  hide behind a green tick. Evidence, not inference: **260 of the 262 live functions** report an
+  `entrypoint_path` under `/home/runner/work/inventorysprint-app/`, i.e. their last deploy came from
+  a GitHub runner, and runs 270–288 all concluded `success` with real work in the deploy step.
+
+  Deploying by hand is still correct when you want a function live *now*, before or without a push:
 
   ```
   npx supabase functions deploy <name> --project-ref mstibdszibcheodvnprm
   ```
 
-  `.github/workflows/deploy-edge-functions.yml` is meant to auto-deploy on push to `main`, but the
-  repo secret `SUPABASE_ACCESS_TOKEN` has never been set, so the workflow hits this guard:
+  **The failure mode is no longer silence, it is Docker.** Run 289 (2026-09-29) failed in 30s:
 
   ```
-  if [ -z "$SUPABASE_ACCESS_TOKEN" ]; then
-    echo "::warning::SUPABASE_ACCESS_TOKEN not set — skipping deploy."
-    exit 0    # <-- green tick, nothing deployed
-  fi
+  Unable to find image 'public.ecr.aws/supabase/edge-runtime:v1.74.2' locally
+  docker: Error response from daemon: toomanyrequests: Rate exceeded
+  failed to bundle function: exit 125
   ```
 
-  It is a `::warning::` and an `exit 0`, so **every run reports success while deploying nothing**.
-  Measured 2026-08-19 across all 205 runs in the API window (2026-08-03 onward): the "Determine
-  changed functions and deploy" step took **0 seconds** on every run sampled, and the token-missing
-  annotation is present on the earliest, middle and latest. Run duration varies 14–108s, but that is
-  runner and CLI-install overhead — the deploy step itself never did anything. The long runs are the
-  trap: they look like real deploys.
+  ECR Public throttles anonymous pulls per source IP and hosted runners share egress IPs, so this is
+  a shared-quota lottery — a re-run is a coin flip. Fixed by passing `--use-api`, which bundles
+  server-side with no image to pull. Keep that flag if the CLI pin moves.
 
-  Consequence: the fleet is stale by an unknown amount, and only what someone deployed by hand is
-  live. `npx supabase functions list --project-ref mstibdszibcheodvnprm` gives each function's
-  `version` and `updated_at` — that, not the commit log, is the truth about what is running.
+  The CLI version is **pinned to 2.109.1 and the pin is load-bearing**: 2.115 validates the whole
+  `config.toml` on every command, including `[auth.hook.send_email]`, whose secret does not exist on
+  the runner — so every command aborts before uploading anything. The durable fix is to give the
+  runner the real `SEND_EMAIL_HOOK_SECRET`, not a placeholder in a field that signs auth email.
 
-  To actually fix it: add `SUPABASE_ACCESS_TOKEN` under repo Settings → Secrets and variables →
-  Actions. Worth making that guard `exit 1` at the same time, so a missing token fails loudly rather
-  than reporting a green tick for a no-op.
+  `npx supabase functions list --project-ref mstibdszibcheodvnprm` gives each function's `version`,
+  `updated_at` and `entrypoint_path` — still the truth about what is running, and the
+  `entrypoint_path` now also tells you *who* deployed it (a runner path vs a local one).
 
-  Note `_shared/**` changes redeploy **every** function (~255) by design, since import graphs are not
+  Note `_shared/**` changes redeploy **every** function (~262) by design, since import graphs are not
   parsed — so a shared-module edit is an expensive deploy, not a cheap one.
 - **Migrations** — not auto-applied; run `npm run db:push` deliberately.
 - Other workflows: `build-print-client.yml`, `repricer-preset-tests.yml`, `supabase-db-lint.yml`.

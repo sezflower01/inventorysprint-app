@@ -88,6 +88,21 @@ jobs:
           # exactly the situation on 2026-08-19, when all 254 deploys failed and
           # the reason was unobtainable. The message is truncated because
           # annotations are capped, and capped at 10 per run.
+          # --use-api: bundle SERVER-SIDE, no Docker. Load-bearing on a runner.
+          #
+          # Without it the CLI bundles locally by pulling
+          # public.ecr.aws/supabase/edge-runtime:<ver>, and ECR Public throttles
+          # anonymous pulls per source IP. GitHub's hosted runners share NAT'd
+          # egress IPs with everyone else on the same range, so the pull fails
+          # with "toomanyrequests: Rate exceeded" -> "failed to bundle function:
+          # exit 125" before a single byte is uploaded. Run 289 (2026-09-29)
+          # died that way in 30s on a one-function deploy; nothing about the
+          # function was wrong. It is a shared-quota lottery, so a plain re-run
+          # is a coin flip, not a fix.
+          #
+          # Server-side bundling has no image to pull and no daemon to talk to.
+          # Keep it even if the pin below moves: a Docker-free deploy path is
+          # the point, not a workaround for one CLI version.
           deploy_all() {
             local list="$1" failed="" out=""
             while IFS= read -r fn; do
@@ -97,7 +112,7 @@ jobs:
                 continue
               fi
               echo "::group::Deploying $fn"
-              if out=$(supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_ID" 2>&1); then
+              if out=$(supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_ID" --use-api 2>&1); then
                 echo "$out"
               else
                 echo "$out"
