@@ -976,13 +976,77 @@
     if (s.startsWith("ounce")) return "oz";
     return s;
   }
+  /**
+   * SHOW THE UNITS THE SELLER WORKS IN (2026-09-29).
+   *
+   * Keepa answers in centimetres and grams, and the panel printed that
+   * verbatim: "44.9 × 30.4 × 5.3 cm / 835.00 g" on a US listing. Amazon's US
+   * size tiers, its fee tables and every FBA calculation the seller does are
+   * in inches and pounds, so those numbers were unusable without arithmetic --
+   * on the one screen meant to make a buy/skip call quickly.
+   *
+   * classifySizeTier() below already converts to inches and pounds internally
+   * for exactly this reason; the display simply never did.
+   *
+   * Converted for marketplaces that sell in imperial (US only today) and left
+   * metric elsewhere, since a UK or DE seller wants centimetres. The source
+   * value stays in the tooltip -- converting is a convenience, not a reason to
+   * hide what Keepa actually said.
+   */
+  const IMPERIAL_MARKETPLACES = new Set(["US"]);
+  const usesImperial = () => IMPERIAL_MARKETPLACES.has(String(state.marketplace || "US").toUpperCase());
+
+  /** → inches. null when the unit is not one we recognise: better a blank than a wrong number. */
+  function toInches(n, unit) {
+    if (!Number.isFinite(n) || n <= 0) return null;
+    const u = fmtDimUnit(unit);
+    if (u === "in") return n;
+    if (u === "cm") return n / 2.54;
+    if (u === "mm") return n / 25.4;
+    if (u === "m") return n * 39.3701;
+    return null;
+  }
+  /** → pounds, same rule. */
+  function toPounds(n, unit) {
+    if (!Number.isFinite(n) || n <= 0) return null;
+    const u = fmtWtUnit(unit);
+    if (u === "lb") return n;
+    if (u === "oz") return n / 16;
+    if (u === "g") return n / 453.592;
+    if (u === "kg") return n * 2.20462;
+    return null;
+  }
+
   function fmtDims(l, w, h, unit) {
+    const parts = [l, w, h].filter((n) => Number.isFinite(n) && n > 0);
+    if (parts.length === 0) return "—";
+    if (usesImperial()) {
+      const inches = parts.map((n) => toInches(n, unit));
+      if (inches.every((v) => v != null)) {
+        return inches.map((n) => +n.toFixed(2)).join(" × ") + " in";
+      }
+    }
+    const u = fmtDimUnit(unit);
+    return parts.map((n) => +(+n).toFixed(2)).join(" × ") + (u ? " " + u : "");
+  }
+  function fmtWt(n, unit) {
+    if (!Number.isFinite(n) || n <= 0) return "—";
+    if (usesImperial()) {
+      const lb = toPounds(n, unit);
+      // Under a pound, ounces read better than "0.06 lb" — that is the range
+      // where Amazon's small-standard tier is decided.
+      if (lb != null) return lb < 1 ? `${(lb * 16).toFixed(1)} oz` : `${lb.toFixed(2)} lb`;
+    }
+    return (+n).toFixed(2) + " " + (fmtWtUnit(unit) || "");
+  }
+  /** The untouched source figure, for the tooltip. */
+  function fmtDimsRaw(l, w, h, unit) {
     const parts = [l, w, h].filter((n) => Number.isFinite(n) && n > 0);
     if (parts.length === 0) return "—";
     const u = fmtDimUnit(unit);
     return parts.map((n) => +(+n).toFixed(2)).join(" × ") + (u ? " " + u : "");
   }
-  function fmtWt(n, unit) {
+  function fmtWtRaw(n, unit) {
     if (!Number.isFinite(n) || n <= 0) return "—";
     return (+n).toFixed(2) + " " + (fmtWtUnit(unit) || "");
   }
@@ -1007,9 +1071,13 @@
       return;
     }
     pkgEl.textContent = fmtDims(d.package_length, d.package_width, d.package_height, d.package_dim_unit);
+    pkgEl.title = `As supplied: ${fmtDimsRaw(d.package_length, d.package_width, d.package_height, d.package_dim_unit)}`;
     pkgWtEl.textContent = fmtWt(d.package_weight, d.package_weight_unit);
+    pkgWtEl.title = `As supplied: ${fmtWtRaw(d.package_weight, d.package_weight_unit)}`;
     itemEl.textContent = fmtDims(d.item_length, d.item_width, d.item_height, d.item_dim_unit);
+    itemEl.title = `As supplied: ${fmtDimsRaw(d.item_length, d.item_width, d.item_height, d.item_dim_unit)}`;
     itemWtEl.textContent = fmtWt(d.item_weight, d.item_weight_unit);
+    itemWtEl.title = `As supplied: ${fmtWtRaw(d.item_weight, d.item_weight_unit)}`;
     const srcLabel = d.cached ? "Cache" : (d.source === "spapi" ? "Amazon Catalog" : d.source === "keepa" ? "Keepa" : "—");
     const when = d.fetched_at ? new Date(d.fetched_at).toLocaleString() : "";
     srcEl.textContent = when ? `Source: ${srcLabel} · ${when}` : `Source: ${srcLabel}`;
