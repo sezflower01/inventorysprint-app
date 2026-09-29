@@ -3257,13 +3257,31 @@ Deno.serve(async (req) => {
 
         const apiFees = await getProductFees(supabase, asin, referencePrice, accessToken, primaryMarketplaceId, soldPrice, fxRates, !isEnrichFbm);
         if (apiFees) {
+          // QUANTITY, SAME AS THE NEW-ORDER PATH ABOVE (2026-09-29).
+          //
+          // getProductFees prices ONE unit. The new-order path multiplies by
+          // quantity; this enrichment path did not, so any order re-enriched
+          // here was billed as if it were a single unit. Order
+          // 114-0628939-5256223: 6 units of B0CKJNCZLY at $16.20 stored $7.95
+          // of fees instead of $47.70, and ROI 48% instead of a real number.
+          // One fix landed, its twin was missed.
+          const qtyMul = Math.max(1, Number(quantity || 1));
           if (isEnrichFbm) {
             // FBM: Bundle ALL fees into fba_fee column (FBA/FBM), zero out referral/closing
-            const totalFbmFees = apiFees.referralFee + apiFees.fbaFee + apiFees.closingFee;
+            const totalFbmFeesPerUnit = apiFees.referralFee + apiFees.fbaFee + apiFees.closingFee;
+            const totalFbmFees = totalFbmFeesPerUnit * qtyMul;
             fees = { referralFee: 0, fbaFee: totalFbmFees, closingFee: 0, totalFees: totalFbmFees };
-            console.log(`[LIVE_ORDERS] 💰 FBM enrichment fees for ${asin}: bundled $${totalFbmFees.toFixed(2)} into FBA/FBM column`);
+            console.log(`[LIVE_ORDERS] 💰 FBM enrichment fees for ${asin}: bundled $${totalFbmFees.toFixed(2)} (per-unit $${totalFbmFeesPerUnit.toFixed(2)} × qty ${qtyMul}) into FBA/FBM column`);
           } else {
-            fees = { referralFee: apiFees.referralFee, fbaFee: apiFees.fbaFee, closingFee: apiFees.closingFee, totalFees: apiFees.totalFees };
+            fees = {
+              referralFee: apiFees.referralFee * qtyMul,
+              fbaFee: apiFees.fbaFee * qtyMul,
+              closingFee: apiFees.closingFee * qtyMul,
+              totalFees: apiFees.totalFees * qtyMul,
+            };
+            if (qtyMul > 1) {
+              console.log(`[LIVE_ORDERS] 💰 Enrichment fees for ${asin} multiplied by qty ${qtyMul}: total=$${fees.totalFees!.toFixed(2)}`);
+            }
           }
           feesUnavailable = false;
           console.log(`[LIVE_ORDERS] 💰 Using ${isEnrichFbm ? 'FBM' : 'proportional'} API fees for ${asin} (enrichment, ref=$${referencePrice.toFixed(2)}, sale=$${soldPrice.toFixed(2)})`);
