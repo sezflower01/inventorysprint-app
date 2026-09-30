@@ -51,8 +51,21 @@ const CATEGORY_LABELS: Record<string, string> = {
   QUALIFICATION_REQUIRED: "Requires seller qualification",
 };
 
+// Amazon issue codes we have diagnosed but deliberately keep surfacing, so the
+// review row reads as the real problem rather than a bare number.
+const ISSUE_CODE_LABELS: Record<string, string> = {
+  "18977": "Counterfeit claim — no test buy",
+};
+
 function humanizeCategory(code: string): string {
   if (CATEGORY_LABELS[code]) return CATEGORY_LABELS[code];
+  // "code:NNNNN" is written by classifyIssues when Amazon suppressed a listing
+  // without naming a reason category, leaving the numeric code as the only
+  // handle. Show it as a code, not as a fake category name.
+  if (code.startsWith("code:")) {
+    const num = code.slice(5);
+    return ISSUE_CODE_LABELS[num] || `Amazon issue code ${num}`;
+  }
   return code
     .toLowerCase()
     .split("_")
@@ -674,7 +687,9 @@ export default function PricingSuppressionsSection({ marketplace, isAdmin }: Pro
                         <td className="px-2 py-1.5">
                           <div className="flex flex-wrap gap-1">
                             {(u.listing_issue_unknown_categories || []).map((c) => (
-                              <Badge key={c} variant="outline" className="text-[10px]">{c}</Badge>
+                              <Badge key={c} variant="outline" className="text-[10px]" title={c}>
+                                {humanizeCategory(c)}
+                              </Badge>
                             ))}
                           </div>
                         </td>

@@ -15,8 +15,8 @@ export const MARKETPLACES: Array<{ code: string; id: string }> = [
   { code: 'BR', id: 'A2Q3Y263D00KWC' },
 ];
 
-// Non-pricing buckets observed from the live probe. If every category on an
-// ERROR+LISTING_SUPPRESSED issue is in this set, it's a known non-pricing
+// Non-pricing buckets observed from the live probe. If every REASON category on
+// an ERROR+LISTING_SUPPRESSED issue is in this set, it's a known non-pricing
 // suppression (brand gate, missing attribute) and we do NOT flag it for
 // admin review.
 const KNOWN_NON_PRICING_CATEGORIES = new Set([
@@ -25,6 +25,45 @@ const KNOWN_NON_PRICING_CATEGORIES = new Set([
   'INVALID_ATTRIBUTE', // co-occurs with INVALID_PRICE on real pricing issues; safe here because
                        // pricing is detected BEFORE the unknown check (see classifyIssues).
 ]);
+
+/**
+ * WHERE the issue sits, not WHY it exists — so never a reason on its own.
+ *
+ * Amazon mixes locators into the same `categories` array as reasons. B0F6KKKNJ6
+ * (US, SKU V05-MQB-7OWI) arrived as ["QUALIFICATION_REQUIRED", "LISTING"] and
+ * the admin panel flagged it as an unknown bucket for review — but the reason
+ * was QUALIFICATION_REQUIRED, which we have understood since the first probe.
+ * Only the locator was new, and a locator carries no diagnostic information:
+ * the sibling WARNING on that same listing (code 18616, "requires a Safety
+ * Data Sheet") is tagged PRODUCT the same way.
+ *
+ * Measured over 60 days of `repricer_pricing_suppression_checks` (2026-09-30):
+ * every hard suppression in the account reduces, after stripping these, to
+ * {QUALIFICATION_REQUIRED}, {INVALID_ATTRIBUTE, INVALID_PRICE} (the pricing
+ * path, matched earlier) or nothing at all. So stripping them costs no signal
+ * and stops a class of false review items.
+ */
+const LOCATOR_CATEGORIES = new Set(['LISTING', 'PRODUCT', 'OFFER']);
+
+/**
+ * Hard suppressions Amazon sends with NO reason category — recognised by code.
+ *
+ * The previous rule required `categories.length > 0` before it would consider
+ * an issue unknown, so an ERROR + LISTING_SUPPRESSED with an empty categories
+ * array was dropped without a trace. That is not a rare shape: **9,637**
+ * observations of code 13013 in 60 days.
+ *
+ * 13013 — "cannot add your offer to the SKU, the product is not in the
+ * catalog". Routine for a dead or merged ASIN, and already visible as a
+ * not-buyable listing, so it is not worth a review item.
+ *
+ * DELIBERATELY ABSENT: code 18977, "Counterfeit without a Test Buy" (16
+ * observations). Its meaning is understood, but it is an IP/authenticity block
+ * rather than routine catalog noise, so it should reach a human every single
+ * time it appears — being listed here would silence exactly the issue most
+ * worth reading.
+ */
+const KNOWN_REASONLESS_SUPPRESSION_CODES = new Set(['13013']);
 
 function hmacSha256(key: string | Uint8Array, data: string): Uint8Array {
   const hmac = createHmac('sha256', key as any);
@@ -146,11 +185,20 @@ export function classifyIssues(issues: any[]): Classified {
     if (isPricing) continue;
 
     // Unknown-bucket detection: hard suppression + ERROR that we don't recognize.
+    // Decided on the REASON categories only; a locator never makes an issue new.
     const isSuppressed = actions.includes('LISTING_SUPPRESSED');
-    if (isSuppressed && severity === 'ERROR' && cats.length > 0) {
-      const allKnown = cats.every((c) => KNOWN_NON_PRICING_CATEGORIES.has(c));
-      if (!allKnown) {
-        for (const c of cats) if (!KNOWN_NON_PRICING_CATEGORIES.has(c)) unknownCatsSet.add(c);
+    if (isSuppressed && severity === 'ERROR') {
+      const reasons = cats.filter((c) => !LOCATOR_CATEGORIES.has(c));
+      if (reasons.length === 0) {
+        // Amazon named no reason, so the code is the only handle there is.
+        // Recorded as "code:NNNNN" so the admin panel shows something a person
+        // can actually look up, instead of an empty badge row.
+        const code = String(iss?.code || '').trim();
+        if (!KNOWN_REASONLESS_SUPPRESSION_CODES.has(code)) {
+          unknownCatsSet.add(code ? `code:${code}` : 'code:unspecified');
+        }
+      } else {
+        for (const c of reasons) if (!KNOWN_NON_PRICING_CATEGORIES.has(c)) unknownCatsSet.add(c);
       }
     }
   }
