@@ -104,19 +104,38 @@ jobs:
           # Keep it even if the pin below moves: a Docker-free deploy path is
           # the point, not a workaround for one CLI version.
           deploy_all() {
-            local list="$1" failed="" out=""
+            local list="$1" failed="" out="" deployed=0 attempt=0
             while IFS= read -r fn; do
               [ -z "$fn" ] && continue
               if [ ! -f "supabase/functions/$fn/index.ts" ]; then
                 echo "Skipping '$fn' — no index.ts (not a deployable function, or was deleted)."
                 continue
               fi
+              # Retried, because one flake must not fail a fleet redeploy.
+              #
+              # Run 290 (2026-09-29) deployed all ~262 functions after a
+              # _shared/** change and lost exactly one, check-seller-watchlist,
+              # to a server-side "unexpected deploy status 500: Function deploy
+              # failed due to an internal error". Deploying it again by hand
+              # immediately afterwards worked, unchanged -- so it was Supabase's
+              # flake, not the function. Three attempts with a widening pause;
+              # the annotation is written only once every attempt has failed.
               echo "::group::Deploying $fn"
-              if out=$(supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_ID" --use-api 2>&1); then
+              deployed=0
+              for attempt in 1 2 3; do
+                if out=$(supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_ID" --use-api 2>&1); then
+                  echo "$out"
+                  deployed=1
+                  break
+                fi
                 echo "$out"
-              else
-                echo "$out"
-                echo "::error::Failed to deploy $fn :: $(echo "$out" | tr '\n' ' ' | tail -c 600)"
+                if [ "$attempt" -lt 3 ]; then
+                  echo "Attempt $attempt for $fn failed; retrying in $((attempt * 10))s."
+                  sleep $((attempt * 10))
+                fi
+              done
+              if [ "$deployed" -ne 1 ]; then
+                echo "::error::Failed to deploy $fn after 3 attempts :: $(echo "$out" | tr '\n' ' ' | tail -c 600)"
                 failed="$failed $fn"
               fi
               echo "::endgroup::"
