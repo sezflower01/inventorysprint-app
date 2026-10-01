@@ -1532,6 +1532,35 @@ async function fetchSalesEnrichment(userId: string, targetMarketplace: string): 
 
   return { salesTodayMap, sales7Map, salesMap, historicalSalesMap, titleImageMap };
 }
+/**
+ * Is the repricer holding this listing in a cooldown right now?
+ *
+ * Extracted so the "Cooling Down" filter chip and the Set Price cell cannot
+ * disagree. They MUST answer identically: the chip promises a list of rows the
+ * seller is allowed to price by hand, and the Set field is what grants that --
+ * a row in the filter with a locked field, or an unlocked field on a row the
+ * filter hides, is worse than having no filter at all.
+ *
+ * Three signals, because the repricer expresses a cooldown three ways and
+ * SmartSuggestionBanner already treats all three as the same state:
+ *   - oscillation cooldown with a live future timestamp;
+ *   - the oscillation guard named in the reason text, for older rows where the
+ *     timestamp was never populated;
+ *   - the routine between-moves cooldown, which only ever appears as reason text.
+ */
+export function isCoolingDown(item: {
+  last_recommendation_reason?: string | null;
+  oscillation_cooldown_until?: string | null;
+}): boolean {
+  const reasonText = String(item.last_recommendation_reason || "").toLowerCase();
+  const oscillationTimestampActive = !!(
+    item.oscillation_cooldown_until && new Date(item.oscillation_cooldown_until) > new Date()
+  );
+  const oscillationReasonFallback = reasonText.includes("guard:") && reasonText.includes("oscillation");
+  const routineCooldown = reasonText.includes("cooldown");
+  return oscillationTimestampActive || oscillationReasonFallback || routineCooldown;
+}
+
 // Module-level cache for filter/sort state so it survives tab switches
 const _assignmentsFilterCache = {
   searchTerm: "",
@@ -1541,7 +1570,7 @@ const _assignmentsFilterCache = {
   stockFilter: "ALL" as "ALL" | "AVAILABLE" | "RESERVED_INBOUND" | "IN_STOCK" | "OUT_OF_STOCK" | "MANUAL_STAR",
   priceFilter: "HAS_PRICE" as "ALL" | "HAS_PRICE" | "NO_PRICE",
   ruleFilter: "ALL",
-   suggestionFilter: "ALL" as "ALL" | "blocked_by_min" | "blocked_needs_you" | "no_sales_30d" | "blocked_review_soon" | "blocked_auto" | "bb_suppressed" | "profit_guard_block" | "HAS_ANY" | "NONE",
+   suggestionFilter: "ALL" as "ALL" | "blocked_by_min" | "blocked_needs_you" | "no_sales_30d" | "blocked_review_soon" | "blocked_auto" | "bb_suppressed" | "profit_guard_block" | "COOLING_DOWN" | "NONE",
    restrictedFilter: "HIDE" as "HIDE" | "SHOW" | "ONLY",
   offerFilter: "HAS_OFFERS" as "ALL" | "HAS_OFFERS" | "NO_OFFERS",
   roiMin: "" as string,
@@ -2711,7 +2740,7 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
   const [restrictedFilter, setRestrictedFilter] = useState<"HIDE" | "SHOW" | "ONLY">(_assignmentsFilterCache.restrictedFilter);
   
   // Suggestion type filter
-  const [suggestionFilter, setSuggestionFilter] = useState<"ALL" | "blocked_by_min" | "blocked_needs_you" | "no_sales_30d" | "blocked_review_soon" | "blocked_auto" | "bb_suppressed" | "profit_guard_block" | "HAS_ANY" | "NONE">(_assignmentsFilterCache.suggestionFilter);
+  const [suggestionFilter, setSuggestionFilter] = useState<"ALL" | "blocked_by_min" | "blocked_needs_you" | "no_sales_30d" | "blocked_review_soon" | "blocked_auto" | "bb_suppressed" | "profit_guard_block" | "COOLING_DOWN" | "NONE">(_assignmentsFilterCache.suggestionFilter);
 
   // Stickiness: when filtering by a "blocked/review" chip, keep rows that just
   // transitioned out of the chip visible for 60s so users don't think the UI
@@ -3133,7 +3162,10 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
         if (suggestionFilter !== "ALL") {
           const matches = (() => {
             const sug = detectSuggestion(i as any, rules);
-            if (suggestionFilter === "HAS_ANY") return !!sug;
+            // Independent of detectSuggestion: a cooldown is a state of the
+            // repricer, not an alert about the listing, so a cooling-down row
+            // need not have a suggestion attached at all.
+            if (suggestionFilter === "COOLING_DOWN") return isCoolingDown(i as any);
             if (suggestionFilter === "NONE") return !sug;
             if (suggestionFilter === "blocked_needs_you") {
               const sales7d = i.units_sold_7d;
@@ -3323,7 +3355,7 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
       blocked_auto: 0,
       NONE: 0,
       no_sales_30d: 0,
-      HAS_ANY: 0,
+      COOLING_DOWN: 0,
       blocked_needs_you: 0,
     };
     for (const i of items) {
@@ -3336,9 +3368,12 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
       const sales30d = i.units_sold_30d;
       if (sales30d === 0) counts.no_sales_30d += 1;
 
+      // Counted outside the suggestion branch below, deliberately: a row can
+      // be cooling down with no suggestion at all.
+      if (isCoolingDown(i as any)) counts.COOLING_DOWN += 1;
+
       const sug = detectSuggestion(i as any, rules) as { type: string } | null;
       if (sug) {
-        counts.HAS_ANY += 1;
         const t = sug.type;
         if (t === "blocked_by_min") counts.blocked_by_min += 1;
         else if (t === "profit_guard_block") counts.profit_guard_block += 1;
@@ -6804,7 +6839,13 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                 { value: "no_sales_30d", label: "🟠 No Sales 30d", color: "bg-orange-950/60 text-orange-300 border-orange-500/30", activeColor: "bg-orange-500 text-white shadow-md shadow-orange-500/25", icon: <span className="h-2 w-2 rounded-full bg-current" /> },
               ] as const;
               const advanced = [
-                { value: "HAS_ANY", label: "Has Alert", color: "bg-amber-950/60 text-amber-300 border-amber-500/30", activeColor: "bg-amber-500 text-white shadow-md shadow-amber-500/25", icon: <AlertTriangle className="h-3 w-3" /> },
+                /* "Cooling Down", not "Has Alert". Has Alert matched ANY suggestion,
+                   which made it a superset of the blocked chips sitting right
+                   beside it -- the same rows counted twice, and no way to filter
+                   the one state where the seller can actually act: a cooldown,
+                   which is when the Set Price field unlocks. The blocked chips
+                   keep their own filters. */
+                { value: "COOLING_DOWN", label: "Cooling Down", color: "bg-amber-950/60 text-amber-300 border-amber-500/30", activeColor: "bg-amber-500 text-white shadow-md shadow-amber-500/25", icon: <span className="text-[10px] leading-none">⌛</span> },
                 { value: "blocked_needs_you", label: "0 Sales (7d)", color: "bg-slate-900/70 text-slate-300 border-slate-600/40", activeColor: "bg-foreground text-background shadow-md", icon: <span className="h-2 w-2 rounded-full bg-current" /> },
               ] as const;
 
@@ -7338,7 +7379,7 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
             suggestionFilter === "blocked_auto" ? "bg-muted/30 border-border" :
             suggestionFilter === "bb_suppressed" ? "bg-blue-500/5 border-blue-500/30" :
             suggestionFilter === "profit_guard_block" ? "bg-amber-500/5 border-amber-500/30" :
-            suggestionFilter === "HAS_ANY" ? "bg-amber-500/5 border-amber-500/30" :
+            suggestionFilter === "COOLING_DOWN" ? "bg-amber-500/5 border-amber-500/30" :
             "bg-emerald-500/5 border-emerald-500/30"
           }`}>
             <div className="flex items-start gap-3">
@@ -7349,7 +7390,7 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                 suggestionFilter === "blocked_auto" ? "text-muted-foreground" :
                 suggestionFilter === "bb_suppressed" ? "text-blue-500" :
                 suggestionFilter === "profit_guard_block" ? "text-amber-500" :
-                suggestionFilter === "HAS_ANY" ? "text-amber-500" :
+                suggestionFilter === "COOLING_DOWN" ? "text-amber-500" :
                 "text-emerald-500"
               }`} />
               <div className="flex-1 space-y-1">
@@ -7361,7 +7402,7 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                   {suggestionFilter === "blocked_by_min" && `${sortedItems.length} items blocked by min price`}
                   {suggestionFilter === "bb_suppressed" && `${sortedItems.length} items with Buy Box suppressed`}
                   {suggestionFilter === "profit_guard_block" && `${sortedItems.length} items blocked by profit protection`}
-                  {suggestionFilter === "HAS_ANY" && `${sortedItems.length} items need attention`}
+                  {suggestionFilter === "COOLING_DOWN" && `${sortedItems.length} items cooling down — you can set these prices by hand`}
                   {suggestionFilter === "NONE" && `${sortedItems.length} items running smoothly — no alerts`}
                 </p>
                 <p className="text-xs text-muted-foreground">
@@ -7372,7 +7413,7 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                   {suggestionFilter === "blocked_by_min" && "Auto-lowering stops after 5 drops, 30% total drop, or when no competitor data is available. Select items below to manually intervene."}
                   {suggestionFilter === "bb_suppressed" && "No active Buy Box on these listings. The system competes on lowest price. Consider lowering your min or adjusting your rule."}
                   {suggestionFilter === "profit_guard_block" && "Your profit rules are preventing price drops. The system is protecting your margins."}
-                  {suggestionFilter === "HAS_ANY" && "These items have alerts that may need your review. Select items and use bulk actions to resolve."}
+                  {suggestionFilter === "COOLING_DOWN" && "The repricer has paused on these listings, so the Set Price field is unlocked and a price you type is applied as-is. Blocked listings have their own filters."}
                   {suggestionFilter === "NONE" && "These items are repricing normally with no issues detected."}
                 </p>
               </div>
@@ -8302,11 +8343,9 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                               between-moves cooldown. A manual Lock always takes precedence. */}
                           <TableCell className="text-right pr-4">
                             {(() => {
-                              const reasonText = String(item.last_recommendation_reason || "").toLowerCase();
-                              const oscillationTimestampActive = !!(item.oscillation_cooldown_until && new Date(item.oscillation_cooldown_until) > new Date());
-                              const oscillationReasonFallback = reasonText.includes("guard:") && reasonText.includes("oscillation");
-                              const routineCooldown = reasonText.includes("cooldown");
-                              const cooldownBannerActive = oscillationTimestampActive || oscillationReasonFallback || routineCooldown;
+                              // Same predicate as the "Cooling Down" filter chip —
+                              // see isCoolingDown() for why all three signals count.
+                              const cooldownBannerActive = isCoolingDown(item as any);
                               // Opened by hand with the Set button, or by a cooldown as before.
                               // The padlock still wins over both.
                               const manuallyOpen = manualPriceOpen.has(item.id);
