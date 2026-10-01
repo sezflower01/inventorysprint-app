@@ -1,6 +1,9 @@
 import { getListingUnitCost } from "../_shared/cost-contract.ts";
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
+// Stage 2 of revive_ghosts calls the Listings Items API, which shares the
+// listings_api quota with every other caller -- never call it ungated.
+import { waitForApiToken } from "../_shared/rate-limiter.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -226,6 +229,13 @@ async function fetchInventoryBatch(
           available: d?.fulfillableQuantity ?? s?.totalFulfillableQuantity ?? 0,
           reserved: d?.reservedQuantity?.totalReservedQuantity ?? s?.reservedQuantity?.totalReservedQuantity ?? 0,
           inbound: inboundReceiving + inboundShipped,
+          // Kept so a SKU can be traced back to its ASIN. The snapshot carries
+          // both and this map used to drop everything but the quantities, which
+          // made it impossible to answer "is this ASIN live under a DIFFERENT
+          // SKU" -- the exact question a recreated listing poses.
+          asin: s?.asin ?? null,
+          fnsku: s?.fnsku ?? null,
+          condition: s?.condition ?? null,
         };
       }
     }
@@ -242,6 +252,439 @@ async function fetchInventoryBatch(
   } while (nextToken && pageCount < maxPages);
   
   return result;
+}
+
+/**
+ * Ask Amazon, BY ASIN, which SKUs this seller actually has live.
+ *
+ * The FBA inventory snapshot cannot answer this. It is keyed by seller SKU and
+ * only contains FBA records, so a listing recreated as FBM, or recreated under
+ * a new SKU before any FBA record exists, is simply absent from it -- which is
+ * indistinguishable from a listing that is really gone. B09PJPB34P proved the
+ * point: active in Seller Central, nowhere in a snapshot of 2,500 live SKUs.
+ *
+ * identifiersType=ASIN is the only call that answers "what do I have on this
+ * ASIN, whatever it is called now", so it is the one that can find a renamed
+ * listing. It costs a request per ASIN, hence the hard cap in the caller.
+ */
+async function discoverLiveSkusForAsin(
+  supabase: any,
+  accessToken: string,
+  sellerId: string,
+  marketplaceId: string,
+  asin: string,
+): Promise<Array<{ sku: string; quantity: number; channel: string | null; statuses: string[] }>> {
+  // Sorted by key: AWS SigV4 signs the canonical query string, and an unsorted
+  // one fails the signature rather than the request.
+  const qs = [
+    `identifiers=${encodeURIComponent(asin)}`,
+    `identifiersType=ASIN`,
+    `includedData=${encodeURIComponent('summaries,fulfillmentAvailability')}`,
+    `marketplaceIds=${encodeURIComponent(marketplaceId)}`,
+    `pageSize=20`,
+  ].join('&');
+
+  await waitForApiToken(supabase, 'listings_api');
+  const res = await callSpApiRaw(
+    'GET',
+    `/listings/2021-08-01/items/${encodeURIComponent(sellerId)}`,
+    accessToken,
+    qs,
+  );
+  if (!res.ok) {
+    console.warn(`[BULK-VERIFY] listings-by-ASIN ${asin}: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+    return [];
+  }
+  const data = await res.json();
+  const out: Array<{ sku: string; quantity: number; channel: string | null; statuses: string[] }> = [];
+  for (const it of data?.items || []) {
+    const sku = String(it?.sku || '').trim();
+    if (!sku) continue;
+    const fa = Array.isArray(it?.fulfillmentAvailability) ? it.fulfillmentAvailability : [];
+    const quantity = fa.reduce((n: number, f: any) => n + (Number(f?.quantity) || 0), 0);
+    const channel = fa.length > 0 ? String(fa[0]?.fulfillmentChannelCode || '') || null : null;
+    const statuses = (Array.isArray(it?.summaries) ? it.summaries : [])
+      .flatMap((s: any) => (Array.isArray(s?.status) ? s.status : s?.status ? [s.status] : []))
+      .map((s: any) => String(s || '').toUpperCase());
+    out.push({ sku, quantity, channel, statuses });
+  }
+  return out;
+}
+
+/**
+ * REVIVE GHOSTS: bring back listings Amazon has started answering for again,
+ * including when the listing came back under a DIFFERENT SKU.
+ *
+ * inventory.listing_status = NOT_IN_CATALOG was a one-way door. Four separate
+ * places treat it as final:
+ *   - buildInventoryRowsQuery above EXCLUDES those rows from every live-verify
+ *     sweep, so nothing ever re-asked Amazon about them;
+ *   - fbm-quick-check excludes them too, so the FBM fast path is no escape;
+ *   - AssignmentsTable hides them from the repricer entirely (ls ===
+ *     'NOT_IN_CATALOG' -> return false);
+ *   - auto-assign-bulk treats the status as a broken listing.
+ * So a seller who recreated a deleted listing on Amazon got silence: measured
+ * 2026-10-01, 402 such rows, 69 with an ENABLED assignment and 473 units of
+ * stock between them. B09PJPB34P was one -- recreated on Amazon, active there,
+ * invisible here, its ghost stamped 2026-05-20 as not_in_catalog_legacy.
+ *
+ * Recreating a listing often mints a NEW seller SKU, which is the harder half:
+ * the cost, the purchase history and the COG all hang off the OLD SKU. The COG
+ * itself is safe -- asin_cog_for_repricer is keyed by ASIN, not SKU, so cost
+ * survives a SKU change by design -- but inventory, created_listings and the
+ * assignment rows are all SKU-keyed and would be left pointing at a SKU Amazon
+ * no longer has.
+ *
+ * Two stages, cheap first:
+ *   1. The FBA snapshot the caller already holds. Free, covers every FBA SKU,
+ *      and matches a renamed listing through the ASIN now kept in the map.
+ *   2. For rows stage 1 could not see, a listings-by-ASIN call -- the only way
+ *      to find an FBM or freshly-renamed listing. One request per ASIN, so it
+ *      is capped and spent on rows that show signs of life first: our own
+ *      stock, an enabled assignment, or an explicit target_asin.
+ *
+ * Deliberately conservative:
+ *   - Amazon's own generated tombstone SKUs (amzn.gr.*) are never revived.
+ *   - More than one live SKU on the ASIN is reported as ambiguous and left
+ *     alone, same stance as reconcile-asin-skus: picking one at random would
+ *     reprice the wrong offer.
+ *   - An ASIN absent from BOTH stages is left exactly as it was.
+ *   - The FBM zero guard from the main loop applies here too: an FBA snapshot
+ *     reading 0/0/0 is not authoritative for a row the FBM sync owns.
+ */
+interface ReviveResult {
+  asin: string;
+  sku: string;
+  action: string;
+  live_sku?: string | null;
+  detail?: string | null;
+  stage?: string;
+}
+
+/** Point created_listings + repricer_assignments at the SKU Amazon actually has. */
+async function rewriteSkuForAsin(supabase: any, userId: string, asin: string, liveSku: string) {
+  const { data: clRows } = await supabase
+    .from('created_listings').select('id, sku').eq('user_id', userId).eq('asin', asin);
+  for (const r of clRows || []) {
+    if (r.sku === liveSku) continue;
+    await supabase.from('created_listings').update({ sku: liveSku }).eq('id', r.id);
+  }
+
+  // One assignment per (user, asin, marketplace), so rewrite per marketplace and
+  // drop any duplicate that would collide on the way -- keeping whichever row
+  // has actually been applied most recently.
+  const { data: asgnRows } = await supabase
+    .from('repricer_assignments')
+    .select('id, sku, marketplace, last_applied_at, updated_at, created_at')
+    .eq('user_id', userId).eq('asin', asin);
+  const byMarket = new Map<string, any[]>();
+  for (const a of asgnRows || []) {
+    const arr = byMarket.get(a.marketplace) || [];
+    arr.push(a);
+    byMarket.set(a.marketplace, arr);
+  }
+  for (const [, rows] of byMarket) {
+    const sorted = [...rows].sort((a, b) => {
+      if (a.sku === liveSku && b.sku !== liveSku) return -1;
+      if (b.sku === liveSku && a.sku !== liveSku) return 1;
+      const at = a.last_applied_at ? new Date(a.last_applied_at).getTime() : 0;
+      const bt = b.last_applied_at ? new Date(b.last_applied_at).getTime() : 0;
+      if (at !== bt) return bt - at;
+      return new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime();
+    });
+    for (const loser of sorted.slice(1)) {
+      await supabase.from('repricer_assignments').delete().eq('id', loser.id);
+    }
+    const keeper = sorted[0];
+    if (keeper && keeper.sku !== liveSku) {
+      await supabase.from('repricer_assignments').update({
+        sku: liveSku,
+        // The old SKU's verdict says nothing about the new one.
+        sku_validation_status: null,
+        sku_validation_message: null,
+      }).eq('id', keeper.id);
+    }
+  }
+}
+
+async function reviveGhostedListings(
+  supabase: any,
+  userId: string,
+  liveMap: Record<string, any>,
+  dryRun: boolean,
+  limit: number,
+  opts: {
+    accessToken: string;
+    marketplaceId: string;
+    deepLimit: number;
+    targetAsin?: string | null;
+  },
+): Promise<{ summary: Record<string, number>; results: ReviveResult[] }> {
+  let ghostQuery = supabase
+    .from('inventory')
+    .select('id, asin, sku, listing_status, available, reserved, inbound, source, cost, amount, ghost_reason')
+    .eq('user_id', userId)
+    .in('listing_status', ['NOT_IN_CATALOG', 'DELETED']);
+  if (opts.targetAsin) ghostQuery = ghostQuery.eq('asin', opts.targetAsin);
+  const { data: ghosts, error } = await ghostQuery
+    .order('available', { ascending: false, nullsFirst: false })
+    .limit(limit);
+  if (error) throw error;
+
+  const liveByAsin = new Map<string, string[]>();
+  for (const [sku, v] of Object.entries(liveMap)) {
+    const a = String((v as any)?.asin || '').toUpperCase();
+    if (!a) continue;
+    const arr = liveByAsin.get(a) || [];
+    arr.push(sku);
+    liveByAsin.set(a, arr);
+  }
+
+  // Which ghosts have an enabled assignment? That is a sign of life worth
+  // spending an API call on, and it is also the set the seller is most likely
+  // staring at and wondering why the repricer is silent.
+  const ghostAsins = Array.from(new Set((ghosts || []).map((g: any) => String(g.asin || '').toUpperCase()).filter(Boolean)));
+  const enabledAsins = new Set<string>();
+  for (let i = 0; i < ghostAsins.length; i += 100) {
+    const slice = ghostAsins.slice(i, i + 100);
+    const { data: asgn } = await supabase
+      .from('repricer_assignments')
+      .select('asin, is_enabled')
+      .eq('user_id', userId).eq('marketplace', 'US')
+      .in('asin', slice);
+    for (const a of asgn || []) if (a.is_enabled) enabledAsins.add(String(a.asin).toUpperCase());
+  }
+
+  const results: ReviveResult[] = [];
+  const summary: Record<string, number> = {};
+  const bump = (k: string) => { summary[k] = (summary[k] || 0) + 1; };
+  const nowIso = () => new Date().toISOString();
+  const clearGhost = { ghosted_at: null, ghost_reason: null, ghost_source: null };
+
+  /**
+   * Move a row OFF a tombstone status.
+   *
+   * There is a fourth lock, and it is in the database: the BEFORE UPDATE
+   * trigger fn_protect_ghost_tombstone silently reverts any change of
+   * listing_status away from NOT_IN_CATALOG / DELETED unless the write also
+   * sets source = 'force_relist'. Silently: the UPDATE reports success, the
+   * other columns in the same statement are saved, and only listing_status
+   * snaps back, with the refusal going to the Postgres log where nobody looks.
+   * That is exactly how the first attempt at B09PJPB34P appeared to work --
+   * ghosted_at cleared, status still NOT_IN_CATALOG -- and it is the reason
+   * this is a two-step write rather than one patch.
+   *
+   * force_relist is the hatch the guard itself documents, so this uses it
+   * rather than working around the trigger, and only ever after Amazon has
+   * confirmed the listing is live. The second write then restores
+   * source = 'live_api', which sync-inventory-report reads as its protection
+   * window -- leaving force_relist behind would quietly opt the row out of it.
+   */
+  async function liftTombstone(rowId: string, status: string): Promise<void> {
+    await supabase.from('inventory').update({
+      listing_status: status,
+      source: 'force_relist',
+      ...clearGhost,
+      last_inventory_sync_at: nowIso(),
+    }).eq('id', rowId);
+  }
+
+  /**
+   * Apply a revive decision for one ghost row against a known live SKU.
+   *
+   * `statuses` is Amazon's own summary status for the listing, and it decides
+   * the outcome when the quantity cannot. Stage 2 reads quantity from
+   * fulfillmentAvailability, which is the MERCHANT figure: an FBA listing
+   * legitimately reports no fulfillmentAvailability at all, so units=0 there is
+   * silence, not zero stock. Writing INACTIVE on that silence would be no
+   * better than the NOT_IN_CATALOG being cleared -- AssignmentsTable hides
+   * INACTIVE too, and auto-assign-bulk treats it as a broken listing, so the
+   * listing would stay invisible and be disabled for good measure.
+   *
+   * If Amazon returns the item with a live status, it is in the catalog. That
+   * is the only claim this sweep is entitled to make, so it is the only one it
+   * makes: clear the ghost, set ACTIVE, and leave the quantity to the
+   * channel-aware syncs that own it.
+   */
+  const LIVE_STATUSES = new Set(['ACTIVE', 'BUYABLE', 'DISCOVERABLE']);
+  async function applyRevive(
+    g: any, asin: string, sku: string, liveSku: string, units: number, stage: string,
+    statuses: string[] = [],
+  ): Promise<void> {
+    const sameSku = liveSku === sku;
+    const amazonSaysLive = statuses.some((st) => LIVE_STATUSES.has(st));
+    const status = units > 0 || amazonSaysLive ? 'ACTIVE' : 'INACTIVE';
+    const liveQty = {
+      listing_status: status,
+      ...clearGhost,
+      last_inventory_sync_at: nowIso(),
+    } as any;
+
+    if (sameSku) {
+      const fbmOwned = String(g.source || '') === 'amazon_sync_fbm';
+      if (!dryRun) {
+        await liftTombstone(g.id, status);
+        const patch: any = { ...liveQty };
+        if (!(fbmOwned && units === 0)) {
+          const own = liveMap[sku];
+          if (own) {
+            patch.available = own.available || 0;
+            patch.reserved = own.reserved || 0;
+            patch.inbound = own.inbound || 0;
+            patch.source = 'live_api';
+          } else if (units > (g.available || 0)) {
+            // Stage 2: the quantity came from fulfillmentAvailability, the FBM
+            // figure, and lands in the single `available` field both channels
+            // share. Only ever RAISES it: this endpoint cannot see FBA stock,
+            // so a lower number here is ignorance, not a correction.
+            patch.available = units;
+            patch.source = 'live_api';
+          }
+        }
+        await supabase.from('inventory').update(patch).eq('id', g.id);
+      }
+      const action = status === 'ACTIVE' ? 'revived_same_sku' : 'live_but_empty';
+      bump(action);
+      results.push({ asin, sku, action, stage, detail: `units=${units} amazon=${statuses.join("/") || "n/a"} -> ${status}`, });
+      return;
+    }
+
+    const { data: existing } = await supabase
+      .from('inventory').select('id, cost, amount')
+      .eq('user_id', userId).eq('sku', liveSku).maybeSingle();
+
+    if (!dryRun) {
+      const qty: any = { ...liveQty, source: 'live_api' };
+      const live = liveMap[liveSku];
+      if (live) {
+        qty.available = live.available || 0;
+        qty.reserved = live.reserved || 0;
+        qty.inbound = live.inbound || 0;
+      } else if (units > (g.available || 0)) {
+        qty.available = units;
+      }
+
+      if (existing) {
+        await liftTombstone(existing.id, status);
+        // The live SKU already has a row of its own, so carry the cost over
+        // rather than rewriting the key into a collision, then retire the old
+        // row. Only fills a cost the live row does not already have -- a real
+        // purchase price on the new SKU outranks the dead one's.
+        const patch: any = { ...qty };
+        if ((existing.cost == null || Number(existing.cost) <= 0) && g.cost != null) patch.cost = g.cost;
+        if ((existing.amount == null || Number(existing.amount) <= 0) && g.amount != null) patch.amount = g.amount;
+        await supabase.from('inventory').update(patch).eq('id', existing.id);
+        await supabase.from('inventory').update({
+          listing_status: 'DELETED',
+          ghost_reason: `superseded_by_${liveSku}`,
+        }).eq('id', g.id);
+      } else {
+        // No row for the live SKU: rename this one, which keeps the cost, the
+        // supplier links and the purchase history attached to the stock.
+        await liftTombstone(g.id, status);
+        await supabase.from('inventory').update({ sku: liveSku, ...qty }).eq('id', g.id);
+      }
+      await rewriteSkuForAsin(supabase, userId, asin, liveSku);
+    }
+    const action = existing ? 'merged_into_live_sku' : 'remapped_to_live_sku';
+    bump(action);
+    results.push({ asin, sku, action, live_sku: liveSku, stage, detail: `units=${units} amazon=${statuses.join("/") || "n/a"} -> ${status}`, });
+  }
+
+  // ---- Stage 1: the FBA snapshot already in hand (free) ----
+  const deferred: any[] = [];
+  for (const g of ghosts || []) {
+    const sku = String(g.sku || '');
+    const asin = String(g.asin || '').toUpperCase();
+    if (!sku || !asin) { bump('skipped_incomplete'); continue; }
+    if (sku.toLowerCase().startsWith('amzn.gr.')) {
+      bump('skipped_generated_sku');
+      results.push({ asin, sku, action: 'skipped_generated_sku', stage: 'snapshot' });
+      continue;
+    }
+
+    const own = liveMap[sku] || null;
+    const otherLive = (liveByAsin.get(asin) || []).filter((s) => s !== sku);
+
+    if (own) {
+      const units = (own.available || 0) + (own.reserved || 0) + (own.inbound || 0);
+      await applyRevive(g, asin, sku, sku, units, 'snapshot');
+      continue;
+    }
+    if (otherLive.length === 1) {
+      const live = liveMap[otherLive[0]];
+      const units = (live.available || 0) + (live.reserved || 0) + (live.inbound || 0);
+      await applyRevive(g, asin, sku, otherLive[0], units, 'snapshot');
+      continue;
+    }
+    if (otherLive.length > 1) {
+      bump('ambiguous_multiple_live_skus');
+      results.push({ asin, sku, action: 'ambiguous_multiple_live_skus', detail: otherLive.join(', '), stage: 'snapshot' });
+      continue;
+    }
+    deferred.push(g);
+  }
+
+  // ---- Stage 2: ask Amazon by ASIN, for rows the snapshot cannot see ----
+  const hasStock = (g: any) => (g.available || 0) + (g.reserved || 0) + (g.inbound || 0) > 0;
+  const worthAsking = deferred
+    .filter((g) => {
+      const asin = String(g.asin || '').toUpperCase();
+      if (opts.targetAsin && asin === opts.targetAsin.toUpperCase()) return true;
+      return hasStock(g) || enabledAsins.has(asin);
+    })
+    .sort((a, b) => Number(enabledAsins.has(String(b.asin).toUpperCase())) - Number(enabledAsins.has(String(a.asin).toUpperCase()))
+      || ((b.available || 0) - (a.available || 0)));
+
+  let sellerId: string | null = null;
+  if (worthAsking.length > 0) {
+    const { data: authRows } = await supabase
+      .from('seller_authorizations')
+      .select('seller_id, selling_partner_id, marketplace_id, is_active')
+      .eq('user_id', userId);
+    const act = (authRows || []).filter((r: any) => r.is_active !== false);
+    const auth = act.find((r: any) => r.marketplace_id === opts.marketplaceId) || act[0];
+    sellerId = auth?.seller_id || auth?.selling_partner_id || null;
+  }
+
+  let asked = 0;
+  for (const g of worthAsking) {
+    if (!sellerId) { bump('deep_check_unavailable'); break; }
+    if (asked >= opts.deepLimit) { bump('deep_check_capped'); break; }
+    const sku = String(g.sku || '');
+    const asin = String(g.asin || '').toUpperCase();
+    asked++;
+    const live = await discoverLiveSkusForAsin(supabase, opts.accessToken, sellerId, opts.marketplaceId, asin);
+    if (live.length === 0) {
+      bump('confirmed_absent_on_amazon');
+      results.push({ asin, sku, action: 'confirmed_absent_on_amazon', stage: 'listings_api' });
+      continue;
+    }
+    const mine = live.find((l) => l.sku === sku);
+    if (mine) {
+      await applyRevive(g, asin, sku, sku, mine.quantity, 'listings_api', mine.statuses);
+      continue;
+    }
+    if (live.length > 1) {
+      bump('ambiguous_multiple_live_skus');
+      results.push({
+        asin, sku, action: 'ambiguous_multiple_live_skus',
+        detail: live.map((l) => `${l.sku}(${l.quantity})`).join(', '), stage: 'listings_api',
+      });
+      continue;
+    }
+    await applyRevive(g, asin, sku, live[0].sku, live[0].quantity, 'listings_api', live[0].statuses);
+  }
+
+  for (const g of deferred) {
+    const asin = String(g.asin || '').toUpperCase();
+    if (results.some((r) => r.asin === asin && r.sku === String(g.sku || ''))) continue;
+    bump('still_absent');
+    results.push({ asin, sku: String(g.sku || ''), action: 'still_absent', stage: 'snapshot' });
+  }
+
+  summary.deep_checks_spent = asked;
+  return { summary, results };
 }
 
 Deno.serve(async (req) => {
@@ -301,6 +744,36 @@ Deno.serve(async (req) => {
     const marketplaceId = 'ATVPDKIKX0DER'; // US
 
     console.log(`[BULK-VERIFY] Starting: mode=${mode}, limit=${effectiveLimit ?? 'ALL'}, dry_run=${dryRun}, user=${userId}`);
+
+    // mode=revive_ghosts works the OPPOSITE way round to every other mode: its
+    // candidates are exactly the rows buildInventoryRowsQuery excludes, so it
+    // runs its own fetch and returns its own report. Placed before the normal
+    // candidate fetch, which would otherwise early-return on an empty catalog
+    // slice and never reach the snapshot this sweep needs.
+    if (mode === 'revive_ghosts') {
+      const refreshTokenR = Deno.env.get('SPAPI_REFRESH_TOKEN')!;
+      const accessTokenR = await getLwaAccessToken(refreshTokenR);
+      console.log('[BULK-VERIFY] revive_ghosts: fetching the live FBA snapshot...');
+      const liveMapR = await fetchInventoryBatch([], marketplaceId, accessTokenR);
+      console.log(`[BULK-VERIFY] revive_ghosts: ${Object.keys(liveMapR).length} live SKUs`);
+      const revived = await reviveGhostedListings(supabase, userId!, liveMapR, dryRun, effectiveLimit ?? 500, {
+        accessToken: accessTokenR,
+        marketplaceId,
+        // One listings-API request each, so capped. 25 covers the rows that
+        // show signs of life in this catalog with room to spare, and the cap is
+        // reported as deep_check_capped rather than failing silently.
+        deepLimit: typeof body?.deep_limit === 'number' ? Math.max(0, Math.min(200, body.deep_limit)) : 25,
+        targetAsin: typeof body?.target_asin === 'string' ? body.target_asin.toUpperCase() : null,
+      });
+      console.log(`[BULK-VERIFY] revive_ghosts: ${JSON.stringify(revived.summary)}`);
+      return new Response(JSON.stringify({
+        mode,
+        dry_run: dryRun,
+        live_skus_seen: Object.keys(liveMapR).length,
+        summary: revived.summary,
+        results: revived.results,
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
 
     const rows = await fetchInventoryRowsToVerify(supabase, userId, mode, effectiveLimit);
     if (!rows || rows.length === 0) {
