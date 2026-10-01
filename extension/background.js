@@ -34,6 +34,12 @@ async function isSignedOutExplicit() {
 // Auth-resilience constants. When Supabase /auth is slow we want extension
 // panels to stay responsive instead of hanging on a 30-45s gotrue timeout.
 const REFRESH_TIMEOUT_MS = 7000;
+// Second attempt, given longer. The failure this exists for is a gotrue
+// slow-down of a second or two, so one retry with a wider window clears most of
+// them -- and the panel used to claim it was retrying when nothing was.
+const REFRESH_RETRY_TIMEOUT_MS = 12000;
+const REFRESH_RETRY_DELAY_MS = 400;
+const REFRESH_ATTEMPTS = 2;
 const STALE_TOKEN_GRACE_MS = 10 * 60 * 1000; // 10 min last-known-good window
 
 function logAuth(event, extra) {
@@ -53,50 +59,82 @@ async function refreshToken({ allowStaleFallback = true } = {}) {
     const sess = await getSession();
     if (!sess?.refresh_token) throw new Error("Not signed in");
     logAuth("refresh_started");
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort("refresh_timeout"), REFRESH_TIMEOUT_MS);
-    let res;
-    try {
-      res = await fetch(`${CFG.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
-        method: "POST",
-        headers: { apikey: CFG.SUPABASE_ANON_KEY, "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh_token: sess.refresh_token }),
-        signal: ctrl.signal,
-      });
-    } catch (e) {
-      clearTimeout(timer);
-      const isAbort = e?.name === "AbortError" || String(e?.message || "").includes("abort");
-      logAuth(isAbort ? "refresh_timeout" : "refresh_network_error", String(e?.message || e));
-      if (allowStaleFallback && sess.access_token) {
-        const ageMs = Date.now() - ((sess.expires_at || 0) * 1000);
-        if (ageMs < STALE_TOKEN_GRACE_MS) {
-          logAuth("reused_cached_token", { stale_by_ms: Math.max(0, ageMs) });
-          return sess;
+    // ACTUALLY RETRIES, which the error text used to only promise.
+    //
+    // The old code made a single attempt and, on a timeout or a transient 5xx,
+    // threw "Auth server slow — retrying" — while nothing retried. Worse, the
+    // place that message reaches the user is the 401 path in invoke()/restGet():
+    // the cached token had already been rejected, this refresh was the recovery,
+    // and the panel printed a promise of a retry that never came. The only real
+    // fix the user had was to press the button again themselves.
+    //
+    // Two attempts, the second with a wider window, then an honest message.
+    // A confirmed sign-out (invalid_grant) still fails immediately — retrying a
+    // token Supabase has actually revoked is pointless.
+    let res = null;
+    let lastKind = "";
+    for (let attempt = 1; attempt <= REFRESH_ATTEMPTS; attempt++) {
+      const ctrl = new AbortController();
+      const budget = attempt === 1 ? REFRESH_TIMEOUT_MS : REFRESH_RETRY_TIMEOUT_MS;
+      const timer = setTimeout(() => ctrl.abort("refresh_timeout"), budget);
+      let thisRes = null;
+      try {
+        thisRes = await fetch(`${CFG.SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+          method: "POST",
+          headers: { apikey: CFG.SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: sess.refresh_token }),
+          signal: ctrl.signal,
+        });
+      } catch (e) {
+        clearTimeout(timer);
+        // Network abort / timeout / 504-ish failure. NEVER sign out here — the
+        // refresh token is almost certainly still valid, gotrue is just slow.
+        const isAbort = e?.name === "AbortError" || String(e?.message || "").includes("abort");
+        lastKind = isAbort ? "timeout" : "network";
+        logAuth(isAbort ? "refresh_timeout" : "refresh_network_error", { attempt, message: String(e?.message || e) });
+        if (attempt < REFRESH_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, REFRESH_RETRY_DELAY_MS));
+          continue;
         }
+        break;
       }
-      throw new Error("Auth server slow — retrying");
-    }
-    clearTimeout(timer);
-    if (!res.ok) {
+      clearTimeout(timer);
+      if (thisRes.ok) { res = thisRes; break; }
+
+      // Distinguish "Supabase says you're really signed out" (400/401 with
+      // invalid_grant) from transient 5xx. Only the former clears session.
       let bodyText = "";
-      try { bodyText = await res.text(); } catch (_) { /* ignore */ }
+      try { bodyText = await thisRes.text(); } catch (_) { /* ignore */ }
       const isHardSignOut =
-        (res.status === 400 || res.status === 401) &&
+        (thisRes.status === 400 || thisRes.status === 401) &&
         /invalid[_ ]grant|refresh[_ ]token[_ ]not[_ ]found|expired/i.test(bodyText);
       if (isHardSignOut) {
-        logAuth("confirmed_signed_out", { status: res.status });
+        logAuth("confirmed_signed_out", { status: thisRes.status });
         await clearSessionExplicit("invalid_grant");
         throw new Error("Not signed in");
       }
-      logAuth("refresh_transient_failure", { status: res.status });
+      lastKind = `http_${thisRes.status}`;
+      logAuth("refresh_transient_failure", { attempt, status: thisRes.status });
+      if (attempt < REFRESH_ATTEMPTS) {
+        await new Promise((r) => setTimeout(r, REFRESH_RETRY_DELAY_MS));
+        continue;
+      }
+    }
+
+    if (!res) {
+      // Every attempt failed and the token was not revoked, so the last-known-good
+      // token is still the best thing we have.
       if (allowStaleFallback && sess.access_token) {
         const ageMs = Date.now() - ((sess.expires_at || 0) * 1000);
         if (ageMs < STALE_TOKEN_GRACE_MS) {
-          logAuth("reused_cached_token", { stale_by_ms: Math.max(0, ageMs) });
+          logAuth("reused_cached_token", { stale_by_ms: Math.max(0, ageMs), after: lastKind });
           return sess;
         }
       }
-      throw new Error("Auth server slow — retrying");
+      logAuth("refresh_gave_up", { after: lastKind, attempts: REFRESH_ATTEMPTS });
+      // Says what happened and what to do, instead of describing a retry that
+      // has already been tried twice.
+      throw new Error("Could not refresh sign-in (auth server did not respond) — try again");
     }
     const data = await res.json();
     const next = {

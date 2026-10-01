@@ -468,7 +468,26 @@ async function fetchLiveSpApiOffers(
   );
   const accessToken = await getLwaAccessToken(sellerAuth.refresh_token);
   const url = `${endpoint}/products/pricing/v0/items/${asin}/offers?MarketplaceId=${marketplaceId}&ItemCondition=New`;
-  await waitForApiToken(admin, 'pricing_api');
+  // HONOUR THE GATE. It used to be called for its side effect and its answer
+  // thrown away, so when the pricing bucket was empty this called Amazon
+  // anyway -- turning our own queueing into a real 429, which both fails this
+  // panel AND spends throttle headroom the repricer needs.
+  //
+  // This is an INTERACTIVE caller, so it waits longer than the 8 s default
+  // (someone is watching the panel), but a full wait that still comes back
+  // empty is a definite answer: skip Amazon and let the caller fall back to
+  // Keepa, which is what the catch around this function already does.
+  //
+  // Why it matters here: `pricing_api` is shared with repricer-sp-api-pricing,
+  // and the repricer dispatches continuously -- 97 assignments in a single
+  // minute, measured 2026-10-01 23:40 UTC, with getItemOffers last claimed 8
+  // seconds before. An interactive panel request is queueing behind that, and
+  // the 25 s client cap in the panel expires first, which is what the seller
+  // sees as "Live retrieval failed (timeout or SP-API throttled)".
+  const gotPricingSlot = await waitForApiToken(admin, 'pricing_api', { maxWaitMs: 12000 });
+  if (!gotPricingSlot) {
+    throw new Error('Amazon pricing quota busy (the repricer is using it) — retry in a few seconds');
+  }
   const response = await signedSpApiFetch(url, accessToken);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(`SP-API offers ${response.status}: ${data?.errors?.[0]?.message || 'failed'}`);

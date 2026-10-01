@@ -1281,9 +1281,16 @@
       let emptyMsg;
       const showRetry = rState === "failed";
       switch (rState) {
-        case "failed":
-          emptyMsg = `Live retrieval failed (timeout or SP-API throttled).`;
+        case "failed": {
+          // Print what actually happened. The old copy named two causes and
+          // could not tell them apart, so a busy pricing gate, an expired
+          // sign-in and a genuine Amazon throttle all read as the same thing.
+          const why = String(state.historyRetrievalReason || "").trim();
+          emptyMsg = why
+            ? `Live retrieval failed — ${why}`
+            : `Live retrieval failed (no reason reported).`;
           break;
+        }
         case "no_offers":
           emptyMsg = `No active marketplace offers detected for this ASIN.`;
           break;
@@ -1586,6 +1593,13 @@
         if (!hist) {
           // Edge function returned null (timeout or non-2xx) — keep last good.
           state.historyRetrievalState = prevList.length ? "stale_failed" : "failed";
+          // Carry the REASON out, not just the fact. lastInvokeError already
+          // holds the real one (a 25 s client timeout, or the edge function's
+          // own message) and it was being discarded, which is why the empty
+          // state had to guess "timeout or SP-API throttled" — a guess that
+          // blamed Amazon for what is usually our own pricing gate being busy
+          // with the repricer, and for an expired sign-in too.
+          state.historyRetrievalReason = lastInvokeError["mobile-scan-price-history"] || null;
           state.historyLastAttemptAt = now;
           // Don't touch state.history — last-good remains visible.
         } else if (newList.length === 0 && prevList.length > 0) {
@@ -1593,6 +1607,7 @@
           // good snapshot. Likely SP-API 0-offers / Keepa 7-day freshness
           // dropped everything. Preserve the prior list, refresh the rest.
           state.historyRetrievalState = "stale_empty";
+          state.historyRetrievalReason = null;
           state.historyLastAttemptAt = now;
           state.history = {
             ...hist,
@@ -1600,6 +1615,7 @@
           };
         } else {
           state.historyRetrievalState = newList.length ? "live" : "no_offers";
+          state.historyRetrievalReason = null;
           state.historyLastAttemptAt = now;
           state.historyLastSuccessAt = newList.length ? now : (state.historyLastSuccessAt || null);
           state.history = hist;
