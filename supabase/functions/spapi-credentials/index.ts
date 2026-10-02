@@ -224,7 +224,23 @@ Deno.serve(async (req) => {
           marketplaces: info.marketplaces,
         });
       } catch (e: any) {
-        const msg = String(e?.message || e);
+        let msg = String(e?.message || e);
+        // invalid_client means Amazon rejected the client_id + client_secret
+        // PAIR, which in practice almost always means the secret belongs to a
+        // different application than the client id being sent. Seller Central
+        // can hold several apps, their secrets look identical in shape
+        // (amzn1.oa2-cs.v1....), and the raw message -- "Client authentication
+        // failed" -- reads as "wrong secret", which sends people off to rotate
+        // the secret they just rotated.
+        //
+        // Cost a 50-minute outage on 2026-10-02: a secret generated for the app
+        // ending f01d was saved against the client id ending 15f6, here and in
+        // the env secret, and nothing in the error named the app it was being
+        // paired with. So name it.
+        if (/invalid_client|client authentication failed/i.test(msg)) {
+          const idTail = String(c.lwa_client_id || "").slice(-4) || "????";
+          msg += ` — Amazon rejected this Client ID + Secret as a pair. The stored Client ID ends ...${idTail}; make sure the secret was generated for THAT app in Seller Central (a secret from another app fails exactly like a mistyped one).`;
+        }
         await admin.rpc("record_spapi_test_result", {
           p_user_id: targetUserId,
           p_status: "error",
