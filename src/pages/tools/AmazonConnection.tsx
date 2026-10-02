@@ -36,6 +36,26 @@ const REGIONS = [
   { value: "fe", label: "Far East (JP, AU, SG, IN…)" },
 ];
 
+/**
+ * Credentials are trimmed before they leave the browser.
+ *
+ * Copying an LWA secret out of Seller Central very often brings a trailing
+ * newline or space with it, and nothing on either side of this call used to
+ * remove it: the UI sent the raw field, spapi-credentials stored it verbatim,
+ * and Amazon then answered the next token exchange with
+ *   "Client authentication failed"
+ * -- which reads as "wrong secret" and sends you back to Seller Central to
+ * rotate again, when the value was right and only the whitespace was wrong.
+ * Hit for real on 2026-10-02, immediately after a routine 180-day rotation.
+ *
+ * Empty after trimming means "leave what is stored alone", which is what the
+ * blank-field convention on this page already promises.
+ */
+const cleanCred = (v: string) => {
+  const t = (v || "").trim();
+  return t.length > 0 ? t : null;
+};
+
 export default function AmazonConnection() {
   const { user } = useAuth();
   const { isAdmin, loading: subLoading } = useSubscription();
@@ -93,9 +113,9 @@ export default function AmazonConnection() {
       body: {
         action: "save",
         user_id: user.id,
-        lwa_client_id: clientId || null,
-        lwa_client_secret: clientSecret || null,
-        refresh_token: refreshToken || null,
+        lwa_client_id: cleanCred(clientId),
+        lwa_client_secret: cleanCred(clientSecret),
+        refresh_token: cleanCred(refreshToken),
         region,
         marketplace,
       },
@@ -119,9 +139,9 @@ export default function AmazonConnection() {
       body: {
         action: "test",
         user_id: user.id,
-        lwa_client_id: clientId || null,
-        lwa_client_secret: clientSecret || null,
-        refresh_token: refreshToken || null,
+        lwa_client_id: cleanCred(clientId),
+        lwa_client_secret: cleanCred(clientSecret),
+        refresh_token: cleanCred(refreshToken),
         region,
       },
     });

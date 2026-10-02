@@ -27,6 +27,17 @@ function json(body: unknown, status = 200) {
   });
 }
 
+// Trim on the way in as well as in the UI. Two reasons: this endpoint is also
+// reachable by anything else that posts to it, and a stray newline copied out
+// of Seller Central is indistinguishable from a wrong secret once Amazon has
+// answered "Client authentication failed" -- so the guard belongs on the side
+// that does the storing, not only on the side that happened to collect it.
+const cleanCred = (v: unknown): string | null => {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return t.length > 0 ? t : null;
+};
+
 async function getLWAToken(refreshToken: string, clientId: string, clientSecret: string) {
   const r = await fetch("https://api.amazon.com/auth/o2/token", {
     method: "POST",
@@ -115,9 +126,9 @@ Deno.serve(async (req) => {
       // Use the caller's auth context so the RPC's auth.uid() matches
       const { error } = await userClient.rpc("save_spapi_credentials", {
         p_user_id: targetUserId,
-        p_lwa_client_id: body?.lwa_client_id ?? null,
-        p_lwa_client_secret: body?.lwa_client_secret ?? null,
-        p_refresh_token: body?.refresh_token ?? null,
+        p_lwa_client_id: cleanCred(body?.lwa_client_id),
+        p_lwa_client_secret: cleanCred(body?.lwa_client_secret),
+        p_refresh_token: cleanCred(body?.refresh_token),
         p_region: body?.region ?? "na",
         p_marketplace: body?.marketplace ?? "US",
       });
@@ -140,7 +151,7 @@ Deno.serve(async (req) => {
     if (action === "test") {
       // Allow inline credential testing (before save) — fall back to stored if not provided
       let clientId: string | null = body?.lwa_client_id ?? null;
-      let clientSecret: string | null = body?.lwa_client_secret ?? null;
+      let clientSecret: string | null = cleanCred(body?.lwa_client_secret);
       let refreshTok: string | null = body?.refresh_token ?? null;
       let regionForTest: string = body?.region ?? "na";
 
