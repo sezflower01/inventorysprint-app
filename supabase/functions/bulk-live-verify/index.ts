@@ -525,6 +525,14 @@ async function reviveGhostedListings(
       if (!dryRun) {
         await liftTombstone(g.id, status);
         const patch: any = { ...liveQty };
+        // Hand the row back to the normal syncs. liftTombstone had to set
+        // source = 'force_relist' to get past the guard, and leaving it there
+        // has consequences beyond cosmetics: fn_inventory_freshness_guard lets
+        // force_relist BYPASS the stale-write watermark, so a late or
+        // out-of-order sync could overwrite good stock. Observed on
+        // B09PJPB34P, which came back ACTIVE but kept source=force_relist
+        // because this branch only set source alongside a quantity write.
+        if (!fbmOwned) patch.source = 'live_api';
         if (!(fbmOwned && units === 0)) {
           const own = liveMap[sku];
           if (own) {
