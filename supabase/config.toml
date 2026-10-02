@@ -515,3 +515,12 @@ verify_jwt = false
 
 [functions.repair-collapsed-orders]
 verify_jwt = false
+
+[functions.spapi-env-audit]
+# MUST be false: this is called from SQL with x-internal-secret and no
+# Authorization header, so verify_jwt = true would have the gateway reject it
+# before the function runs (no log, no error -- see docs/verify-jwt-hardening.md).
+# The function itself is internal-only via requireInternalCall, and it returns
+# credential METADATA only: client-id last4, value lengths and SHA-256 prefixes.
+# No secret value is ever returned.
+verify_jwt = false
