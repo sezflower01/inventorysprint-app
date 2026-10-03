@@ -229,6 +229,35 @@ async function restGet(path) {
   return data;
 }
 
+/**
+ * Call a Postgres function through PostgREST.
+ *
+ * Added for get_asin_profit, which is where per-ASIN profit is DEFINED. The
+ * panel must not recompute it: answering "what did this ASIN earn" by hand
+ * produced four different numbers on 2026-10-03, and a second implementation
+ * living in the extension would become a fifth that drifts from the Sales
+ * Report without anyone noticing.
+ */
+async function restRpc(fn, args) {
+  let s = await ensureFreshSession();
+  const url = `${CFG.SUPABASE_URL}/rest/v1/rpc/${fn}`;
+  const headers = {
+    apikey: CFG.SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${s.access_token}`,
+    "Content-Type": "application/json",
+  };
+  let res = await fetch(url, { method: "POST", headers, body: JSON.stringify(args || {}) });
+  if (res.status === 401) {
+    s = await refreshToken();
+    headers.Authorization = `Bearer ${s.access_token}`;
+    res = await fetch(url, { method: "POST", headers, body: JSON.stringify(args || {}) });
+  }
+  const text = await res.text();
+  let data; try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+  if (!res.ok) throw new Error(data?.message || data?.error || `HTTP ${res.status}`);
+  return data;
+}
+
 async function restInsert(table, row) {
   let s = await ensureFreshSession();
   const url = `${CFG.SUPABASE_URL}/rest/v1/${table}`;
@@ -357,6 +386,21 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             `asin_fee_cache?user_id=eq.${uid3}&asin=eq.${asin3}&marketplace=eq.${mk3}&select=fba_fee_fixed,referral_rate,is_media&limit=1`,
           );
           sendResponse({ ok: true, data: Array.isArray(rows3) ? rows3[0] || null : null });
+          break;
+        }
+        case "INVSPRNT_GET_ASIN_PROFIT": {
+          // The SAME definition the Sales Report uses: get_asin_profit excludes
+          // -REFUND rows and zero-priced rows, counts returned units from both
+          // records deduplicated, and costs a return as the FBA fee Amazon keeps
+          // plus min($5, 20% x referral) -- never the refunded price.
+          const asinP = String(msg.asin || "").toUpperCase();
+          const today = new Date();
+          const start = msg.start || new Date(today.getFullYear(), today.getMonth() - 12, today.getDate())
+            .toISOString().slice(0, 10);
+          const end = msg.end || today.toISOString().slice(0, 10);
+          const rows = await restRpc("get_asin_profit", { p_asin: asinP, p_start: start, p_end: end });
+          const row = Array.isArray(rows) ? rows[0] || null : rows;
+          sendResponse({ ok: true, data: row, window: { start, end } });
           break;
         }
         case "INVSPRNT_GET_RETURN_STATS": {

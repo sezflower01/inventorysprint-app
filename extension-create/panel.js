@@ -324,6 +324,7 @@ window.addEventListener("message", (e) => {
       clearSellerCount();
       state.returnStats = null;
       void loadReturnStats(d.asin, "apx-returns", (st) => { state.returnStats = st; recalcRoi(); });
+      void loadAsinHistory(d.asin);
     }
   }
   if (d.type === "SOURCING_SESSION" && d.session) {
@@ -570,6 +571,7 @@ $("apx-fetch").addEventListener("click", async () => {
   renderProduct();
   state.returnStats = null;
   void loadReturnStats(asin, "apx-returns", (d) => { state.returnStats = d; recalcRoi(); });
+  void loadAsinHistory(asin);
   $("apx-form").classList.remove("hidden");
   if (!$("apx-sku").value) $("apx-sku").value = generateSKU();
   if (state.product.price && !$("apx-sellprice").value) $("apx-sellprice").value = Number(state.product.price).toFixed(2);
@@ -1020,6 +1022,86 @@ function clearReturnStats(elId = "apx-returns") {
  * Rate comes from the last 12 months when that window holds enough sales,
  * because a product's return behaviour changes; otherwise all-time.
  */
+/**
+ * WHAT THIS ASIN ACTUALLY EARNED — the Sales Report's figure, not a second one.
+ *
+ * computeAfterReturns above answers a forward question: at the price and cost
+ * you are typing, what does a unit net after returns. This answers the backward
+ * one: over the last twelve months, what did this ASIN really make. Both are
+ * needed at the moment of buying, and sellers were only being shown the first.
+ *
+ * It calls get_asin_profit, the same database function the Sales Report calls,
+ * and does no arithmetic of its own. That is deliberate. Answering "what did
+ * this ASIN earn" by hand produced four different numbers on 2026-10-03 --
+ * -$2,369 (counting -REFUND rows as sales), $119 (subtracting the gross refund
+ * from a profit whose fees were already deducted), $1,370 (correct) and 4.6%
+ * ROI (the $119 figure, which reads as "stop buying this" for a product
+ * returning 53%). A fifth implementation in the extension would drift from the
+ * Sales Report silently, and the seller would have no way to tell which screen
+ * was lying.
+ */
+async function loadAsinHistory(asin) {
+  const el = $("apx-asin-history");
+  if (!el) return;
+  el.className = "apx-status";
+  el.textContent = "Checking what this ASIN earned…";
+  el.title = "";
+  try {
+    const r = await bg("INVSPRNT_GET_ASIN_PROFIT", { asin });
+    if (!r?.ok) throw new Error(r?.error || "lookup failed");
+    renderAsinHistory(r.data, r.window);
+  } catch (e) {
+    // A failed lookup must not read as "this ASIN made nothing".
+    el.className = "apx-status";
+    el.textContent = `Past performance unavailable (${String(e?.message || e).slice(0, 60)})`;
+  }
+}
+
+function renderAsinHistory(row, window) {
+  const el = $("apx-asin-history");
+  if (!el) return;
+  if (!row || !Number(row.units_sold)) {
+    el.textContent = "No sales history for this ASIN in the last 12 months.";
+    el.className = "apx-status";
+    el.title = "";
+    return;
+  }
+  const money = (n) => `${Number(n) < 0 ? "-" : ""}$${Math.abs(Number(n) || 0).toFixed(2)}`;
+  const net = Number(row.net_profit) || 0;
+  const roi = Number(row.net_roi_pct) || 0;
+
+  el.textContent =
+    `Last 12 months: ${row.units_sold} sold · net ${money(net)} · ROI ${roi.toFixed(0)}%` +
+    (Number(row.units_returned) > 0
+      ? ` · ${row.units_returned} returned (${Number(row.return_rate_pct).toFixed(1)}%)`
+      : " · no returns");
+
+  // Red only when it genuinely lost money. A thin margin is amber-worthy but
+  // this panel has two classes, so thin reads as neutral rather than as a
+  // failure -- the number itself is right there to judge.
+  el.className = net <= 0 ? "apx-status err" : "apx-status ok";
+
+  const parts = [
+    `${window?.start || ""} to ${window?.end || ""}`,
+    `revenue ${money(row.revenue)} on ${row.units_sold} units in ${row.orders} orders`,
+    `Amazon fees ${money(row.fees)}${Number(row.label_fees) > 0 ? ` + labels ${money(row.label_fees)}` : ""}`,
+    `cost of goods ${money(row.cogs)} (avg ${money(row.avg_unit_cost)}/unit)`,
+    `gross ${money(row.gross_profit)} = ${money(row.gross_per_unit)}/unit, ${Number(row.gross_roi_pct).toFixed(0)}% ROI`,
+    Number(row.units_returned) > 0
+      ? `${row.units_returned} returns cost ${money(row.return_cost)} — the FBA fee Amazon keeps plus refund admin, not the refunded price`
+      : `no returns`,
+    `net ${money(net)} = ${money(row.net_per_unit)}/unit, ${roi.toFixed(1)}% ROI`,
+    `floor if returns are unsellable: ${money(row.net_if_written_off)}, ${Number(row.roi_if_written_off).toFixed(1)}% ROI`,
+  ];
+  if (Number(row.excluded_zero_rows) > 0) {
+    parts.push(
+      `${row.excluded_zero_rows} order(s) excluded: recorded with no sale price while charged ` +
+      `${money(row.excluded_zero_fees)} of fees. Counting them would understate this ASIN.`,
+    );
+  }
+  el.title = parts.join("\n");
+}
+
 function computeAfterReturns({ price, cog, referralFee, fbaFee, closingFee = 0, stats }) {
   if (!(price > 0) || !(cog > 0) || !stats) return null;
   const sold12 = Number(stats.units_sold_12m) || 0;
