@@ -259,6 +259,20 @@
                  historical result belongs here and not on the new-listing card,
                  which is for creating a listing that has no history yet. -->
             <div class="apx-rep-returns apx-status" id="apx-asin-history"></div>
+            <!-- Sellers on the listing, at the moment of THIS purchase
+                 (2026-10-04). The create-time baseline already exists, but a
+                 reorder is the decision that repeats: a listing created with 3
+                 sellers can have 13 by the second buy, and Amazon keeps no
+                 offer-count history, so the number has to be written down when
+                 the money is committed or it is gone for good. Saved with
+                 reason='purchase', kept apart from manual rechecks, so "how
+                 many were there when I last bought" is answerable. -->
+            <div class="apx-rep-sellers" style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:6px">
+              <div class="apx-k">Sellers on this listing</div>
+              <button id="apx-p-sellers-recheck" class="apx-primary ghost" style="font-size:11px;padding:4px 10px">Recheck</button>
+            </div>
+            <div class="apx-v" id="apx-p-sellers-now">—</div>
+            <div class="apx-status" id="apx-p-sellers-note"></div>
             <div class="apx-rep-meta" id="apx-rep-meta">—</div>
             <div class="apx-rep-status" id="apx-rep-status"></div>
           </div>

@@ -100,7 +100,16 @@ Deno.serve(async (req) => {
     const asin = String(body?.asin || '').toUpperCase().trim();
     const marketplaceCode = String(body?.marketplace || 'US').toUpperCase().trim();
     const createdListingId: string | null = body?.createdListingId || body?.created_listing_id || null;
-    const reason = body?.reason === 'create' ? 'create' : 'recheck';
+    // 'purchase' is a first-class reason, not a recheck. A reorder commits money
+    // against whatever competition exists that day, and Amazon keeps no
+    // offer-count history, so the number has to be written down at the moment
+    // of the buy or it is gone. Kept distinct from 'recheck' so "sellers at my
+    // last purchase" is answerable without guessing which manual check
+    // happened to sit next to a buy.
+    const rawReason = String(body?.reason || '');
+    const reason = rawReason === 'create' ? 'create'
+                 : rawReason === 'purchase' ? 'purchase'
+                 : 'recheck';
 
     if (!/^[A-Z0-9]{10}$/.test(asin)) return json({ error: 'Invalid ASIN' }, 400);
     const meta = MARKETPLACE_META[marketplaceCode];
@@ -108,7 +117,7 @@ Deno.serve(async (req) => {
 
     // The baseline and the last check come from our own tables, so they cost
     // nothing and are returned even if Amazon refuses below.
-    const [{ data: baselineRow }, { data: lastRows }] = await Promise.all([
+    const [{ data: baselineRow }, { data: lastRows }, { data: lastPurchaseRows }] = await Promise.all([
       createdListingId
         ? supabase.from('created_listings')
             .select('sellers_at_create, sellers_fba_at_create, sellers_fbm_at_create, sellers_counted_at, date_created')
@@ -121,6 +130,14 @@ Deno.serve(async (req) => {
       supabase.from('listing_seller_counts')
         .select('total_offers, fba_offers, fbm_offers, checked_at, reason')
         .eq('user_id', userId).eq('asin', asin).eq('marketplace', marketplaceCode)
+        .order('checked_at', { ascending: false }).limit(1),
+      // The last time a PURCHASE was recorded against this listing. This is the
+      // comparison the seller asked for -- not "last time I looked", which is
+      // what `previous` gives, but "how many were there when I last bought".
+      supabase.from('listing_seller_counts')
+        .select('total_offers, fba_offers, fbm_offers, checked_at')
+        .eq('user_id', userId).eq('asin', asin).eq('marketplace', marketplaceCode)
+        .eq('reason', 'purchase')
         .order('checked_at', { ascending: false }).limit(1),
     ]);
 
@@ -198,6 +215,9 @@ Deno.serve(async (req) => {
         ? { sellers_at_create: counts.total, sellers_fba_at_create: counts.fba, sellers_fbm_at_create: counts.fbm, sellers_counted_at: new Date().toISOString() }
         : baselineRow ?? null,
       previous: lastRows?.[0] ?? null,
+      // Returned BEFORE this call's own row is considered, so a purchase check
+      // compares against the PREVIOUS purchase rather than against itself.
+      lastPurchase: lastPurchaseRows?.[0] ?? null,
     });
   } catch (e) {
     console.error('[listing-seller-count]', (e as Error).message);

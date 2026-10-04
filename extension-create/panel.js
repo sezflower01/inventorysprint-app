@@ -1058,6 +1058,71 @@ function clearReturnStats(elId = "apx-returns") {
  * Sales Report silently, and the seller would have no way to tell which screen
  * was lying.
  */
+/**
+ * Seller count for the Add Purchase panel.
+ *
+ * Deliberately NOT the same renderer as the new-listing card: that one
+ * compares against sellers_at_create, the baseline written once when the
+ * listing was first saved. The question here is different -- "how many were on
+ * it when I last BOUGHT" -- because that is the comparison that tells a
+ * reorder whether competition has arrived since the last time money went in.
+ *
+ * Costs one getItemOffers call, from the same `pricing_api` bucket the repricer
+ * uses, so it runs on Find, on an explicit Recheck, and once when a purchase is
+ * saved. Never on a timer.
+ */
+async function loadPurchaseSellers(asin, marketplace, { reason = 'recheck' } = {}) {
+  const nowEl = $("apx-p-sellers-now");
+  const noteEl = $("apx-p-sellers-note");
+  if (!nowEl) return null;
+  nowEl.textContent = "…";
+  if (noteEl) { noteEl.textContent = "Counting offers on Amazon…"; noteEl.className = "apx-status"; }
+  try {
+    const data = await countSellers({ asin, marketplace, reason });
+    renderPurchaseSellers(data);
+    return data;
+  } catch (e) {
+    nowEl.textContent = "—";
+    if (noteEl) {
+      // A failed count must not read as "no competition".
+      noteEl.textContent = `Seller count unavailable (${String(e?.message || e).slice(0, 60)})`;
+      noteEl.className = "apx-status";
+    }
+    return null;
+  }
+}
+
+function renderPurchaseSellers(data) {
+  const nowEl = $("apx-p-sellers-now");
+  const noteEl = $("apx-p-sellers-note");
+  if (!nowEl || !data) return;
+  const split = (t, f, m) => (f == null && m == null) ? `${t}` : `${t} (${f ?? 0} FBA, ${m ?? 0} FBM)`;
+  nowEl.textContent = split(data.total, data.fba, data.fbm);
+
+  const parts = [];
+  const lp = data.lastPurchase;
+  if (lp && lp.total_offers != null) {
+    const when = new Date(lp.checked_at).toLocaleDateString();
+    const delta = Number(data.total) - Number(lp.total_offers);
+    const move = delta === 0 ? "unchanged since" : delta > 0 ? `+${delta} since` : `${delta} since`;
+    parts.push(`Last added purchase: ${split(lp.total_offers, lp.fba_offers, lp.fbm_offers)} on ${when} — ${move} then`);
+  } else {
+    parts.push("No previous purchase recorded for this listing — this buy becomes the baseline");
+  }
+  const b = data.baseline;
+  if (b && b.sellers_at_create != null) {
+    parts.push(`At listing creation: ${split(b.sellers_at_create, b.sellers_fba_at_create, b.sellers_fbm_at_create)}`);
+  }
+  if (data.lowestPrice != null) parts.push(`lowest $${Number(data.lowestPrice).toFixed(2)}`);
+  if (data.buyboxPrice != null) parts.push(`Buy Box $${Number(data.buyboxPrice).toFixed(2)}`);
+
+  if (noteEl) {
+    noteEl.textContent = parts[0] || "";
+    noteEl.className = "apx-status";
+    noteEl.title = parts.join("\n");
+  }
+}
+
 async function loadAsinHistory(asin) {
   const el = $("apx-asin-history");
   if (!el) return;
@@ -1202,6 +1267,29 @@ function renderSellerCount(data) {
   // More competitors than when you bought is the case worth noticing.
   noteEl.className = diff > 0 ? "apx-status err" : "apx-status ok";
 }
+
+// Recheck on the Add Purchase panel. Separate listener because it renders the
+// purchase comparison ("sellers at my last purchase") rather than the
+// new-listing card's create-time baseline, and because it must use the ASIN the
+// purchase panel is looking at, which can differ from the new-listing one.
+$("apx-p-sellers-recheck")?.addEventListener("click", async () => {
+  const btn = $("apx-p-sellers-recheck");
+  const noteEl = $("apx-p-sellers-note");
+  const asin = purchase?.source?.asin || state.asin;
+  if (!asin) {
+    if (noteEl) { noteEl.textContent = "Find a listing first."; noteEl.className = "apx-status err"; }
+    return;
+  }
+  btn.disabled = true;
+  const prev = btn.textContent;
+  btn.textContent = "Checking…";
+  try {
+    await loadPurchaseSellers(asin, state.selectedMarketplace || "US", { reason: 'recheck' });
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
+});
 
 $("apx-sellers-recheck")?.addEventListener("click", async () => {
   const btn = $("apx-sellers-recheck");
@@ -1470,6 +1558,7 @@ function renderReplenish(d, asin = null) {
   if (forAsin) {
     // The historical result goes where the money is committed: Add Purchase.
     void loadAsinHistory(forAsin);
+    void loadPurchaseSellers(forAsin, state.selectedMarketplace || "US");
     void loadReturnStats(forAsin, "apx-p-returns", async (stats) => {
       // This panel knows the price and the COG but not the fees, so read the
       // fee cache the order sync and repricer already maintain. Free, and the
@@ -1745,6 +1834,10 @@ $("apx-p-add").addEventListener("click", async () => {
       fbaBlockReason: elig?.eligible === false ? (elig.fba_block_reason || "manufacturer_barcode_or_invalid_fnsku") : null,
     });
     if (!r?.ok) throw new Error(r?.error || "Insert failed");
+    // Write down the competition at the moment the money was committed. Fired
+    // after the insert succeeded and deliberately not awaited: a failed or slow
+    // seller count must never make a saved purchase look unsaved.
+    void loadPurchaseSellers(purchase.source.asin, state.selectedMarketplace || "US", { reason: 'purchase' });
     setStatus("apx-p-action-status", elig?.eligible === false
       ? `FBM-only purchase saved — ${units} units @ $${(total/units).toFixed(2)} COG ✓`
       : `Purchase added — ${units} units @ $${(total/units).toFixed(2)} COG ✓`, "ok");
