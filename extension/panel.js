@@ -1518,10 +1518,28 @@
        });
     });
 
+    /**
+     * The per-call budget governs, and an invoke is NEVER retried behind the
+     * scenes.
+     *
+     * bg() defaults to an 8 s timeout with one retry, which is right for a
+     * quick message to the worker and wrong for an edge function that calls
+     * Amazon. mobile-scan-price-history now waits up to 12 s for a free
+     * pricing-API slot before it even starts — a change made on 2026-10-02 so
+     * an interactive panel stops losing its place to the repricer — so an
+     * 8 s ceiling guarantees the panel gives up on a call that was going to
+     * succeed, reports "bg_timeout", and then bg()'s retry fires a SECOND
+     * invoke that spends another SP-API slot on a request nobody is waiting
+     * for any more.
+     *
+     * So: pass the caller's ms through as the timeout, and retries: 0. If the
+     * worker is genuinely unreachable the message fails immediately anyway
+     * (chrome.runtime.lastError), which is what the retry was there for.
+     */
     const safeInvoke = (fn, body, ms = 25000) => {
       delete lastInvokeError[fn];
       return withTimeout(
-        bg("INVSPRNT_INVOKE", { fn, body }).then(r => r?.data ?? null),
+        bg("INVSPRNT_INVOKE", { fn, body }, { timeoutMs: ms, retries: 0 }).then(r => r?.data ?? null),
         ms,
         fn,
       );

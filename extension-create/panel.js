@@ -224,18 +224,38 @@ const extensionUpdatedResult = () => {
   return { ok: false, error: EXTENSION_UPDATED_MSG, code: "EXTENSION_UPDATED" };
 };
 
-const bg = (type, extra = {}, retries = 1) => new Promise((res) => {
+/**
+ * A missing reply must become an error, not an eternal spinner.
+ *
+ * This had no timeout at all: if the worker never called sendResponse the
+ * promise never settled and the panel sat on "loading" forever. The router has
+ * a catch-all and a default case, so a reachable worker always answers -- but
+ * an MV3 service worker can be terminated mid-await, and then nothing answers
+ * and nothing says so. Observed 2026-10-04 as the create panel stuck loading
+ * while the analyser, which does have a timeout, reported bg_timeout.
+ *
+ * 20 s, because the slowest legitimate handler here calls Amazon through a
+ * shared rate gate. The caller sees {ok:false} and can say why.
+ */
+const bg = (type, extra = {}, retries = 1, timeoutMs = 20000) => new Promise((res) => {
   if (!extensionAlive()) { res(extensionUpdatedResult()); return; }
+  let settled = false;
+  const finish = (v) => { if (!settled) { settled = true; res(v); } };
+  const guard = setTimeout(() => {
+    console.log(`[InvSPRNT] bg(${type}) timed out after ${timeoutMs}ms`);
+    finish({ ok: false, error: `timeout after ${Math.round(timeoutMs / 1000)}s` });
+  }, timeoutMs);
+  const res2 = (v) => { clearTimeout(guard); finish(v); };
   const attempt = (left) => {
     try {
       chrome.runtime.sendMessage({ type, ...extra }, (r) => {
         const lastError = chrome.runtime?.lastError;
         if (lastError) {
-          if (isContextInvalidated(lastError)) return res(extensionUpdatedResult());
+          if (isContextInvalidated(lastError)) return res2(extensionUpdatedResult());
           if (left > 0) return attempt(left - 1);
           const msg = lastError.message || "runtime_error";
           console.log(`[InvSPRNT] bg(${type}) failed: ${msg}`);
-          return res({ ok: false, error: msg });
+          return res2({ ok: false, error: msg });
         }
         if (r && r.ok === false) {
           const err = String(r.error || "");
@@ -243,15 +263,15 @@ const bg = (type, extra = {}, retries = 1) => new Promise((res) => {
             setTimeout(() => { try { checkAuth(); } catch {} }, 0);
           }
         }
-        res(r);
+        res2(r);
       });
     } catch (e) {
       // Context invalidated cannot be retried back to life: say so plainly.
-      if (isContextInvalidated(e)) return res(extensionUpdatedResult());
+      if (isContextInvalidated(e)) return res2(extensionUpdatedResult());
       if (left > 0) return attempt(left - 1);
       const msg = String(e?.message || e);
       console.log(`[InvSPRNT] bg(${type}) threw: ${msg}`);
-      res({ ok: false, error: msg });
+      res2({ ok: false, error: msg });
     }
   };
   attempt(retries);

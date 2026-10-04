@@ -29,11 +29,20 @@ async function isSignedOutExplicit() {
 // Auth-resilience constants. When Supabase /auth is slow we want extension
 // panels to stay responsive instead of hanging on a 30-45s gotrue timeout.
 const REFRESH_TIMEOUT_MS = 7000;
-// Second attempt, given longer. The failure this exists for is a gotrue
-// slow-down of a second or two, so one retry with a wider window clears most of
-// them -- and the panel used to claim it was retrying when nothing was.
-const REFRESH_RETRY_TIMEOUT_MS = 12000;
-const REFRESH_RETRY_DELAY_MS = 400;
+// A TOTAL budget for the whole refresh, not a budget per attempt.
+//
+// The retry added on 2026-10-02 used 7 s then 12 s, so a slow gotrue could keep
+// the worker busy for 19.4 s. The panels give up on a worker message long
+// before that, so the retry that was meant to fix "nothing retries" instead
+// turned a fast, honest failure into a timeout -- and the panel's own retry
+// then queued a second request behind the same in-flight refresh. A fix that
+// outlives its caller's patience is not a fix.
+//
+// 7 s total: a first attempt of up to 4 s, then whatever is left. Still two
+// real attempts, still inside what every caller will wait for.
+const REFRESH_TOTAL_BUDGET_MS = 7000;
+const REFRESH_FIRST_ATTEMPT_MS = 4000;
+const REFRESH_RETRY_DELAY_MS = 250;
 const REFRESH_ATTEMPTS = 2;
 // How long a previously-valid access token is still considered usable as a
 // "last-known-good" fallback after its nominal expiry, when the refresh
@@ -72,9 +81,16 @@ async function refreshToken({ allowStaleFallback = true } = {}) {
     // token Supabase has actually revoked is pointless.
     let res = null;
     let lastKind = "";
+    const refreshStartedAt = Date.now();
     for (let attempt = 1; attempt <= REFRESH_ATTEMPTS; attempt++) {
+      // Out of budget: stop rather than start an attempt the caller will not
+      // wait for.
+      if (attempt > 1 && Date.now() - refreshStartedAt >= REFRESH_TOTAL_BUDGET_MS) break;
       const ctrl = new AbortController();
-      const budget = attempt === 1 ? REFRESH_TIMEOUT_MS : REFRESH_RETRY_TIMEOUT_MS;
+      // Each attempt gets what remains of the shared budget.
+      const spent = Date.now() - refreshStartedAt;
+      const remaining = Math.max(500, REFRESH_TOTAL_BUDGET_MS - spent);
+      const budget = attempt === 1 ? Math.min(REFRESH_FIRST_ATTEMPT_MS, remaining) : remaining;
       const timer = setTimeout(() => ctrl.abort("refresh_timeout"), budget);
       let thisRes = null;
       try {
