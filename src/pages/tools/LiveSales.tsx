@@ -670,6 +670,37 @@ function resolveTimeRange(timeRange: TimeRangeKey): { rangeStart: string; rangeE
   };
 }
 
+/**
+ * "Updated Xs ago" — and why it matters more than the cadence does.
+ *
+ * The orders are never late: cron 190 syncs every 5 minutes around the clock
+ * and wrote rows in every hour overnight with nobody on any page. What could
+ * not be told from the screen was whether the PAGE was still refreshing, so a
+ * one-minute cadence on This Week read as "stuck" and raised the same question
+ * three times. A visible timestamp answers it for free, from a fetch that has
+ * already happened.
+ *
+ * Ticks once a second and only while the tab is visible, so a backgrounded page
+ * costs nothing — the phone freezes it regardless.
+ */
+function useFreshnessLabel(lastUpdatedAt: number | null): string {
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!lastUpdatedAt) return;
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") force((n) => n + 1);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [lastUpdatedAt]);
+  if (!lastUpdatedAt) return "";
+  const secs = Math.max(0, Math.round((Date.now() - lastUpdatedAt) / 1000));
+  if (secs < 5) return "updated just now";
+  if (secs < 60) return `updated ${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `updated ${mins}m ago`;
+  return `updated ${Math.floor(mins / 60)}h ago`;
+}
+
 const LiveSales = ({
   title = "InventorySprint Repricer in Action",
   onPeriodChange,
@@ -746,6 +777,8 @@ const LiveSales = ({
   // superseded an older one). Lets the background poll skip a tick if the
   // previous fetch hasn't finished yet, instead of overlapping.
   const fetchInFlightRef = useRef(false);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
+  const freshness = useFreshnessLabel(lastUpdatedAt);
   const [revalidating, setRevalidating] = useState(false);
   // fetchSales can take a while (multiple paginated queries + heavy
   // per-row COGS/fee computation), so only reveal a skeleton if a
@@ -1903,6 +1936,8 @@ const LiveSales = ({
         setIsSwitchingRange(false);
       }
       fetchInFlightRef.current = false;
+      // See useFreshnessLabel: stamped on landing so the age shown is honest.
+      setLastUpdatedAt(Date.now());
     }
   }, [user?.id, selectedMarketplace, fxRates, isAmazonConnected, timeRange, todayRevenueStatus, chartMode, todaySummary.revenue]);
 
@@ -1941,7 +1976,9 @@ const LiveSales = ({
   // above on the same cadence. Paused while the tab is backgrounded.
   useEffect(() => {
     if (!user?.id) return;
-    const intervalMs = FAST_POLL_RANGES.includes(timeRange) ? 5000 : 60000;
+    // 20 s on the heavier ranges, for the same reason as the mobile page: a
+    // minute between updates is indistinguishable from a frozen screen.
+    const intervalMs = FAST_POLL_RANGES.includes(timeRange) ? 5000 : 20000;
     const tick = () => {
       if (document.visibilityState === "visible" && !fetchInFlightRef.current) {
         void fetchSales({ silent: true });
@@ -1978,6 +2015,12 @@ const LiveSales = ({
               <ShoppingCart className="h-6 w-6 text-emerald-500" />
             </div>
             <h1 className="text-2xl font-bold text-foreground leading-tight">{title}</h1>
+            {/* Proof the page is still refreshing. See useFreshnessLabel: the orders
+                are synced server-side every 5 minutes, so the only thing in doubt was
+                whether the SCREEN was alive. */}
+            {freshness && (
+              <span className="text-xs text-muted-foreground" title="The page re-reads the database on a timer; orders themselves sync server-side every 5 minutes.">{freshness}</span>
+            )}
           </div>
         </div>
 

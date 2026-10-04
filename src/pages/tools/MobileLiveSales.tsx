@@ -689,6 +689,37 @@ const RecordDetail = ({
 
 /* ─────────── component ─────────── */
 
+/**
+ * "Updated Xs ago" — and why it matters more than the cadence does.
+ *
+ * The orders are never late: cron 190 syncs every 5 minutes around the clock
+ * and wrote rows in every hour overnight with nobody on any page. What could
+ * not be told from the screen was whether the PAGE was still refreshing, so a
+ * one-minute cadence on This Week read as "stuck" and raised the same question
+ * three times. A visible timestamp answers it for free, from a fetch that has
+ * already happened.
+ *
+ * Ticks once a second and only while the tab is visible, so a backgrounded page
+ * costs nothing — the phone freezes it regardless.
+ */
+function useFreshnessLabel(lastUpdatedAt: number | null): string {
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!lastUpdatedAt) return;
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") force((n) => n + 1);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [lastUpdatedAt]);
+  if (!lastUpdatedAt) return "";
+  const secs = Math.max(0, Math.round((Date.now() - lastUpdatedAt) / 1000));
+  if (secs < 5) return "updated just now";
+  if (secs < 60) return `updated ${secs}s ago`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `updated ${mins}m ago`;
+  return `updated ${Math.floor(mins / 60)}h ago`;
+}
+
 const MobileLiveSales = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -827,6 +858,9 @@ const MobileLiveSales = () => {
   const fetchStartedAtRef = useRef(0);
   /** When the page last re-read on being shown again; throttles that re-read. */
   const lastShownReadRef = useRef(0);
+  // Drawn on screen as "updated Xs ago" so the seller can see the page is alive.
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
+  const freshness = useFreshnessLabel(lastUpdatedAt);
 
   /**
    * A read older than this is assumed lost, not slow. The heaviest period
@@ -2114,6 +2148,9 @@ const MobileLiveSales = () => {
         setRevalidating(false);
       }
       fetchInFlightRef.current = false;
+      // Stamped when the read LANDS, not when it starts: a slow read should
+      // report its true age rather than looking fresh the moment it begins.
+      setLastUpdatedAt(Date.now());
     }
   }, [user?.id, isAmazonConnected, fxRates, period, compareLastYear, cacheKeyForPeriod, salesMode, marketplaceFilter, fetchAdjustmentTotalsForRange, fetchPromotionTotalsForRange, fetchPendingEstTotalsForRange]);
 
@@ -2168,7 +2205,12 @@ const MobileLiveSales = () => {
   // intent that removed the old periodic sync entirely.
   useEffect(() => {
     if (!user?.id) return;
-    const intervalMs = FAST_POLL_PERIODS.includes(period) ? 5000 : 60000;
+    // 20 s, not 60. The heavier periods (This Week, MTD, Forecast) were given a
+    // minute because MTD/YTD can be slow on a cold cache -- but a minute between
+    // updates is indistinguishable from a frozen page, which is exactly how it
+    // was read. 20 s keeps the screen visibly alive and still costs a third of
+    // what the fast periods do.
+    const intervalMs = FAST_POLL_PERIODS.includes(period) ? 5000 : 20000;
     const tick = () => {
       if (document.visibilityState === "visible" && !fetchIsBlocking()) void fetchToday({ silent: true });
     };
@@ -2194,7 +2236,10 @@ const MobileLiveSales = () => {
     if (!user?.id) return;
     const onShow = () => {
       if (document.visibilityState !== "visible" || fetchIsBlocking()) return;
-      if (Date.now() - lastShownReadRef.current < 10_000) return;
+      // 3 s, not 10. The debounce exists so flicking between apps cannot stack
+      // reads, and 3 s is enough for that -- 10 s meant a quick switch back came
+      // home to stale totals and no visible reason why.
+      if (Date.now() - lastShownReadRef.current < 3_000) return;
       lastShownReadRef.current = Date.now();
       void fetchToday({ silent: true });
     };
@@ -2322,7 +2367,12 @@ const MobileLiveSales = () => {
             <span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75 animate-ping" />
             <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
           </span>
-          <h1 className="text-base font-semibold truncate">Live Sales</h1>
+          <div className="min-w-0">
+            <h1 className="text-base font-semibold truncate">Live Sales</h1>
+            {/* Phones freeze a backgrounded page, so "is this live?" is a fair
+                question. This answers it without another query. */}
+            {freshness && <div className="text-[10px] text-muted-foreground leading-none">{freshness}</div>}
+          </div>
         </div>
         <Button
           variant="ghost"
