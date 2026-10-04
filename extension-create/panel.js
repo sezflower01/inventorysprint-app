@@ -344,7 +344,6 @@ window.addEventListener("message", (e) => {
       clearSellerCount();
       state.returnStats = null;
       void loadReturnStats(d.asin, "apx-returns", (st) => { state.returnStats = st; recalcRoi(); });
-      void loadAsinHistory(d.asin);
     }
   }
   if (d.type === "SOURCING_SESSION" && d.session) {
@@ -591,7 +590,6 @@ $("apx-fetch").addEventListener("click", async () => {
   renderProduct();
   state.returnStats = null;
   void loadReturnStats(asin, "apx-returns", (d) => { state.returnStats = d; recalcRoi(); });
-  void loadAsinHistory(asin);
   $("apx-form").classList.remove("hidden");
   if (!$("apx-sku").value) $("apx-sku").value = generateSKU();
   if (state.product.price && !$("apx-sellprice").value) $("apx-sellprice").value = Number(state.product.price).toFixed(2);
@@ -1470,6 +1468,8 @@ function renderReplenish(d, asin = null) {
   // break the forecast that is already on screen.
   const forAsin = asin || d?.asin;
   if (forAsin) {
+    // The historical result goes where the money is committed: Add Purchase.
+    void loadAsinHistory(forAsin);
     void loadReturnStats(forAsin, "apx-p-returns", async (stats) => {
       // This panel knows the price and the COG but not the fees, so read the
       // fee cache the order sync and repricer already maintain. Free, and the

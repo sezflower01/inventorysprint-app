@@ -119,7 +119,6 @@
             </div>
             <!-- Profit/ROI discounted by this product's return rate (2026-09-27). -->
             <div class="apx-status" id="apx-after-returns" style="margin-top:4px"></div>
-            <div class="apx-status" id="apx-asin-history" style="margin-top:4px"></div>
           </div>
 
           <!-- Sellers on the listing (2026-09-24). Recorded when the listing is
@@ -255,6 +254,11 @@
                  panel this seller buys from -- Find → Add Purchase is. -->
             <div class="apx-rep-returns apx-status" id="apx-p-returns"></div>
             <div class="apx-rep-returns apx-status" id="apx-p-after"></div>
+            <!-- What the ASIN actually EARNED, on the panel the seller buys
+                 from. Add Purchase is where money is committed, so the
+                 historical result belongs here and not on the new-listing card,
+                 which is for creating a listing that has no history yet. -->
+            <div class="apx-rep-returns apx-status" id="apx-asin-history"></div>
             <div class="apx-rep-meta" id="apx-rep-meta">—</div>
             <div class="apx-rep-status" id="apx-rep-status"></div>
           </div>
