@@ -351,6 +351,44 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           await clearSessionExplicit("web_app_logout");
           sendResponse({ ok: true });
           break;
+        case "INVSPRNT_PREFETCH_ASIN": {
+          // Warm the cacheable half of a panel load while the seller is still
+          // reading the Amazon page. Answers immediately and does the work
+          // afterwards: the content script is not waiting, and a prefetch that
+          // blocked the message port would be worse than no prefetch.
+          //
+          // Cooldown is per (asin, marketplace) and generous, because browsing
+          // revisits the same listing constantly and each warm call still costs
+          // an SP-API request. 15 minutes is well inside the 6-24 h server-side
+          // cache those two endpoints keep, so a second visit still lands warm.
+          const pfAsin = String(msg.asin || "").toUpperCase();
+          const pfMarket = String(msg.marketplace || "US").toUpperCase();
+          sendResponse({ ok: true, queued: !!pfAsin });
+          if (!pfAsin) break;
+          (async () => {
+            const key = `prefetch:${pfMarket}:${pfAsin}`;
+            try {
+              const got = await chrome.storage.local.get(key);
+              const last = Number(got?.[key] || 0);
+              if (Date.now() - last < 15 * 60 * 1000) return;
+              await chrome.storage.local.set({ [key]: Date.now() });
+            } catch (_) { return; }  // no storage, no cooldown, no prefetch
+
+            // Only endpoints whose answers are cached server-side for hours.
+            // The price history is excluded on purpose -- see content.js.
+            for (const fn of ["check-fba-listing-eligibility", "asin-dimensions"]) {
+              try {
+                await invoke(fn, fn === "asin-dimensions"
+                  ? { asin: pfAsin, marketplace: pfMarket }
+                  : { asin: pfAsin, marketplace: pfMarket, condition: "new_new" });
+              } catch (e) {
+                console.debug(`[InvSPRNT] prefetch ${fn} skipped:`, e?.message || e);
+              }
+            }
+            console.log(`[InvSPRNT] prefetched ${pfAsin} (${pfMarket})`);
+          })();
+          break;
+        }
         case "INVSPRNT_INVOKE": {
           const data = await invoke(msg.fn, msg.body);
           sendResponse({ ok: true, data });

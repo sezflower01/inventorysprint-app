@@ -524,3 +524,9 @@ verify_jwt = false
 # credential METADATA only: client-id last4, value lengths and SHA-256 prefixes.
 # No secret value is ever returned.
 verify_jwt = false
+
+[functions.lwa-cache-bench]
+# Internal-only benchmark, called from SQL with x-internal-secret and no
+# Authorization header, so verify_jwt must be false or the gateway rejects it
+# before the function runs.
+verify_jwt = false

@@ -1,3 +1,6 @@
+// This function exchanges a token PER MARKETPLACE -- up to three on a single
+// request -- so it gains the most from a cache that outlives the isolate.
+import { getCachedLwaTokenVerbose } from '../_shared/lwa-token-cache.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 import { checkModuleAccess } from "../_shared/module-access-guard.ts";
@@ -171,6 +174,48 @@ async function getLwaAccessToken(region: 'NA' | 'EU' = 'NA', refreshTokenOverrid
   if (cached && cached.expiresAt > Date.now()) {
     console.log(`Using cached ${region} access token`);
     return cached.token;
+  }
+
+  // The in-memory cache above only helps a WARM isolate of THIS function. The
+  // shared table helps every function and every isolate, which is the point: a
+  // panel load used to pay 175-520 ms per exchange, five to seven times.
+  //
+  // Wrapped in its own try/catch and falling through on any failure -- a cache
+  // must not be able to break the call it was added to speed up.
+  try {
+    const cacheClient = createClient(
+      Deno.env.get('SUPABASE_URL')!,
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
+    );
+    const shared = await getCachedLwaTokenVerbose(cacheClient, {
+      clientId,
+      refreshToken,
+      region,
+      exchange: async () => {
+        const r = await fetchWithRetry('https://api.amazon.com/auth/o2/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'refresh_token',
+            refresh_token: refreshToken,
+            client_id: clientId,
+            client_secret: clientSecret,
+          }),
+        });
+        if (!r.ok) {
+          const t = await r.text();
+          throw new Error(`LWA token error for ${region}: ${r.status} ${t}`);
+        }
+        return await r.json();
+      },
+    });
+    // Mirror into the in-memory map so repeated calls inside this one request
+    // do not even touch the database.
+    tokenCache[cacheKey] = { token: shared.token, expiresAt: Date.now() + 50 * 60 * 1000 };
+    console.log(`[LWA] ${region} token ${shared.fromCache ? 'from shared cache' : 'exchanged'} in ${shared.ms}ms`);
+    return shared.token;
+  } catch (e) {
+    console.warn(`[LWA] shared cache path failed for ${region}, exchanging directly:`, (e as Error).message);
   }
 
   console.log(`Fetching new ${region} access token...`);

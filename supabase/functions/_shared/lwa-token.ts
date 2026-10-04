@@ -11,6 +11,11 @@
 // This matters because older marketplace authorizations may have been minted under the
 // SPAPI_* app while newer code preferred LWA_* or user-stored app credentials.
 
+// Cross-function token cache. Without it each isolate re-exchanges a token
+// Amazon already issued -- ~175 ms warm, 520 ms on a cold TLS handshake, and
+// an analyser panel load did five to seven of them.
+import { getCachedLwaTokenVerbose } from './lwa-token-cache.ts';
+
 /**
  * EVERY MEMO IN THIS FILE EXPIRES. It did not, and that turned a 10-minute
  * credential mistake into a 90-minute outage on 2026-10-02.
@@ -136,6 +141,43 @@ export async function exchangeLwaToken(
   let lastErrorText = '';
   for (const candidate of ordered) {
     attemptedSources.push(candidate.source);
+
+    // Ask the shared cache first, for THIS candidate's exact (client, refresh)
+    // pair. Keyed per pair on purpose: two marketplaces with different refresh
+    // tokens, or two Develop-Apps clients, must never hand each other a token.
+    //
+    // Only attempted when a supabase client was passed. Callers that do not
+    // supply one keep the previous behaviour exactly, so adopting the cache is
+    // opt-in per call site rather than a flag day.
+    if (supabase) {
+      try {
+        const cached = await getCachedLwaTokenVerbose(supabase, {
+          clientId: candidate.id,
+          refreshToken: candidate.refresh,
+          userId: userId ?? null,
+          exchange: async () => {
+            const r = await doFetch(candidate.refresh, candidate.id, candidate.secret);
+            if (!r.ok) throw new Error(await r.text().catch(() => `LWA ${r.status}`));
+            return await r.json();
+          },
+        });
+        _winningSource.set(memoKey, { source: candidate.source, at: Date.now() });
+        _deadSources.get(memoKey)?.delete(candidate.source);
+        return cached.token;
+      } catch (e) {
+        // Same decision the uncached path makes below: a rejected credential
+        // means try the next source, anything else means stop rather than mask
+        // a 429 or a 5xx by shopping around.
+        lastErrorText = String((e as Error).message || e);
+        if (lastErrorText.includes('unauthorized_client') || lastErrorText.includes('invalid_client')) {
+          if (!_deadSources.has(memoKey)) _deadSources.set(memoKey, new Map());
+          _deadSources.get(memoKey)!.set(candidate.source, Date.now());
+          continue;
+        }
+        break;
+      }
+    }
+
     const resp = await doFetch(candidate.refresh, candidate.id, candidate.secret);
     if (resp.ok) {
       // Remember the winner so future calls skip the failing source silently.

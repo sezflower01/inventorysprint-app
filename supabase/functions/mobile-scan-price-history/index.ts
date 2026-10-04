@@ -484,9 +484,25 @@ async function fetchLiveSpApiOffers(
   // seconds before. An interactive panel request is queueing behind that, and
   // the 25 s client cap in the panel expires first, which is what the seller
   // sees as "Live retrieval failed (timeout or SP-API throttled)".
-  const gotPricingSlot = await waitForApiToken(admin, 'pricing_api', { maxWaitMs: 12000 });
+  // TWO SECONDS, not twelve.
+  //
+  // The 12 s wait added on 2026-10-02 fixed the right problem the wrong way. It
+  // stopped the panel losing its slot to the repricer, but it did so by making
+  // a human wait up to twelve seconds for a number -- and it pushed the call
+  // past the panel's own message timeout, which produced "bg_timeout" and a
+  // retry that spent a second slot on a request nobody was waiting for.
+  //
+  // A person looking at a screen will not wait twelve seconds for a price. Two
+  // is about the limit, and after that stale offers labelled as stale are worth
+  // more than a correct number that arrives too late to be read. The caller's
+  // catch already falls back to Keepa and then to the cached snapshot, and the
+  // panel already renders degraded_reason beside the seller count -- so the
+  // honest outcome is available for free; it just was not being chosen.
+  const gotPricingSlot = await waitForApiToken(admin, 'pricing_api', { maxWaitMs: 2000 });
   if (!gotPricingSlot) {
-    throw new Error('Amazon pricing quota busy (the repricer is using it) — retry in a few seconds');
+    // Marked so the degrade path can name the real cause rather than implying
+    // Amazon throttled us. It did not: our own repricer holds the bucket.
+    throw new Error('PRICING_SLOT_BUSY: Amazon pricing quota is busy with the repricer — showing the last known offers');
   }
   const response = await signedSpApiFetch(url, accessToken);
   const data = await response.json().catch(() => ({}));

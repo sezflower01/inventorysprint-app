@@ -226,6 +226,32 @@
     lastSent = key;
     if (!panelState.hidden) mountPanel();
     postToPanel({ type: "ASIN_CHANGED", asin, marketplace, url: location.href });
+
+    /**
+     * Warm the server-side caches as soon as the ASIN is known, rather than
+     * when the panel opens. The page has already rendered by the time this
+     * runs, so the work happens during the seconds the seller spends reading
+     * the listing instead of the seconds they spend staring at a spinner.
+     *
+     * DELIBERATELY NOT the price history. That call spends Keepa tokens and a
+     * pricing-API slot from buckets the repricer shares, and prefetching it on
+     * every Amazon product page the seller merely BROWSES would starve live
+     * repricing to speed up a panel that might never be opened. Only the two
+     * calls whose results are cached server-side for hours and cost nothing to
+     * repeat are warmed: FBA eligibility (cached 6-24 h) and dimensions.
+     *
+     * Fire-and-forget: a prefetch that fails, is throttled, or is ignored must
+     * leave the page exactly as it was.
+     */
+    if (asin) {
+      try {
+        chrome.runtime.sendMessage({ type: "INVSPRNT_PREFETCH_ASIN", asin, marketplace }, () => {
+          // Swallow chrome.runtime.lastError: the worker may be asleep, and a
+          // prefetch is never worth surfacing an error for.
+          void chrome.runtime.lastError;
+        });
+      } catch (_) { /* context invalidated — nothing to warm into */ }
+    }
   }
 
   _push = history.pushState; _replace = history.replaceState;
