@@ -655,25 +655,73 @@ function renderProduct() {
 ["apx-totalcost", "apx-units", "apx-sellprice"].forEach((id) =>
   $(id).addEventListener("input", recalcRoi)
 );
+/**
+ * Fees at the price the seller is ACTUALLY going to charge.
+ *
+ * fetch-listing-snapshot asks Amazon's Product Fees API to estimate fees at
+ * `price` -- the current market/Buy Box price it just read -- so the
+ * `referralFee` it returns is a percentage of THAT price, not of whatever the
+ * seller types into Sale price. Referral is a percentage of the sale, so using
+ * the estimate raw understates fees by the category rate on every dollar the
+ * planned price sits above the current market price. The FBA fee and the
+ * variable closing fee are fixed per-unit amounts set by size and weight, so
+ * those carry over unchanged.
+ *
+ * MEASURED 2026-10-05 on B09431H87C (SKU MX5-VZ0-LVZH), the case that exposed
+ * this: market price at fetch $23.95, planned price $52.95, FBA + closing
+ * $6.82. Raw estimate -> referral $3.59, fees $10.41, profit $16.91, ROI 66%.
+ * Rescaled -> referral $7.94, fees $14.76, profit $12.56, ROI 49%. The
+ * analyser panel has rescaled this way all along (computeWebStyleRoi and
+ * renderSellers in extension/panel.js), which is why the two screens gave two
+ * answers for the same ASIN at the same price. The $4.35 was real money:
+ * Amazon bills referral on the sale, so 66% was never achievable.
+ *
+ * Deriving the RATE from (referralFee / refPrice) rather than hardcoding 15%
+ * keeps the category rate Amazon actually quoted -- it is 8% on some
+ * categories and 20% on others. Capped at 45% so a nonsense estimate cannot
+ * produce a negative-fee windfall, and falls back to 15% when there is no
+ * reference price to divide by.
+ */
+function feesAtPrice(fees, price) {
+  const fbaFee = Number(fees?.fbaFee) || 0;
+  const closing = (Number(fees?.variableClosingFee) || 0) + (Number(fees?.otherFees) || 0);
+  const refFee = Number(fees?.referralFee) || 0;
+  const refPrice = Number(state.product?.price) || 0;
+  let referralFee = refFee;
+  if (price > 0 && Math.abs(price - refPrice) > 0.005) {
+    const rate = (refPrice > 0 && refFee > 0) ? Math.min(0.45, refFee / refPrice) : 0.15;
+    referralFee = price * rate;
+  }
+  return { referralFee, fbaFee, closing, totalFees: referralFee + fbaFee + closing };
+}
+
 function recalcRoi() {
   const fees = state.product?.fees || {};
-  const totalFees = (Number(fees.referralFee) || 0) + (Number(fees.fbaFee) || 0) + (Number(fees.variableClosingFee) || 0);
   const total = Number($("apx-totalcost").value) || 0;
   const units = Number($("apx-units").value) || 1;
   const price = Number($("apx-sellprice").value) || 0;
+  const { referralFee, fbaFee, closing, totalFees } = feesAtPrice(fees, price);
   const cog = total / Math.max(1, units);
   const profit = price - totalFees - cog;
   const roi = cog > 0 ? (profit / cog) * 100 : 0;
   $("apx-cog").textContent = `$${cog.toFixed(2)}`;
   $("apx-profit").textContent = `$${profit.toFixed(2)}`;
   $("apx-roi").textContent = cog > 0 ? `${roi.toFixed(0)}%` : "—";
+  // Show the breakdown, not just the result. The reason this screen disagreed
+  // with the analyser unnoticed is that the fee it was subtracting was never
+  // on screen, so there was nothing to question.
+  const feeEl = $("apx-feeline");
+  if (feeEl) {
+    feeEl.textContent = totalFees > 0 && price > 0
+      ? `Amazon fees at $${price.toFixed(2)}: referral $${referralFee.toFixed(2)} + FBA $${fbaFee.toFixed(2)}`
+        + (closing > 0 ? ` + closing $${closing.toFixed(2)}` : "")
+        + ` = $${totalFees.toFixed(2)}`
+      : "";
+  }
   // Same figures, discounted by how often this product comes back. Recomputed
   // here rather than once on fetch, so it tracks the cost the seller is typing.
   renderAfterReturns("apx-after-returns", computeAfterReturns({
-    price, cog,
-    referralFee: Number(fees.referralFee) || 0,
-    fbaFee: Number(fees.fbaFee) || 0,
-    closingFee: Number(fees.variableClosingFee) || 0,
+    price, cog, referralFee, fbaFee, closingFee: closing,
     stats: state.returnStats,
   }));
 }
