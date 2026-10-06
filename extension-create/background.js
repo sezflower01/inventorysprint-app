@@ -555,22 +555,59 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             notes: r.notes || null,
             status: "thinking",
           };
-          // Upsert on (user_id, asin) where status='thinking' — re-saving the
-          // same ASIN refreshes supplier/title/image instead of erroring.
+          // Re-saving the same ASIN collides with
+          // still_thinking_user_asin_active_uidx -- (user_id, asin) WHERE
+          // status='thinking'. This used to catch that, re-READ the row and
+          // report "already", while the panel said "(refreshed)". Nothing was
+          // refreshed. So the common case -- saving an ASIN bare off Amazon,
+          // then saving it again from the shop you found -- never recorded the
+          // shop, and before the page had a retailer editor there was nowhere
+          // to add it either. Now the conflict path PATCHES.
+          //
+          // It sends only the fields it actually learned. still_thinking_sync_
+          // suppliers() MERGES a new supplier_url into supplier_links rather
+          // than replacing it, so saving from a second shop adds a candidate
+          // instead of overwriting the first -- which is the whole point of
+          // parking an ASIN here while you compare sources.
           let data;
           try {
             data = await restInsert("still_thinking_listings", row);
           } catch (e) {
             const msgTxt = String(e?.message || e);
             if (/duplicate|unique|conflict/i.test(msgTxt)) {
-              // Already exists — fetch current row and report ok.
+              const a = encodeURIComponent(asin);
+              const patch = {};
+              if (supplier_url) {
+                patch.supplier_url = supplier_url;
+                patch.supplier_domain = supplier_domain;
+                patch.discount_code = row.discount_code;
+              }
+              // Title and image are worth refreshing on their own: early saves
+              // often land before the snapshot has either.
+              if (row.title) patch.title = row.title;
+              if (row.image_url) patch.image_url = row.image_url;
               try {
-                const a = encodeURIComponent(asin);
-                const cur = await restGet(`still_thinking_listings?user_id=eq.${uid}&asin=eq.${a}&status=eq.thinking&select=*&limit=1`);
-                data = Array.isArray(cur) ? cur[0] : cur;
-                sendResponse({ ok: true, data, already: true });
+                if (Object.keys(patch).length) {
+                  data = await restPatch(
+                    `still_thinking_listings?user_id=eq.${uid}&asin=eq.${a}&status=eq.thinking`,
+                    patch,
+                  );
+                }
+                if (!data) {
+                  const cur = await restGet(`still_thinking_listings?user_id=eq.${uid}&asin=eq.${a}&status=eq.thinking&select=*&limit=1`);
+                  data = Array.isArray(cur) ? cur[0] : cur;
+                }
+                sendResponse({
+                  ok: true,
+                  data,
+                  already: true,
+                  // The panel words its message from this, so it can no longer
+                  // claim a refresh that did not happen.
+                  updated: Object.keys(patch).length > 0,
+                  supplierAdded: !!supplier_url,
+                });
                 break;
-              } catch { /* fall through */ }
+              } catch { /* fall through to the original error */ }
             }
             throw e;
           }

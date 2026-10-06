@@ -1406,11 +1406,18 @@ $("apx-thinking")?.addEventListener("click", async () => {
       },
     });
     if (!r?.ok) throw new Error(r?.error || "Save failed");
+    // Say what actually happened. "(refreshed)" was printed unconditionally on
+    // the conflict path, which did nothing at all -- so a second save from the
+    // shop looked like it had recorded the shop.
     setStatus(
       "apx-action-status",
-      r.already
-        ? "Already in Still Thinking ✓ (refreshed)"
-        : "Saved to Still Thinking ✓ — view in InventorySprint › Still Thinking",
+      !r.already
+        ? "Saved to Still Thinking ✓ — view in InventorySprint › Still Thinking"
+        : r.supplierAdded
+          ? "Already in Still Thinking — retailer added ✓"
+          : r.updated
+            ? "Already in Still Thinking — details refreshed ✓"
+            : "Already in Still Thinking — nothing new to add",
       "ok",
     );
   } catch (e) {

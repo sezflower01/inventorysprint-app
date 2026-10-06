@@ -12913,6 +12913,7 @@ export type Database = {
           notes: string | null
           status: string
           supplier_domain: string | null
+          supplier_links: Json
           supplier_id: string | null
           supplier_url: string | null
           title: string | null
@@ -12931,6 +12932,7 @@ export type Database = {
           notes?: string | null
           status?: string
           supplier_domain?: string | null
+          supplier_links?: Json
           supplier_id?: string | null
           supplier_url?: string | null
           title?: string | null
@@ -12949,6 +12951,7 @@ export type Database = {
           notes?: string | null
           status?: string
           supplier_domain?: string | null
+          supplier_links?: Json
           supplier_id?: string | null
           supplier_url?: string | null
           title?: string | null

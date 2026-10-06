@@ -15,18 +15,31 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { Trash2, ExternalLink, ShoppingCart, Loader2, Lightbulb, RefreshCw, AlertTriangle } from "lucide-react";
+import { Trash2, ExternalLink, ShoppingCart, Loader2, Lightbulb, RefreshCw, AlertTriangle, Store, Plus } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { generateSKU } from "@/utils/skuGenerator";
 import { Link } from "react-router-dom";
 
 const PUBLISH_PREF_KEY = "still_thinking_publish_to_amazon";
 
+interface SupplierLink { link: string; discount_code: string; }
+
 interface StillThinkingRow {
   id: string;
   asin: string;
   title: string | null;
   image_url: string | null;
+  /**
+   * Every retailer being considered for this ASIN, [{link, discount_code}] --
+   * the same shape created_listings uses, so Convert hands it straight through.
+   *
+   * supplier_url / supplier_domain / discount_code below are the legacy single
+   * retailer. They are NOT a second source of truth: a database trigger
+   * (still_thinking_sync_suppliers) mirrors them to element 0 whenever this
+   * array is written, and conversely builds this array when the extension
+   * writes only the singles. Read supplier_links here; never write both.
+   */
+  supplier_links: SupplierLink[] | null;
   supplier_url: string | null;
   supplier_domain: string | null;
   supplier_id: string | null;
@@ -37,6 +50,40 @@ interface StillThinkingRow {
   converted_at: string | null;
   created_at: string;
 }
+
+/** Display-side only. The database normalizes on write; this just keeps a
+ *  half-typed editor row from rendering as a retailer. */
+const linksOf = (r: Pick<StillThinkingRow, "supplier_links" | "supplier_url" | "discount_code">): SupplierLink[] => {
+  const arr = Array.isArray(r.supplier_links) ? r.supplier_links : [];
+  const clean = arr
+    .map(l => ({ link: String(l?.link ?? "").trim(), discount_code: String(l?.discount_code ?? "").trim() }))
+    .filter(l => l.link);
+  if (clean.length) return clean;
+  // Pre-trigger rows, and anything written before this column existed.
+  return r.supplier_url ? [{ link: r.supplier_url, discount_code: (r.discount_code || "").trim() }] : [];
+};
+
+const domainOf = (url: string) => {
+  try { return new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`).hostname.replace(/^www\./, ""); }
+  catch { return url; }
+};
+
+/**
+ * The one place a database row becomes a StillThinkingRow.
+ *
+ * supplier_links is jsonb, so its TYPE at the boundary is "whatever a client
+ * wrote" -- PostgREST cannot promise it is an array of {link, discount_code}.
+ * Narrow it once, here, instead of casting at every use site.
+ */
+const toRow = (d: unknown): StillThinkingRow => {
+  const row = d as StillThinkingRow & { supplier_links?: unknown };
+  return {
+    ...row,
+    supplier_links: Array.isArray(row.supplier_links) ? (row.supplier_links as SupplierLink[]) : null,
+  };
+};
+
+const hrefOf = (url: string) => (/^https?:\/\//i.test(url) ? url : `https://${url}`);
 
 interface SupplierOpt { id: string; supplier_name: string | null; domain: string | null; }
 
@@ -54,6 +101,11 @@ export default function StillThinking() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [suppliers, setSuppliers] = useState<SupplierOpt[]>([]);
+
+  // Retailer editor state. Edits a draft, not the row, so Cancel really cancels.
+  const [supplierRow, setSupplierRow] = useState<StillThinkingRow | null>(null);
+  const [draftLinks, setDraftLinks] = useState<SupplierLink[]>([]);
+  const [savingLinks, setSavingLinks] = useState(false);
 
   // Convert dialog state
   const [convertOpen, setConvertOpen] = useState(false);
@@ -87,7 +139,7 @@ export default function StillThinking() {
       .eq("user_id", user.id)
       .order("created_at", { ascending: false });
     if (error) toast.error(error.message);
-    else setRows((data as StillThinkingRow[]) || []);
+    else setRows((data ?? []).map(toRow));
     setLoading(false);
   };
 
@@ -112,7 +164,10 @@ export default function StillThinking() {
     return rows.filter(r =>
       r.asin.toLowerCase().includes(q) ||
       (r.title || "").toLowerCase().includes(q) ||
-      (r.supplier_domain || "").toLowerCase().includes(q),
+      // Every retailer and every code, not only the first -- searching for the
+      // shop you remember should find the row whichever slot it landed in.
+      linksOf(r).some(l =>
+        l.link.toLowerCase().includes(q) || l.discount_code.toLowerCase().includes(q)),
     );
   }, [rows, search]);
 
@@ -123,6 +178,54 @@ export default function StillThinking() {
     setRows(prev => prev.filter(r => r.id !== id));
     if (selectedId === id) setSelectedId(null);
     toast.success("Removed");
+  };
+
+  /**
+   * Retailers, editable on the page that holds the decision.
+   *
+   * Still Thinking exists to park an ASIN while you hunt for the cheapest
+   * source, so a row legitimately has several candidate shops -- and until now
+   * it had room for exactly one, written only by the extension from whatever
+   * tab the save came from. An ASIN saved straight off Amazon got none, the
+   * column was read-only, and re-saving reported "refreshed" without changing
+   * anything. 2 of 109 rows are in that state.
+   *
+   * Saving an empty list is allowed on purpose: removing the last retailer has
+   * to be expressible, or this would add and edit but never delete.
+   */
+  const openSuppliers = (row: StillThinkingRow) => {
+    const existing = linksOf(row);
+    setSupplierRow(row);
+    setDraftLinks(existing.length ? existing : [{ link: "", discount_code: "" }]);
+  };
+
+  const saveSuppliers = async () => {
+    if (!supplierRow) return;
+    const clean = draftLinks
+      .map(l => ({ link: l.link.trim(), discount_code: l.discount_code.trim() }))
+      .filter(l => l.link);
+    setSavingLinks(true);
+    try {
+      // Write the array only. The trigger mirrors supplier_url /
+      // supplier_domain / discount_code from element 0 -- sending both from
+      // here is how the two would drift apart.
+      const { data, error } = await supabase
+        .from("still_thinking_listings")
+        .update({ supplier_links: clean })
+        .eq("id", supplierRow.id)
+        .select("*")
+        .single();
+      if (error) throw error;
+      setRows(prev => prev.map(r => (r.id === supplierRow.id ? toRow(data) : r)));
+      setSupplierRow(null);
+      toast.success(clean.length
+        ? `Saved ${clean.length} retailer${clean.length > 1 ? "s" : ""}`
+        : "Retailers cleared");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not save retailers");
+    } finally {
+      setSavingLinks(false);
+    }
   };
 
   const openConvert = (row: StillThinkingRow) => {
@@ -147,10 +250,16 @@ export default function StillThinking() {
     let createdListingId: string | null = null;
     try {
       const supplierMatch = suppliers.find(s => s.id === supplierId) || null;
-      const dc = (convertRow.discount_code || "").trim();
-      const supplier_links = convertRow.supplier_url
-        ? [{ link: convertRow.supplier_url, discount_code: dc }]
-        : (supplierMatch?.domain ? [{ link: `https://${supplierMatch.domain}`, discount_code: dc }] : []);
+      // Carry EVERY retailer into the listing, not just the first. The ones you
+      // rejected are still the record of what you compared against, and
+      // created_listings.supplier_links holds the same shape, so it is a
+      // hand-off rather than a conversion.
+      const fromRow = linksOf(convertRow);
+      const supplier_links = fromRow.length
+        ? fromRow
+        : (supplierMatch?.domain
+            ? [{ link: `https://${supplierMatch.domain}`, discount_code: (convertRow.discount_code || "").trim() }]
+            : []);
 
       const today = new Date();
       const yyyymmdd = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
@@ -307,8 +416,7 @@ export default function StillThinking() {
                     <th className="px-3 py-2 text-left">Image</th>
                     <th className="px-3 py-2 text-left">ASIN</th>
                     <th className="px-3 py-2 text-left">Title</th>
-                    <th className="px-3 py-2 text-left">Supplier</th>
-                    <th className="px-3 py-2 text-left">Discount Code</th>
+                    <th className="px-3 py-2 text-left">Retailers</th>
                     <th className="px-3 py-2 text-left">Saved</th>
                     <th className="px-3 py-2 text-left">Status</th>
                     <th className="px-3 py-2 text-right">Actions</th>
@@ -317,6 +425,7 @@ export default function StillThinking() {
                 <tbody>
                   {filtered.map(r => {
                     const selected = r.id === selectedId;
+                    const links = linksOf(r);
                     return (
                       <tr
                         key={r.id}
@@ -342,30 +451,47 @@ export default function StillThinking() {
                           </a>
                         </td>
                         <td className="px-3 py-2 max-w-md truncate" title={r.title || ""}>{r.title || "—"}</td>
-                        <td className="px-3 py-2">
-                          {r.supplier_url ? (
-                            <a
-                              href={r.supplier_url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-primary hover:underline inline-flex items-center gap-1"
-                              onClick={e => e.stopPropagation()}
-                            >
-                              {r.supplier_domain || "Open"} <ExternalLink className="w-3 h-3" />
-                            </a>
-                          ) : <span className="text-muted-foreground">—</span>}
-                        </td>
-                        <td className="px-3 py-2">
-                          {r.discount_code ? (
+                        {/* One column, not the old Supplier + Discount Code pair.
+                            With several retailers per row, two parallel lists
+                            would leave the reader matching a shop to a code by
+                            position; keeping each code beside its own shop is
+                            the only arrangement that stays readable. */}
+                        <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
+                          {links.length === 0 ? (
                             <button
                               type="button"
-                              onClick={(e) => { e.stopPropagation(); navigator.clipboard?.writeText(r.discount_code || ""); toast.success("Discount code copied"); }}
-                              className="font-mono text-xs px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200"
-                              title="Click to copy"
+                              onClick={() => openSuppliers(r)}
+                              className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
                             >
-                              {r.discount_code}
+                              <Plus className="w-3 h-3" /> Add retailer
                             </button>
-                          ) : <span className="text-muted-foreground">—</span>}
+                          ) : (
+                            <div className="flex flex-col gap-1">
+                              {links.map((l, i) => (
+                                <div key={`${l.link}-${i}`} className="flex items-center gap-2">
+                                  <a
+                                    href={hrefOf(l.link)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-primary hover:underline inline-flex items-center gap-1 max-w-[16rem] truncate"
+                                    title={l.link}
+                                  >
+                                    {domainOf(l.link)} <ExternalLink className="w-3 h-3 shrink-0" />
+                                  </a>
+                                  {l.discount_code && (
+                                    <button
+                                      type="button"
+                                      onClick={() => { navigator.clipboard?.writeText(l.discount_code); toast.success("Discount code copied"); }}
+                                      className="font-mono text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200"
+                                      title="Click to copy"
+                                    >
+                                      {l.discount_code}
+                                    </button>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </td>
                         <td className="px-3 py-2 text-muted-foreground">{new Date(r.created_at).toLocaleDateString()}</td>
                         <td className="px-3 py-2">
@@ -377,6 +503,14 @@ export default function StillThinking() {
                         </td>
                         <td className="px-3 py-2 text-right">
                           <div className="inline-flex gap-2" onClick={e => e.stopPropagation()}>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => openSuppliers(r)}
+                              title="Add, edit or remove retailers"
+                            >
+                              <Store className="w-4 h-4" />
+                            </Button>
                             {r.status !== "converted" && (
                               <Button size="sm" onClick={() => openConvert(r)}>
                                 <ShoppingCart className="w-4 h-4 mr-1" /> Add Purchase
@@ -397,6 +531,74 @@ export default function StillThinking() {
         </Card>
       </main>
 
+      <Dialog open={!!supplierRow} onOpenChange={o => { if (!o) setSupplierRow(null); }}>
+        <DialogContent className="bg-white max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Retailers — {supplierRow?.asin}</DialogTitle>
+            <DialogDescription>
+              Every shop you are considering for this ASIN, each with its own discount code.
+              These carry straight into the listing when you click Add Purchase.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            {draftLinks.map((l, i) => (
+              <div key={i} className="flex gap-2 items-center">
+                <Input
+                  value={l.link}
+                  placeholder="Retailer URL (e.g. target.com/p/…)"
+                  onChange={e => setDraftLinks(prev => prev.map((x, j) => j === i ? { ...x, link: e.target.value } : x))}
+                  className="flex-1"
+                />
+                <Input
+                  value={l.discount_code}
+                  placeholder="Code"
+                  onChange={e => setDraftLinks(prev => prev.map((x, j) => j === i ? { ...x, discount_code: e.target.value } : x))}
+                  className="w-32"
+                />
+                <Button
+                  size="icon"
+                  variant="outline"
+                  disabled={!l.link.trim()}
+                  title="Open retailer"
+                  onClick={() => window.open(hrefOf(l.link.trim()), "_blank", "noopener,noreferrer")}
+                >
+                  <ExternalLink className="w-4 h-4" />
+                </Button>
+                <Button
+                  size="icon"
+                  variant="outline"
+                  title="Remove this retailer"
+                  onClick={() => setDraftLinks(prev => {
+                    const next = prev.filter((_, j) => j !== i);
+                    // Never leave the editor with nothing to type into.
+                    return next.length ? next : [{ link: "", discount_code: "" }];
+                  })}
+                >
+                  <Trash2 className="w-4 h-4" />
+                </Button>
+              </div>
+            ))}
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setDraftLinks(prev => [...prev, { link: "", discount_code: "" }])}
+            >
+              <Plus className="w-4 h-4 mr-1" /> Add retailer
+            </Button>
+            <p className="text-xs text-muted-foreground pt-1">
+              Blank rows are discarded. Saving with none left removes every retailer from this record.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setSupplierRow(null)} disabled={savingLinks}>Cancel</Button>
+            <Button onClick={saveSuppliers} disabled={savingLinks}>
+              {savingLinks && <Loader2 className="w-4 h-4 mr-1 animate-spin" />}
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Dialog open={convertOpen} onOpenChange={setConvertOpen}>
         <DialogContent className="bg-white">
           <DialogHeader>
@@ -413,15 +615,18 @@ export default function StillThinking() {
                 )}
                 <div className="text-sm">
                   <div className="font-medium line-clamp-2">{convertRow.title || convertRow.asin}</div>
-                  {convertRow.supplier_url && (
-                    <div className="text-xs text-muted-foreground truncate max-w-md">
-                      Supplier: {convertRow.supplier_domain || convertRow.supplier_url}
+                  {/* Show all of them: these are what gets written onto the
+                      listing, so the dialog should not imply only one does. */}
+                  {linksOf(convertRow).map((l, i) => (
+                    <div key={`${l.link}-${i}`} className="text-xs text-muted-foreground truncate max-w-md">
+                      {domainOf(l.link)}
+                      {l.discount_code && (
+                        <span className="text-emerald-700 dark:text-emerald-400"> · <span className="font-mono">{l.discount_code}</span></span>
+                      )}
                     </div>
-                  )}
-                  {convertRow.discount_code && (
-                    <div className="text-xs text-emerald-700 dark:text-emerald-400 truncate max-w-md">
-                      Discount code: <span className="font-mono">{convertRow.discount_code}</span>
-                    </div>
+                  ))}
+                  {linksOf(convertRow).length === 0 && (
+                    <div className="text-xs text-amber-700">No retailer recorded — add one from the list first if you want it on the listing.</div>
                   )}
                 </div>
               </div>
