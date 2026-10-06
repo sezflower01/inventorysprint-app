@@ -224,7 +224,21 @@
             <div style="margin-top:8px;font-size:11px;color:var(--muted)">
               Created: <span id="apx-p-date">—</span>
             </div>
-            <div id="apx-p-suppliers" style="margin-top:6px"></div>
+            <!-- Retailer editor (2026-10-05). Add Purchase used to show the
+                 supplier read-only and silently copy it onto every new batch,
+                 so a replenishment bought somewhere else could not be recorded
+                 at all. This edits the batch on file AND seeds the next one. -->
+            <div class="apx-p-sup-edit">
+              <div class="apx-k" style="margin-bottom:4px">Retailer / supplier</div>
+              <div id="apx-p-supplier-note" class="apx-status" style="margin-bottom:4px"></div>
+              <div id="apx-p-supplier-chips" class="apx-supplier-chips"></div>
+              <div id="apx-p-suppliers"></div>
+              <div class="apx-actions-row" style="margin-top:4px">
+                <button id="apx-p-add-supplier" class="apx-primary ghost" style="font-size:11px;padding:4px 10px">+ Add supplier</button>
+                <button id="apx-p-save-suppliers" class="apx-primary ghost" style="font-size:11px;padding:4px 10px">Save to this batch</button>
+              </div>
+              <div class="apx-status" id="apx-p-supplier-save-status"></div>
+            </div>
           </div>
 
           <!-- Replenishment forecast (mirrors Need to Buy Again page) -->

@@ -264,3 +264,19 @@ label.apx-field input, label.apx-field select {
    ADS/plan meta line it sits beside; colour comes from the ok/err classes
    loadReturnStats sets, so a high return rate reads at a glance. */
 .apx-rep-returns { font-size: 11px; margin-top: 4px; }
+
+/* Add Purchase retailer editor. Four columns, not the New Listing editor's
+   three: a saved purchase is usually revisited to OPEN the retailer and buy
+   again, so the link needs to stay clickable while it is editable. */
+.apx-p-sup-edit { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 8px; }
+.apx-p-sup-row { display: grid; grid-template-columns: 1fr 100px auto auto; gap: 6px; margin-bottom: 6px; }
+.apx-p-sup-row input {
+  background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 6px 8px; font-size: 12px; min-width: 0;
+}
+.apx-p-sup-row button {
+  background: transparent; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 8px; cursor: pointer; padding: 0 8px; font-size: 12px;
+}
+.apx-p-sup-row button:hover { color: var(--fg); }
+.apx-p-sup-row button:disabled { opacity: .4; cursor: default; }

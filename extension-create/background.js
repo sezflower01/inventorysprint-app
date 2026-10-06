@@ -318,6 +318,30 @@ async function restPatch(path, body) {
 
 
 
+/**
+ * Keep supplier_links honest.
+ *
+ * It is free-form jsonb, read by the supplier search, by hasSuppliers() in
+ * FIND_LISTING and by firstSupplierLink() on the panel -- all of which treat
+ * "a row exists" as "a retailer is on file". A blank editor row the seller
+ * never filled in would satisfy all three. So: drop rows with no link, trim,
+ * add the scheme Amazon-side links are stored with, and de-duplicate.
+ */
+function normalizeSupplierLinks(arr) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of Array.isArray(arr) ? arr : []) {
+    let link = String(raw?.link ?? "").trim();
+    if (!link) continue;
+    if (!/^https?:\/\//i.test(link)) link = `https://${link}`;
+    const key = link.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ link, discount_code: String(raw?.discount_code ?? "").trim() });
+  }
+  return out;
+}
+
 function userIdFromJWT(access_token) {
   try { return JSON.parse(atob(access_token.split(".")[1])).sub; } catch { return null; }
 }
@@ -658,6 +682,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
               amount: computedAmount,
               cost: L.cost ?? null,
               supplier_links: e.supplierRow?.supplier_links || [],
+              // The LATEST row's own column, kept separate from the display
+              // fallback above. Add Purchase's supplier editor needs to know
+              // whether THIS batch recorded a retailer or merely inherited one
+              // from an older purchase -- otherwise "save" would silently copy
+              // last month's retailer onto a batch bought somewhere else.
+              own_supplier_links: Array.isArray(L.supplier_links) ? L.supplier_links : [],
               fnsku: inv.fnsku || L.fnsku || null,
               date_created: L.date_created || null,
               created_at: L.created_at || null,
@@ -695,6 +725,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
                 supplier_links: hasSuppliers(r.supplier_links)
                   ? r.supplier_links
                   : (clRows.find((x) => hasSuppliers(x.supplier_links))?.supplier_links || []),
+                own_supplier_links: Array.isArray(r.supplier_links) ? r.supplier_links : [],
                 fnsku: r.fnsku || null,
                 date_created: r.date_created || null,
                 created_at: r.created_at || null,
@@ -819,7 +850,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             cost: totalCost,
             amount: totalCost / units,
             units,
-            supplier_links: Array.isArray(src.supplier_links) ? src.supplier_links : [],
+            // The retailer this batch was bought from, as typed on the panel.
+            // It used to copy `src.supplier_links` unconditionally, which meant
+            // every replenishment inherited the FIRST purchase's retailer and
+            // there was no way to say "this one came from somewhere else" --
+            // the panel had no field for it at all. An explicit empty array
+            // from the panel is respected; only an absent key falls back.
+            supplier_links: Array.isArray(msg.supplierLinks)
+              ? normalizeSupplierLinks(msg.supplierLinks)
+              : (Array.isArray(src.supplier_links) ? src.supplier_links : []),
             date_created: yyyymmdd,
             fba_blocked: msg.fbaBlocked === true,
             fba_block_reason: msg.fbaBlocked === true ? (msg.fbaBlockReason || "manufacturer_barcode_or_invalid_fnsku") : null,
@@ -847,7 +886,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           if (patch.cost != null) allowed.cost = Number(patch.cost);
           if (patch.units != null) allowed.units = Number(patch.units);
           if (patch.amount != null) allowed.amount = Number(patch.amount);
-          if (Array.isArray(patch.supplier_links)) allowed.supplier_links = patch.supplier_links;
+          if (Array.isArray(patch.supplier_links)) allowed.supplier_links = normalizeSupplierLinks(patch.supplier_links);
           if (!Object.keys(allowed).length) {
             sendResponse({ ok: false, error: "Nothing to update" });
             break;

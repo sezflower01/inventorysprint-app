@@ -551,8 +551,8 @@ function renderSuppliers() {
     const row = document.createElement("div");
     row.className = "apx-supplier-row";
     row.innerHTML = `
-      <input data-i="${i}" data-k="link" placeholder="https://supplier..." value="${s.link || ""}" />
-      <input data-i="${i}" data-k="discount_code" placeholder="Discount code" value="${s.discount_code || ""}" />
+      <input data-i="${i}" data-k="link" placeholder="https://supplier..." value="${escapeHtml(s.link || "")}" />
+      <input data-i="${i}" data-k="discount_code" placeholder="Discount code" value="${escapeHtml(s.discount_code || "")}" />
       <button data-rm="${i}" title="Remove">×</button>`;
     wrap.appendChild(row);
   });
@@ -1493,38 +1493,189 @@ document.querySelectorAll(".apx-tab").forEach((btn) => {
 });
 
 /* ─── Add Purchase mode ─── */
-const purchase = { source: null, fbaElig: null, checking: false };
+const purchase = { source: null, fbaElig: null, checking: false, suppliers: [], inherited: false };
 
 function fmtMoney(n) {
   const v = Number(n);
   return isFinite(v) ? `$${v.toFixed(2)}` : "—";
 }
 
-function renderPurchaseSuppliers(links) {
-  const wrap = $("apx-p-suppliers");
-  wrap.innerHTML = "";
-  const arr = Array.isArray(links) ? links : [];
-  if (!arr.length) {
-    wrap.innerHTML = `<div class="apx-k">No supplier on file</div>`;
-    return;
+/**
+ * Where a purchase was bought from -- editable, on the page that commits the
+ * money.
+ *
+ * This was a read-only list, and INVSPRNT_ADD_PURCHASE copied the found
+ * listing's supplier_links onto every new batch. So the first purchase set the
+ * retailer forever: a replenishment bought somewhere else was recorded under
+ * the old retailer, and there was no field anywhere on Add Purchase to correct
+ * it. That is a real loss, because supplier_links is the only record of where
+ * stock came from -- saved_sources is empty and purchase notes are generic --
+ * and it is what the Supplier sub-tab searches.
+ *
+ * Two jobs, one editor, which is why it sits on the batch card rather than in
+ * the New-purchase form:
+ *   - "Save to this batch" corrects the batch already on file -- the case this
+ *     was built for, a purchase saved before the retailer was entered.
+ *   - Add Purchase sends whatever is in it along with the NEW batch.
+ *
+ * `inherited` tracks the difference between "this batch recorded no retailer"
+ * and "an older batch had one, shown here as a convenience". Without it,
+ * pressing Save would quietly stamp last month's retailer onto a batch bought
+ * somewhere else -- the same bug as before, just moved one click later.
+ */
+function purchaseOwnSuppliers(row) {
+  // FIND_LISTING sends both keys: own_supplier_links is the picked batch's own
+  // column, supplier_links may be carried over from an older batch for display.
+  // The Supplier and Title sub-tabs pass raw created_listings rows, where
+  // supplier_links IS the row's own -- hence a key-presence test rather than a
+  // truthiness test.
+  if (row && Object.prototype.hasOwnProperty.call(row, "own_supplier_links")) {
+    return Array.isArray(row.own_supplier_links) ? row.own_supplier_links : [];
   }
-  arr.forEach((s) => {
-    const link = (s?.link || "").trim();
-    const code = (s?.discount_code || "").trim();
+  return Array.isArray(row?.supplier_links) ? row.supplier_links : [];
+}
+
+function seedPurchaseSuppliers(row) {
+  const own = purchaseOwnSuppliers(row).filter((x) => (x?.link || "").trim());
+  const carried = (Array.isArray(row?.supplier_links) ? row.supplier_links : [])
+    .filter((x) => (x?.link || "").trim());
+  const src = own.length ? own : carried;
+  purchase.inherited = !own.length && carried.length > 0;
+  purchase.suppliers = src.length
+    ? src.map((x) => ({ link: String(x.link || "").trim(), discount_code: String(x.discount_code || "").trim() }))
+    : [{ link: "", discount_code: "" }];
+  renderPurchaseSuppliers();
+}
+
+function cleanPurchaseSuppliers() {
+  return purchase.suppliers
+    .map((x) => ({ link: String(x.link || "").trim(), discount_code: String(x.discount_code || "").trim() }))
+    .filter((x) => x.link);
+}
+
+function supplierHref(link) {
+  const v = String(link || "").trim();
+  if (!v) return "";
+  return /^https?:\/\//i.test(v) ? v : `https://${v}`;
+}
+
+function renderPurchaseSuppliers() {
+  const wrap = $("apx-p-suppliers");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  purchase.suppliers.forEach((sup, i) => {
+    const link = String(sup.link || "").trim();
     const row = document.createElement("div");
-    row.className = "apx-p-supplier";
-    const url = link ? (/^https?:\/\//i.test(link) ? link : `https://${link}`) : "";
+    row.className = "apx-p-sup-row";
     row.innerHTML = `
-      <a href="${url}" target="_blank" rel="noopener noreferrer" title="${link}">${link || "—"}</a>
-      ${code ? `<span class="code">${code}</span>` : ""}
-      ${link ? `<button data-open="${url}">Open</button>` : ""}
-    `;
+      <input data-i="${i}" data-k="link" placeholder="Retailer URL (e.g. target.com/p/...)" value="${escapeHtml(sup.link || "")}" />
+      <input data-i="${i}" data-k="discount_code" placeholder="Code" value="${escapeHtml(sup.discount_code || "")}" />
+      <button data-open="${i}" title="Open retailer" ${link ? "" : "disabled"}>↗</button>
+      <button data-rm="${i}" title="Remove">×</button>`;
     wrap.appendChild(row);
   });
-  wrap.querySelectorAll("button[data-open]").forEach((b) => {
-    b.addEventListener("click", () => window.open(b.dataset.open, "_blank", "noopener,noreferrer"));
+  wrap.querySelectorAll("input").forEach((inp) => {
+    inp.addEventListener("input", (e) => {
+      const i = +e.target.dataset.i;
+      purchase.suppliers[i][e.target.dataset.k] = e.target.value;
+      // Typing makes this the batch's own retailer, so the note must stop
+      // claiming it was carried over. Repaint the note only -- re-rendering the
+      // rows here would steal focus mid-keystroke.
+      if (purchase.inherited) { purchase.inherited = false; renderPurchaseSupplierNote(); }
+      const openBtn = wrap.querySelector(`button[data-open="${i}"]`);
+      if (openBtn) openBtn.disabled = !String(purchase.suppliers[i].link || "").trim();
+    });
   });
+  wrap.querySelectorAll("button[data-open]").forEach((b) => {
+    b.addEventListener("click", () => {
+      const url = supplierHref(purchase.suppliers[+b.dataset.open]?.link);
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+    });
+  });
+  wrap.querySelectorAll("button[data-rm]").forEach((b) => {
+    b.addEventListener("click", () => {
+      purchase.suppliers.splice(+b.dataset.rm, 1);
+      if (!purchase.suppliers.length) purchase.suppliers.push({ link: "", discount_code: "" });
+      renderPurchaseSuppliers();
+    });
+  });
+  renderPurchaseSupplierNote();
+  renderPurchaseSupplierChips();
 }
+
+function renderPurchaseSupplierNote() {
+  const el = $("apx-p-supplier-note");
+  if (!el) return;
+  const any = cleanPurchaseSuppliers().length > 0;
+  el.style.color = "var(--muted)";
+  if (purchase.inherited) {
+    el.textContent = "Carried over from an earlier batch — this batch has no retailer of its own. Edit it if you bought somewhere else, then Save to this batch.";
+  } else if (!any) {
+    el.textContent = "No retailer on file. Whatever you enter is saved with the next Add Purchase.";
+  } else {
+    el.textContent = "Saved with the next Add Purchase. Use Save to this batch to correct the batch shown above.";
+  }
+}
+
+function renderPurchaseSupplierChips() {
+  const wrap = $("apx-p-supplier-chips");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  for (const r of (state.recentSuppliers || []).slice(0, 8)) {
+    if (!r?.url) continue;
+    const chip = document.createElement("span");
+    chip.className = "apx-supplier-chip";
+    chip.textContent = r.domain;
+    chip.title = r.url;
+    chip.addEventListener("click", () => {
+      const idx = purchase.suppliers.findIndex((x) => !String(x.link || "").trim());
+      if (idx >= 0) purchase.suppliers[idx].link = r.url;
+      else purchase.suppliers.push({ link: r.url, discount_code: "" });
+      purchase.inherited = false;
+      renderPurchaseSuppliers();
+    });
+    wrap.appendChild(chip);
+  }
+}
+
+$("apx-p-add-supplier").addEventListener("click", () => {
+  purchase.suppliers.push({ link: "", discount_code: "" });
+  purchase.inherited = false;
+  renderPurchaseSuppliers();
+});
+
+$("apx-p-save-suppliers").addEventListener("click", async () => {
+  const id = purchase.source?.id;
+  if (!id) {
+    setStatus("apx-p-supplier-save-status", "No saved batch to attach a retailer to — add the purchase first.", "err");
+    return;
+  }
+  const links = cleanPurchaseSuppliers();
+  const btn = $("apx-p-save-suppliers");
+  btn.disabled = true;
+  setStatus("apx-p-supplier-save-status", "Saving…");
+  try {
+    const r = await bg("INVSPRNT_UPDATE_LISTING", { id, patch: { supplier_links: links } });
+    if (!r?.ok) throw new Error(r?.error || "Save failed");
+    // It is this batch's own retailer now, not an inherited one. Update the
+    // cached row too, or a later re-render would re-read the stale column and
+    // put the "carried over" note back.
+    purchase.inherited = false;
+    if (purchase.source) {
+      purchase.source.own_supplier_links = links;
+      purchase.source.supplier_links = links;
+    }
+    for (const l of links) void pushRecentSupplier(supplierHref(l.link));
+    renderPurchaseSupplierNote();
+    setStatus("apx-p-supplier-save-status", links.length
+      ? `Retailer saved to this batch — ${links.length} supplier${links.length > 1 ? "s" : ""} ✓`
+      : "Retailer cleared on this batch ✓", "ok");
+  } catch (e) {
+    setStatus("apx-p-supplier-save-status", String(e.message || e), "err");
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 function renderSkuPicker(containerId, rows, selectedSku, onPick) {
   const box = document.getElementById(containerId);
@@ -1699,7 +1850,8 @@ function renderPurchaseCard(row) {
   $("apx-p-cog").textContent = fmtMoney(row.amount);
   $("apx-p-total").textContent = fmtMoney(row.cost);
   $("apx-p-date").textContent = formatDateForMarket(row.date_created || row.created_at, marketplaceCodeForRow(row));
-  renderPurchaseSuppliers(row.supplier_links);
+  seedPurchaseSuppliers(row);
+  $("apx-p-supplier-save-status").textContent = "";
   // Reset form
   $("apx-p-totalcost").value = "";
   $("apx-p-newunits").value = "1";
@@ -1840,6 +1992,11 @@ $("apx-p-find").addEventListener("click", async () => {
   $("apx-p-replenish")?.classList.add("hidden");
   purchase.source = null;
   purchase.fbaElig = null;
+  // Drop the previous ASIN's retailer with it. renderPurchaseCard re-seeds the
+  // editor before the card is shown again, so this only guards against the
+  // state outliving a failed Find.
+  purchase.suppliers = [{ link: "", discount_code: "" }];
+  purchase.inherited = false;
   renderPurchaseFbaGate();
   const r = await bg("INVSPRNT_FIND_LISTING", { asin });
   if (!r?.ok) { setStatus("apx-p-find-status", r?.error || "Search failed", "err"); return; }
@@ -1871,13 +2028,32 @@ $("apx-p-add").addEventListener("click", async () => {
     renderPurchaseFbaGate();
     return;
   }
+  // The reason this editor exists: a batch saved with no retailer cannot be
+  // reconstructed later, because nothing else records where stock was bought.
+  // Ask once rather than letting it through silently -- and take no for an
+  // answer, the same shape as the New Listing guard.
+  if (!cleanPurchaseSuppliers().length) {
+    const go = window.confirm(
+      "No retailer entered for this purchase.\n\n" +
+      "supplier_links is the only record of where stock came from, and it is what the Supplier search reads.\n\n" +
+      "Click OK to save without it, or Cancel to enter the retailer first."
+    );
+    if (!go) {
+      setStatus("apx-p-action-status", "Enter the retailer above, then Add Purchase.", "err");
+      return;
+    }
+  }
   setStatus("apx-p-action-status", "Saving…");
   $("apx-p-add").disabled = true;
   try {
+    const supplierLinks = cleanPurchaseSuppliers();
     const r = await bg("INVSPRNT_ADD_PURCHASE", {
       source: purchase.source,
       totalCost: total,
       units,
+      // Explicit, so an empty editor records "bought somewhere I did not note"
+      // instead of silently inheriting the previous batch's retailer.
+      supplierLinks,
       fbaBlocked: elig?.eligible === false,
       fbaBlockReason: elig?.eligible === false ? (elig.fba_block_reason || "manufacturer_barcode_or_invalid_fnsku") : null,
     });
@@ -1886,6 +2062,9 @@ $("apx-p-add").addEventListener("click", async () => {
     // after the insert succeeded and deliberately not awaited: a failed or slow
     // seller count must never make a saved purchase look unsaved.
     void loadPurchaseSellers(purchase.source.asin, state.selectedMarketplace || "US", { reason: 'purchase' });
+    // Same recent-retailer list the New Listing tab fills, so the next purchase
+    // from this shop is one chip click.
+    for (const l of supplierLinks) void pushRecentSupplier(supplierHref(l.link));
     setStatus("apx-p-action-status", elig?.eligible === false
       ? `FBM-only purchase saved — ${units} units @ $${(total/units).toFixed(2)} COG ✓`
       : `Purchase added — ${units} units @ $${(total/units).toFixed(2)} COG ✓`, "ok");
