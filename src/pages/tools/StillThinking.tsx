@@ -413,13 +413,20 @@ export default function StillThinking() {
               <table className="w-full text-sm">
                 <thead className="bg-muted/40 text-xs uppercase tracking-wide text-muted-foreground">
                   <tr>
-                    <th className="px-3 py-2 text-left">Image</th>
-                    <th className="px-3 py-2 text-left">ASIN</th>
+                    {/* The table is auto-layout, so a column with long
+                        content grows until something else is squeezed -- and
+                        the thing being squeezed was Actions, which clipped the
+                        Add Purchase button. w-px plus whitespace-nowrap makes a
+                        column take exactly the width of its content and no
+                        more, so Title (the only cell that truncates) absorbs
+                        all the slack instead. */}
+                    <th className="px-3 py-2 text-left w-px whitespace-nowrap">Image</th>
+                    <th className="px-3 py-2 text-left w-px whitespace-nowrap">ASIN</th>
                     <th className="px-3 py-2 text-left">Title</th>
-                    <th className="px-3 py-2 text-left">Retailers</th>
-                    <th className="px-3 py-2 text-left">Saved</th>
-                    <th className="px-3 py-2 text-left">Status</th>
-                    <th className="px-3 py-2 text-right">Actions</th>
+                    <th className="px-3 py-2 text-left w-px whitespace-nowrap">Retailers</th>
+                    <th className="px-3 py-2 text-left w-px whitespace-nowrap">Saved</th>
+                    <th className="px-3 py-2 text-left w-px whitespace-nowrap">Status</th>
+                    <th className="px-3 py-2 text-right w-px whitespace-nowrap">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -432,14 +439,14 @@ export default function StillThinking() {
                         onClick={() => setSelectedId(r.id)}
                         className={`border-t cursor-pointer transition-colors ${selected ? "bg-blue-50 ring-2 ring-inset ring-primary/40" : "hover:bg-muted/30"}`}
                       >
-                        <td className="px-3 py-2">
+                        <td className="px-3 py-2 w-px">
                           {r.image_url ? (
                             <img src={r.image_url} alt={r.asin} className="w-12 h-12 min-w-12 min-h-12 object-cover rounded border" />
                           ) : (
                             <div className="w-12 h-12 rounded bg-muted" />
                           )}
                         </td>
-                        <td className="px-3 py-2 font-mono">
+                        <td className="px-3 py-2 font-mono w-px whitespace-nowrap">
                           <a
                             href={amazonUrl(r.asin, r.marketplace)}
                             target="_blank"
@@ -450,13 +457,19 @@ export default function StillThinking() {
                             {r.asin}
                           </a>
                         </td>
-                        <td className="px-3 py-2 max-w-md truncate" title={r.title || ""}>{r.title || "—"}</td>
+                        {/* max-w on a <td> does nothing under auto layout --
+                            the cell still grows to fit. The cap has to sit on a
+                            block child for truncate to have something to clip
+                            against. */}
+                        <td className="px-3 py-2" title={r.title || ""}>
+                          <div className="max-w-[10rem] md:max-w-[16rem] xl:max-w-[26rem] truncate">{r.title || "—"}</div>
+                        </td>
                         {/* One column, not the old Supplier + Discount Code pair.
                             With several retailers per row, two parallel lists
                             would leave the reader matching a shop to a code by
                             position; keeping each code beside its own shop is
                             the only arrangement that stays readable. */}
-                        <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
+                        <td className="px-3 py-2 w-px" onClick={e => e.stopPropagation()}>
                           {links.length === 0 ? (
                             <button
                               type="button"
@@ -473,7 +486,7 @@ export default function StillThinking() {
                                     href={hrefOf(l.link)}
                                     target="_blank"
                                     rel="noopener noreferrer"
-                                    className="text-primary hover:underline inline-flex items-center gap-1 max-w-[16rem] truncate"
+                                    className="text-primary hover:underline inline-flex items-center gap-1 max-w-[10rem] xl:max-w-[12rem] truncate"
                                     title={l.link}
                                   >
                                     {domainOf(l.link)} <ExternalLink className="w-3 h-3 shrink-0" />
@@ -493,16 +506,16 @@ export default function StillThinking() {
                             </div>
                           )}
                         </td>
-                        <td className="px-3 py-2 text-muted-foreground">{new Date(r.created_at).toLocaleDateString()}</td>
-                        <td className="px-3 py-2">
+                        <td className="px-3 py-2 text-muted-foreground w-px whitespace-nowrap">{new Date(r.created_at).toLocaleDateString()}</td>
+                        <td className="px-3 py-2 w-px">
                           {r.status === "converted" ? (
                             <Badge className="bg-emerald-100 text-emerald-800">Converted</Badge>
                           ) : (
                             <Badge variant="secondary">Thinking</Badge>
                           )}
                         </td>
-                        <td className="px-3 py-2 text-right">
-                          <div className="inline-flex gap-2" onClick={e => e.stopPropagation()}>
+                        <td className="px-3 py-2 text-right w-px whitespace-nowrap">
+                          <div className="inline-flex gap-2 shrink-0" onClick={e => e.stopPropagation()}>
                             <Button
                               size="sm"
                               variant="outline"
