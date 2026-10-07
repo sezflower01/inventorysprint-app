@@ -31,6 +31,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { getLWAAccessToken, getSpApiEndpoint } from "../_shared/sp-api-sigv4.ts";
 import { requireInternalCall } from "../_shared/require-internal.ts";
+import { withCronLock } from "../_shared/cron-lock.ts";
+import { needsWrite, statusPatch } from "./status-patch.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -68,6 +70,22 @@ Deno.serve(async (req) => {
     if (aErr) return json({ error: aErr.message }, 500);
 
     const results: Array<Record<string, unknown>> = [];
+
+    /**
+     * Wrapped in the cron lock so it has a run history at all.
+     *
+     * cron job 170 has run hourly since it was created and cron_run_history
+     * held NOT ONE row for it, so "is the status sync working" could only be
+     * answered by inference from the orders themselves. An hourly job with no
+     * record of its own runs is a job nobody can tell has stopped.
+     *
+     * 300s TTL: a run walks up to 20 pages of Amazon orders and now reads each
+     * row before writing, so it is slower than it was, but nowhere near an
+     * hour. The lock also stops two runs overlapping if one is slow -- they
+     * would fight over the same rows.
+     */
+    const lockOutcome = await withCronLock(supabase as any, "sync-order-status-updates-hourly", 300, async () => {
+    let totalSeen = 0, totalUpdated = 0;
 
     for (const auth of (auths ?? []) as any[]) {
       let token: string;
@@ -118,25 +136,45 @@ Deno.serve(async (req) => {
           seen++;
           if (dryRun) continue;
 
-          // Only rows that already exist, and only when the status actually
-          // differs — a no-op UPDATE would still bump updated_at and, on a
-          // published table, fan out a realtime event for no change.
-          const { data: hit, error: uErr } = await supabase
+          // Read first, then decide. The old guard was `.neq("order_status",
+          // status)` in the UPDATE itself, which skipped the one case this
+          // worker most needed to fix: order_status already Canceled while
+          // is_cancelled was still false. 321 orders sat in exactly that state
+          // carrying $7,671.08 of estimated revenue, skipped forever PRECISELY
+          // because the status had not changed. needsWrite() asks about both
+          // columns, so a no-op is still a no-op and that row is not.
+          const { data: current } = await supabase
             .from("sales_orders")
-            .update({ order_status: status })
+            .select("order_status, is_cancelled")
             .eq("user_id", auth.user_id)
             .eq("order_id", id)
-            .neq("order_status", status)
+            .maybeSingle();
+
+          if (!current) { notFound++; continue; }
+          if (!needsWrite(current, status)) { unchanged++; continue; }
+
+          const { data: hit, error: uErr } = await supabase
+            .from("sales_orders")
+            .update(statusPatch(status, new Date().toISOString()))
+            .eq("user_id", auth.user_id)
+            .eq("order_id", id)
             .select("order_id");
           if (uErr) { console.warn(`[order-status] ${id}:`, uErr.message); continue; }
-          if ((hit?.length ?? 0) > 0) updated++; else unchanged++;
+          if ((hit?.length ?? 0) > 0) {
+            updated++;
+            // Every status change, logged. There was no record of what this
+            // worker did to which order, so a wrong move left no trail.
+            console.log(`[order-status] ${id}: ${current.order_status ?? "unknown"} -> ${status}` +
+              (statusPatch(status, "").is_cancelled !== Boolean(current.is_cancelled)
+                ? ` (is_cancelled ${Boolean(current.is_cancelled)} -> ${statusPatch(status, "").is_cancelled})` : ""));
+          } else { unchanged++; }
         }
       } while (nextToken && pages < MAX_PAGES);
 
-      // notFound is inferred rather than queried: an order Amazon reports as
-      // updated that matched no row is either already correct or absent
-      // entirely, and separating those costs a query per order for a number
-      // nothing acts on.
+      // notFound is now counted for real: the loop reads the row before
+      // deciding, so "Amazon knows this order and we do not" is no longer
+      // indistinguishable from "already correct".
+      totalSeen += seen; totalUpdated += updated;
       results.push({
         user_id: auth.user_id, marketplace: auth.marketplace_id,
         pages, ordersSeen: seen, statusUpdated: updated, alreadyCorrect: unchanged, notFound,
@@ -144,7 +182,10 @@ Deno.serve(async (req) => {
       });
     }
 
-    return json({ dryRun, lookbackHours, results });
+      return { items_processed: totalUpdated, detail: { ordersSeen: totalSeen, dryRun, lookbackHours, results } };
+    });
+
+    return json({ dryRun, lookbackHours, lock: lockOutcome, results });
   } catch (err) {
     console.error("[sync-order-status-updates]", err);
     return json({ error: err instanceof Error ? err.message : String(err) }, 500);
