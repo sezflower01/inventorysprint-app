@@ -530,3 +530,10 @@ verify_jwt = false
 # Authorization header, so verify_jwt must be false or the gateway rejects it
 # before the function runs.
 verify_jwt = false
+
+# Read-only diagnostic for the stuck-Pending investigation. pg_cron and
+# migrations send x-internal-secret and NO Authorization header, so the gateway
+# must not demand a JWT -- see CLAUDE.md. requireInternalCall() is the real
+# guard, and the function has no write path at all.
+[functions.probe-order-status-sample]
+verify_jwt = false

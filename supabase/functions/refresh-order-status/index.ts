@@ -190,6 +190,18 @@ serve(async (req) => {
 
     const body = await req.json();
     const { order_id, order_ids, marketplace_id } = body;
+    /**
+     * dryRun: ask Amazon, change nothing.
+     *
+     * This function is the only thing that can answer "what does Amazon say
+     * about THIS order id" -- the hourly sync-order-status-updates queries by
+     * LastUpdatedAfter, so an order Amazon has not touched in months is
+     * invisible to it no matter how often it runs. But the normal path writes,
+     * and writing includes zeroing quantity and every fee on a cancelled
+     * order, which is not something to do to 449 rows before anyone has seen
+     * the distribution. So: look first.
+     */
+    const dryRun = body?.dryRun === true;
     
     // Support single order or batch of orders
     const orderIdsToProcess: string[] = order_ids || (order_id ? [order_id] : []);
@@ -267,6 +279,21 @@ serve(async (req) => {
           updates.closing_fee = 0;
           updates.total_fees = 0;
           updates.refund_amount = 0;
+        }
+
+        if (dryRun) {
+          results.push({
+            order_id: oid,
+            old_status: currentOrder?.order_status ?? null,
+            new_status: amazonStatus,
+            is_cancelled: isCancelled,
+            success: true,
+            error: `DRY RUN - nothing written (we had is_cancelled=${currentOrder?.is_cancelled})`,
+          });
+          if (orderIdsToProcess.indexOf(oid) < orderIdsToProcess.length - 1) {
+            await new Promise(r => setTimeout(r, 200));
+          }
+          continue;
         }
 
         // Update all rows with this order_id (including -REFUND variants)
