@@ -223,7 +223,12 @@ function isStaleSource(ps: string | null | undefined): boolean {
   if (s.startsWith('hint:')) return true;
   if (s.startsWith('keepa')) return true;
   if (s.startsWith('pricing_api')) return true;
-  if (s === 'snapshot_price' || s === 'seller_derived:snapshot') return true;
+  // startsWith, not equality: these sources carry suffixes. The currency
+  // repair of 2026-10-07 writes 'seller_derived:snapshot:currency_repair',
+  // and an exact match would have quietly excluded exactly the rows that
+  // most need a better price later. Every other consumer of this string
+  // already uses startsWith.
+  if (s === 'snapshot_price' || s.startsWith('seller_derived:snapshot')) return true;
   return false;
 }
 
