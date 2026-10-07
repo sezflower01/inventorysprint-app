@@ -209,6 +209,24 @@ Deno.serve(async (req) => {
         // ItemPrice is the EXTENDED price for the quantity ordered, so the
         // per-unit figure is a division -- storing it as the unit price is the
         // line-total-as-unit-price bug this codebase has already seen.
+        if (!isCancelled && !item) {
+          // Amazon confirms this shipped but withholds ItemPrice -- a
+          // data-retention restriction on old orders, not a fault in the call.
+          // Measured 2026-10-07: items returned 1, items carrying a price 0,
+          // on every order in the oldest batch.
+          //
+          // The estimate STAYS. It is the only figure we have, and zeroing or
+          // excluding it would turn "we cannot verify this" into "this never
+          // happened" -- a different and worse claim. It is labelled instead,
+          // so these rows can be filtered out of any total that needs to be
+          // defensible without being deleted from one that does not.
+          //
+          // ESTIMATE_UNRECOVERABLE is a new value in a column whose existing
+          // consumers test for 'CONFIRMED' or 'LOW_CONFIDENCE_HINT' by
+          // equality, so adding it changes no current behaviour: the row keeps
+          // counting exactly as it does today.
+          patch.price_confidence = "ESTIMATE_UNRECOVERABLE";
+        }
         if (!isCancelled && item) {
           // ItemPrice is the EXTENDED price for QuantityOrdered, so the unit
           // price is a division. Storing the extended figure as the unit price
@@ -240,7 +258,26 @@ Deno.serve(async (req) => {
           const { error: uErr } = await supabase.from("sales_orders")
             .update(patch).eq("id", row.id);
           if (uErr) { bump("write_error"); changes[changes.length - 1].error = uErr.message; }
-          else bump("written");
+          else {
+            bump("written");
+            // Every status change, recorded in a table rather than only in the
+            // reply body. An HTTP response nobody stored is not a log, and
+            // this worker changes money-bearing rows.
+            await supabase.from("stuck_pending_resolution_log").insert({
+              order_id: row.order_id,
+              asin: row.asin,
+              old_status: row.order_status,
+              new_status: status,
+              old_is_cancelled: row.is_cancelled,
+              new_is_cancelled: isCancelled,
+              estimated_price: row.estimated_price,
+              new_sold_price: (patch.sold_price as number | undefined) ?? null,
+              price_recovered: Boolean(patch.sold_price),
+              note: patch.price_confidence === "ESTIMATE_UNRECOVERABLE"
+                ? "shipped, Amazon withheld ItemPrice, estimate kept and labelled"
+                : (isCancelled ? "cancelled, flag set, figures untouched" : "shipped, price recovered"),
+            });
+          }
         }
       }
     }
