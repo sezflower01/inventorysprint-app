@@ -1207,6 +1207,52 @@ async function captureMissingBbEstimateForOrders(
   return updated;
 }
 
+/**
+ * Which currency is this snapshot's AMOUNT in?
+ *
+ * Not which currency the marketplace trades in -- which currency the number
+ * stored on the row is denominated in. The two were being conflated, and it
+ * cost a real reading:
+ *
+ *   order 702-5492481-4068251, CA, B002HJ4HSS, 2026-10-06
+ *   snapshot  item_price 20.75   source backfill_inventory_asin
+ *             currency USD       currency_code CAD
+ *   estimate  20.75 (no conversion)
+ *   screen    $14.56   (20.75 CAD converted to USD at 0.70)
+ *   Amazon    CA$34.13 = about US$24
+ *
+ * 20.75 is inventory.my_price -- a USD number, because inventory is one pool
+ * for all four marketplaces. backfill-order-snapshots stamped currency_code
+ * from the MARKETPLACE ("CA sells in CAD") while storing a USD amount, and
+ * this read consulted currency_code first, so the conversion never ran.
+ *
+ * Measured over 180 days of settled orders, estimate vs actual:
+ *   US  21,194 orders  $20.47 vs $20.50     +0.3%
+ *   CA     185 orders  $36.39 vs $28.13    +30.0%
+ *   MX     110 orders  $479.05 vs $27.73  +1630%
+ *   BR      29 orders  $148.83 vs $28.73   +422%
+ * US is clean; every non-US marketplace is wrong in both directions, which is
+ * the signature of a mislabelled unit rather than a bad price.
+ *
+ * The source is the reliable witness, so it is consulted FIRST: a price read
+ * out of inventory is USD by construction, whatever any tag says. Tags are only
+ * trusted where the source genuinely varies.
+ */
+function snapshotAmountCurrency(snapshotSource: string | null | undefined,
+                                currencyCode: string | null | undefined,
+                                currency: string | null | undefined,
+                                nativeCurrency: string): string {
+  const src = String(snapshotSource || '').toLowerCase();
+  // Inventory-derived prices are USD by construction -- inventory is a single
+  // pool shared by all four marketplaces and holds USD.
+  if (src.includes('inventory')) return 'USD';
+  // Marketplace APIs answer in the marketplace's own currency.
+  if (src === 'pricing_api' || src === 'orders_api') return nativeCurrency;
+  // Only now fall back to the tags, and prefer `currency` -- it is the column
+  // that described the AMOUNT. currency_code was written from the marketplace.
+  return String(currency || currencyCode || 'USD').toUpperCase();
+}
+
 async function getExactOrderSnapshotEstimate(
   supabase: any,
   userId: string,
@@ -1242,8 +1288,8 @@ async function getExactOrderSnapshotEstimate(
   // here — this is the read side of that same currency fix.
   const marketplaceToCurrency: Record<string, string> = { 'US': 'USD', 'CA': 'CAD', 'MX': 'MXN', 'BR': 'BRL' };
   const nativeCurrency = marketplaceToCurrency[marketplace] || 'USD';
-  const snapshotCurrency = data?.currency_code || data?.currency ||
-    (data?.snapshot_source === 'pricing_api' || data?.snapshot_source === 'orders_api' ? nativeCurrency : 'USD');
+  const snapshotCurrency = snapshotAmountCurrency(
+    data?.snapshot_source, data?.currency_code, data?.currency, nativeCurrency);
   const nativePrice = snapshotCurrency === 'USD' && nativeCurrency !== 'USD' && fxRates?.[nativeCurrency]
     ? snapshotPrice * fxRates[nativeCurrency]
     : snapshotPrice;
@@ -2404,8 +2450,8 @@ Deno.serve(async (req) => {
                   // before use (read side of SNAPSHOT_CAPTURE_CURRENCY_FIX).
                   const snapMpToCurrency: Record<string, string> = { 'US': 'USD', 'CA': 'CAD', 'MX': 'MXN', 'BR': 'BRL' };
                   const snapNativeCurrency = snapMpToCurrency[marketplace || 'US'] || 'USD';
-                  const snapCurrency = snapRow.currency_code || snapRow.currency ||
-                    (snapRow.snapshot_source === 'pricing_api' || snapRow.snapshot_source === 'orders_api' ? snapNativeCurrency : 'USD');
+                  const snapCurrency = snapshotAmountCurrency(
+                    snapRow.snapshot_source, snapRow.currency_code, snapRow.currency, snapNativeCurrency);
                   estimatedPrice = snapCurrency === 'USD' && snapNativeCurrency !== 'USD' && fxRates?.[snapNativeCurrency]
                     ? snapRawPrice * fxRates[snapNativeCurrency]
                     : snapRawPrice;
@@ -3726,13 +3772,19 @@ Deno.serve(async (req) => {
       for (const snapshot of snapshotsToInsert) {
         const key = `${snapshot.asin}:${snapshot.marketplace_id}`;
         if (!uniqueAsinMarketplaces.has(key) && snapshot.snapshot_item_price) {
+          const snapMarketplace = snapshot.marketplace_id === 'A1AM78C64UM0Y8' ? 'MX' :
+                                  snapshot.marketplace_id === 'A2EUQ1WTGCTBG2' ? 'CA' :
+                                  snapshot.marketplace_id === 'A2Q3Y263D00KWC' ? 'BR' : 'US';
           uniqueAsinMarketplaces.set(key, {
             asin: snapshot.asin,
-            marketplace: snapshot.marketplace_id === 'A1AM78C64UM0Y8' ? 'MX' :
-                        snapshot.marketplace_id === 'A2EUQ1WTGCTBG2' ? 'CA' :
-                        snapshot.marketplace_id === 'A2Q3Y263D00KWC' ? 'BR' : 'US',
+            marketplace: snapMarketplace,
             price: snapshot.snapshot_item_price,
-            currency: snapshot.currency_code || 'USD',
+            // currency_code was written from the marketplace, not from the
+            // amount -- see snapshotAmountCurrency(). Ask the same question
+            // here, or this row inherits the mislabel.
+            currency: snapshotAmountCurrency(
+              snapshot.snapshot_source, snapshot.currency_code, snapshot.currency,
+              ({ US: 'USD', CA: 'CAD', MX: 'MXN', BR: 'BRL' } as Record<string, string>)[snapMarketplace] || 'USD'),
           });
         }
       }

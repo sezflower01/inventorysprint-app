@@ -256,20 +256,35 @@ Deno.serve(async (req) => {
         continue;
       }
 
-      // Determine currency based on marketplace
-      let currencyCode = 'USD';
+      // The marketplace decides marketplace_id. It does NOT decide the
+      // currency of the amount being stored.
+      //
+      // This block used to set currency_code from the marketplace -- "a CA
+      // order sells in CAD" -- and stamp it onto a price read out of
+      // inventory, which is a single USD pool shared by all four
+      // marketplaces. fetch-live-orders then read currency_code, believed the
+      // amount was already native, and skipped the USD->CAD conversion. Order
+      // 702-5492481-4068251 was stored as 20.75 "CAD", shown as $14.56 after
+      // the page converted it back, and actually sold for CA$34.13 (~US$24).
+      // Across 180 days the non-US estimates were +30% (CA), +1630% (MX) and
+      // +422% (BR) against settled prices, while US was +0.3%.
+      //
+      // So currency_code now records the currency of the AMOUNT, which for an
+      // inventory-derived price is USD regardless of the marketplace.
       const marketplace = order.marketplace || 'US';
       let marketplaceId = 'ATVPDKIKX0DER';
       if (marketplace === 'MX' || marketplace === 'Mexico') {
-        currencyCode = 'MXN';
         marketplaceId = 'A1AM78C64UM0Y8';
       } else if (marketplace === 'CA' || marketplace === 'Canada') {
-        currencyCode = 'CAD';
         marketplaceId = 'A2EUQ1WTGCTBG2';
       } else if (marketplace === 'BR' || marketplace === 'Brazil') {
-        currencyCode = 'BRL';
         marketplaceId = 'A2Q3Y263D00KWC';
       }
+      // snapshotSource says where the number came from, and that is what
+      // decides its currency. Every source this backfill reads is a USD
+      // inventory/estimate figure; if a marketplace-native source is ever
+      // added here it must set this explicitly rather than inheriting USD.
+      const currencyCode = 'USD';
 
       snapshotsToInsert.push({
         user_id: userId,
@@ -280,6 +295,10 @@ Deno.serve(async (req) => {
         snapshot_shipping_price: 0,
         snapshot_source: snapshotSource,
         currency_code: currencyCode,
+        // Both columns, same answer. They disagreed on the rows that caused
+        // this bug (currency USD, currency_code CAD) and the reader happened
+        // to consult the wrong one.
+        currency: currencyCode,
         marketplace_id: marketplaceId,
       });
     }
