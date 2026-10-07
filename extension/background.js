@@ -259,6 +259,33 @@ async function fetchWithRetry(url, options, maxAttempts = 3) {
   throw lastErr;
 }
 
+/**
+ * Call a Postgres function as the signed-in user.
+ *
+ * RLS and auth.uid() both apply, so a function like get_asin_fba_fee_basis
+ * sees only this seller's orders -- the reason the fee it returns can be the
+ * one Amazon actually billed rather than a generic estimate.
+ */
+async function restRpc(fn, args) {
+  let s = await ensureFreshSession();
+  const url = `${CFG.SUPABASE_URL}/rest/v1/rpc/${fn}`;
+  const headers = {
+    apikey: CFG.SUPABASE_ANON_KEY,
+    Authorization: `Bearer ${s.access_token}`,
+    "Content-Type": "application/json",
+  };
+  let res = await fetch(url, { method: "POST", headers, body: JSON.stringify(args || {}) });
+  if (res.status === 401) {
+    s = await refreshToken();
+    headers.Authorization = `Bearer ${s.access_token}`;
+    res = await fetch(url, { method: "POST", headers, body: JSON.stringify(args || {}) });
+  }
+  const text = await res.text();
+  let data; try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+  if (!res.ok) throw new Error(data?.message || data?.error || `HTTP ${res.status}`);
+  return data;
+}
+
 async function restGet(path) {
   let s = await ensureFreshSession();
   const url = `${CFG.SUPABASE_URL}/rest/v1/${path}`;
@@ -330,6 +357,29 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           await setSession(msg.session);
           sendResponse({ ok: true });
           break;
+        case "INVSPRNT_GET_FEE_BASIS": {
+          // What Amazon will ACTUALLY charge to fulfil one unit.
+          //
+          // Measured 2026-10-07 over 656 ASINs with both a quote and settled
+          // orders: the Product Fees API quote under-states what Amazon bills,
+          // and the error grows with the fee -- -$0.08 under $4, +$0.54 in the
+          // $6-9 band, +$2.20 above $9, $2,382.83 of fulfilment cost never
+          // budgeted. The mechanism is dimensional weight: B09N6FR8MT is
+          // 10.9 x 10.6 x 5.0 in at 0.82 lb, quoted $3.52 and billed $6.72 on
+          // every one of 27 units, because 578 cubic inches / 139 is 4.11 lb.
+          //
+          // get_asin_fba_fee_basis returns the billed fee when this ASIN has
+          // been sold, and a dimensional-weight cross-check when it has not.
+          // One definition, so this panel and the other cannot drift.
+          const asinFB = String(msg.asin || "").trim().toUpperCase();
+          if (!/^[A-Z0-9]{10}$/.test(asinFB)) { sendResponse({ ok: false, error: "Invalid ASIN" }); break; }
+          const rowsFB = await restRpc("get_asin_fba_fee_basis", {
+            p_asin: asinFB,
+            p_marketplace: String(msg.marketplace || "US").toUpperCase(),
+          });
+          sendResponse({ ok: true, data: Array.isArray(rowsFB) ? rowsFB[0] || null : rowsFB });
+          break;
+        }
         case "INVSPRNT_GET_SESSION": {
           const session = await getSession();
           const signed_out = await isSignedOutExplicit();

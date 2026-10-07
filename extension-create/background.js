@@ -414,6 +414,29 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           sendResponse({ ok: true, data: { fnskuRows, inventoryRows, createdListingRows } });
           break;
         }
+        case "INVSPRNT_GET_FEE_BASIS": {
+          // What Amazon will ACTUALLY charge to fulfil one unit.
+          //
+          // Measured 2026-10-07 over 656 ASINs with both a quote and settled
+          // orders: the Product Fees API quote under-states what Amazon bills,
+          // and the error grows with the fee -- -$0.08 under $4, +$0.54 in the
+          // $6-9 band, +$2.20 above $9, $2,382.83 of fulfilment cost never
+          // budgeted. The mechanism is dimensional weight: B09N6FR8MT is
+          // 10.9 x 10.6 x 5.0 in at 0.82 lb, quoted $3.52 and billed $6.72 on
+          // every one of 27 units, because 578 cubic inches / 139 is 4.11 lb.
+          //
+          // get_asin_fba_fee_basis returns the billed fee when this ASIN has
+          // been sold, and a dimensional-weight cross-check when it has not.
+          // One definition, so this panel and the other cannot drift.
+          const asinFB = String(msg.asin || "").trim().toUpperCase();
+          if (!/^[A-Z0-9]{10}$/.test(asinFB)) { sendResponse({ ok: false, error: "Invalid ASIN" }); break; }
+          const rowsFB = await restRpc("get_asin_fba_fee_basis", {
+            p_asin: asinFB,
+            p_marketplace: String(msg.marketplace || "US").toUpperCase(),
+          });
+          sendResponse({ ok: true, data: Array.isArray(rowsFB) ? rowsFB[0] || null : rowsFB });
+          break;
+        }
         case "INVSPRNT_GET_FEE_CACHE": {
           // asin_fee_cache is maintained by the order sync and the repricer.
           // Reading it costs nothing; asking SP-API for fees again would spend

@@ -589,6 +589,7 @@ $("apx-fetch").addEventListener("click", async () => {
   setStatus("apx-fetch-status", "");
   renderProduct();
   state.returnStats = null;
+  void loadFeeBasis(asin);
   void loadReturnStats(asin, "apx-returns", (d) => { state.returnStats = d; recalcRoi(); });
   $("apx-form").classList.remove("hidden");
   if (!$("apx-sku").value) $("apx-sku").value = generateSKU();
@@ -682,8 +683,39 @@ function renderProduct() {
  * produce a negative-fee windfall, and falls back to 15% when there is no
  * reference price to divide by.
  */
+/**
+ * The fulfilment fee, preferring what Amazon ACTUALLY billed.
+ *
+ * MEASURED 2026-10-07 across 656 ASINs that have both a quote and settled FBA
+ * orders: the Product Fees API under-states the fulfilment fee, and the error
+ * grows with the fee itself --
+ *
+ *   billed under $4   quoted $3.59  billed $3.52   -$0.08
+ *   $4 - 5.99         quoted $4.69  billed $4.76   +$0.07
+ *   $6 - 8.99         quoted $6.23  billed $6.78   +$0.54
+ *   $9 - 14.99        quoted $8.48  billed $10.68  +$2.20
+ *
+ * 102 ASINs under-quoted, $2,382.83 of fulfilment cost never budgeted for.
+ * Not staleness (the gap is $0.09-$0.17 at every cache age) and not a fee
+ * change (fee/unit is flat across all four 2026 quarters). It is dimensional
+ * weight: B09N6FR8MT is 10.9 x 10.6 x 5.0 in at 0.82 lb, quoted $3.52 and
+ * billed $6.72 on every one of 27 units, because 578 cubic inches / 139 is
+ * 4.11 lb and Amazon bills the greater of the two.
+ *
+ * An invoice beats an estimate, so when this ASIN has been sold on FBA the
+ * billed figure is used. No fee table is involved -- within Large Standard
+ * this seller's billed fees run $2.44 to $10.61, so a tier lookup could not
+ * have replaced the number honestly.
+ */
+function billedFbaFee() {
+  const b = state.feeBasis;
+  if (!b || b.basis !== "billed") return null;
+  const fee = Number(b.fee_to_use);
+  return Number.isFinite(fee) && fee > 0 ? fee : null;
+}
+
 function feesAtPrice(fees, price) {
-  const fbaFee = Number(fees?.fbaFee) || 0;
+  const fbaFee = billedFbaFee() ?? (Number(fees?.fbaFee) || 0);
   const closing = (Number(fees?.variableClosingFee) || 0) + (Number(fees?.otherFees) || 0);
   const refFee = Number(fees?.referralFee) || 0;
   const refPrice = Number(state.product?.price) || 0;
@@ -712,18 +744,60 @@ function recalcRoi() {
   // on screen, so there was nothing to question.
   const feeEl = $("apx-feeline");
   if (feeEl) {
+    const billed = billedFbaFee();
     feeEl.textContent = totalFees > 0 && price > 0
       ? `Amazon fees at $${price.toFixed(2)}: referral $${referralFee.toFixed(2)} + FBA $${fbaFee.toFixed(2)}`
+        + (billed != null ? " (billed)" : "")
         + (closing > 0 ? ` + closing $${closing.toFixed(2)}` : "")
         + ` = $${totalFees.toFixed(2)}`
       : "";
   }
+  renderFeeBasisWarning();
   // Same figures, discounted by how often this product comes back. Recomputed
   // here rather than once on fetch, so it tracks the cost the seller is typing.
   renderAfterReturns("apx-after-returns", computeAfterReturns({
     price, cog, referralFee, fbaFee, closingFee: closing,
     stats: state.returnStats,
   }));
+}
+
+/**
+ * Say when the fulfilment fee cannot be trusted.
+ *
+ * The expensive case is the one with no sales history -- a new ASIN being
+ * sourced, which is exactly when the money is committed and exactly when there
+ * is no invoice to check Amazon's quote against. There the panel does NOT
+ * invent a replacement figure: within one size tier this seller's billed fees
+ * span $2.44 to $10.61, so a computed fee would be a different wrong number on
+ * the same screen. It says what it knows -- this item is bulky for its weight,
+ * so a quote priced on weight will be too low -- and leaves the decision where
+ * it belongs.
+ */
+function renderFeeBasisWarning() {
+  const el = $("apx-fee-basis");
+  if (!el) return;
+  const b = state.feeBasis;
+  if (!b || !b.note) { el.textContent = ""; el.className = "apx-status"; return; }
+  el.textContent = (b.size_tier ? `${b.size_tier} · ` : "") + b.note;
+  el.className = "apx-status" + (b.understated ? " err" : "");
+  el.style.color = b.understated ? "var(--bad)" : "var(--muted)";
+}
+
+async function loadFeeBasis(asin) {
+  state.feeBasis = null;
+  renderFeeBasisWarning();
+  if (!asin) return;
+  try {
+    const r = await bg("INVSPRNT_GET_FEE_BASIS", { asin, marketplace: state.selectedMarketplace || "US" });
+    if (state.asin !== asin) return; // stale
+    state.feeBasis = r?.ok ? r.data : null;
+  } catch (e) {
+    console.debug("[InvSPRNT] fee basis unavailable:", e?.message || e);
+  }
+  // Repaint through recalcRoi, not just the warning: a billed fee CHANGES the
+  // profit and ROI already on screen, and leaving those stale would be worse
+  // than never having looked.
+  recalcRoi();
 }
 
 /* ─── Validate / Create ─── */

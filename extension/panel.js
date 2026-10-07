@@ -41,7 +41,7 @@
 
   let state = {
     asin: null, marketplace: "US", currency: "USD",
-    fees: null, feesRefPrice: null, eligibility: null, stability: null, history: null,
+    fees: null, feesRefPrice: null, feeBasis: null, eligibility: null, stability: null, history: null,
     fbaElig: null, // { eligible, blockingIssues[], warnings[], fba_block_reason }
     fbaComplianceLoading: false, fbaComplianceError: null,
     dims: null,
@@ -179,7 +179,53 @@
     return sum > 0 ? sum : null;
   }
 
-  function computeWebStyleRoi(salePrice, unitCost, fees) {
+  /**
+   * The fulfilment fee Amazon ACTUALLY bills, when we know it.
+   *
+   * This panel already computes a size tier -- classifySizeTier(), printed in
+   * the diagnostics grid -- and the ROI beside it ignored it completely, using
+   * whatever Amazon's Product Fees API returned.
+   *
+   * MEASURED 2026-10-07 across 656 ASINs with both a quote and settled FBA
+   * orders: the quote under-states the fulfilment fee, and the error grows
+   * with the fee -- -$0.08 under $4, +$0.07 in the $4-6 band, +$0.54 in $6-9,
+   * +$2.20 above $9. 102 ASINs under-quoted, $2,382.83 of fulfilment cost
+   * never budgeted for. Not staleness (gap is $0.09-$0.17 at every cache age)
+   * and not a fee-schedule change (fee/unit is flat across all four 2026
+   * quarters).
+   *
+   * It is dimensional weight. B09N6FR8MT is 10.9 x 10.6 x 5.0 in at 0.82 lb;
+   * quoted $3.52, billed $6.72 on every one of 27 units, because 578 cubic
+   * inches / 139 is 4.11 lb and Amazon bills the greater of the two. On a $17
+   * sale that $3.20 is most of the margin -- a BUY that was really a loss.
+   *
+   * So: when the seller has sold this ASIN on FBA, use the invoice. The tier
+   * is NOT used to compute a fee, because within Large Standard this seller's
+   * billed fees span $2.44 to $10.61 -- too coarse to replace the number
+   * honestly. It drives the warning instead.
+   */
+  function billedFbaFee() {
+    const b = state.feeBasis;
+    if (!b || b.basis !== "billed") return null;
+    const fee = Number(b.fee_to_use);
+    return Number.isFinite(fee) && fee > 0 ? fee : null;
+  }
+
+  /** The fee object with its fulfilment line replaced by the billed one. */
+  function withBilledFba(fees) {
+    const billed = billedFbaFee();
+    if (!fees || billed == null) return fees;
+    const old = Number(fees.fbaFee) || 0;
+    if (Math.abs(billed - old) < 0.005) return fees;
+    // totalFees is recomputed rather than adjusted, so a payload carrying its
+    // own total cannot silently keep the understated figure.
+    const referral = Number(fees.referralFee) || 0;
+    const closing = (Number(fees.variableClosingFee) || 0) + (Number(fees.otherFees) || 0);
+    return { ...fees, fbaFee: billed, totalFees: referral + billed + closing };
+  }
+
+  function computeWebStyleRoi(salePrice, unitCost, feesIn) {
+    const fees = withBilledFba(feesIn);
     const baseFees = getActualFeeTotal(fees);
     if (!(salePrice > 0) || !(unitCost > 0) || baseFees == null) {
       return { unitFees: baseFees, profit: null, roi: null, margin: null };
@@ -205,6 +251,32 @@
       roi: (profit / unitCost) * 100,
       margin: (profit / salePrice) * 100,
     };
+  }
+
+  /**
+   * Fetch the fee basis and repaint everything that rests on the fee.
+   *
+   * ROI, the per-seller ROI column and Max Cost all read the fulfilment fee,
+   * so a correction that arrives late has to push through all three -- a
+   * corrected fee showing up beside an uncorrected Max Cost would be worse
+   * than not correcting at all.
+   */
+  async function loadFeeBasis(asin, marketplace) {
+    try {
+      const r = await bg("INVSPRNT_GET_FEE_BASIS", { asin, marketplace });
+      if (state.asin !== asin || state.marketplace !== marketplace) return; // stale scan
+      state.feeBasis = r?.ok ? r.data : null;
+    } catch (e) {
+      console.debug("[InvSPRNT] fee basis unavailable", e?.message || e);
+      return;
+    }
+    try {
+      renderRoiAndSignal();
+      renderSellers();
+      renderSellerAmpSummary();
+    } catch (e) {
+      console.error("[InvSPRNT] repaint after fee basis failed", e);
+    }
   }
 
   const FEE_RETRY_DELAYS_MS = [2500, 7000, 15000];
@@ -1141,7 +1213,12 @@
         convHintEl.textContent = "";
       }
     }
-    $("apx-fees").textContent = feesAvailable ? fmtMoney(unitFees, state.currency) : "fees unavailable";
+    // Say where the number came from. An invoice and an estimate are not the
+    // same claim, and the seller has to be able to tell them apart on the one
+    // screen a buy decision is made from.
+    $("apx-fees").textContent = feesAvailable
+      ? fmtMoney(unitFees, state.currency) + (billedFbaFee() != null ? " billed" : "")
+      : "fees unavailable";
     $("apx-profit").textContent = profit != null ? fmtMoney(profit, state.currency) : "—";
     $("apx-roi-out").textContent = roi != null ? roi.toFixed(0) + "%" : "—";
 
@@ -1316,8 +1393,11 @@
     const unitCost = convertUsdToMarket(unitCostUsd);
     const f = state.fees || null;
     const totalFees = getActualFeeTotal(f);
+    // Same correction as computeWebStyleRoi: every seller's ROI in this column
+    // is computed as if we fulfilled it, so it must use the fee we would be
+    // billed, not the one Amazon estimated.
     const refFee = totalFees == null ? 0 : (Number(f?.referralFee) || 0);
-    const fbaFee = totalFees == null ? 0 : (Number(f?.fbaFee) || 0);
+    const fbaFee = totalFees == null ? 0 : (billedFbaFee() ?? (Number(f?.fbaFee) || 0));
     const closing = totalFees == null ? 0 : (Number(f?.variableClosingFee) || 0) + (Number(f?.otherFees) || 0);
     // Reference price the SP-API fees were estimated against. Prefer the
     // price returned by `fetch-listing-snapshot` (same SP-API snapshot as
@@ -1593,6 +1673,11 @@
         // rank arrived, leaving "—" until the next scan.
         renderStability();
         markSummarySourceReady("snapshot");
+        // What Amazon actually billed for this ASIN, if the seller has sold it.
+        // Fired after the snapshot because it CORRECTS the snapshot's fee, and
+        // deliberately not awaited -- a slow lookup must not hold up a panel
+        // that is already usable. It repaints when it lands.
+        void loadFeeBasis(a, m);
         // Not approved yet on this first check? Amazon's restrictions API and
         // our own seller-account override (see fetch-listing-snapshot)
         // both have a brief eventual-consistency window right after a real
@@ -1878,6 +1963,42 @@
     if (longest <= 108 && girth  <= 165)                              return { level: "caution", text: "Oversize" };
     return { level: "bad", text: "Heavy/Bulky" };
   }
+  /**
+   * Fold the fee verdict into the Size Tier row.
+   *
+   * The warning lives here rather than in its own card because the tier is
+   * what makes it legible: "Large Standard" next to "bills on 4.11 lb of
+   * volume, not 0.82 lb of weight" explains itself, where either half alone
+   * does not.
+   *
+   * It never replaces the fee with a computed one. Within Large Standard this
+   * seller's billed fees run $2.44 to $10.61, so a tier-derived figure would
+   * be a different wrong number -- and a wrong number that LOOKS careful is
+   * worse than one that admits it is an estimate.
+   */
+  function sizeTierRow(sz) {
+    const b = state.feeBasis;
+    const base = { level: sz.level, text: sz.text, tip: "Estimated from package dimensions/weight." };
+    if (!b) return base;
+    if (b.basis === "billed") {
+      return {
+        level: b.understated ? "caution" : sz.level,
+        text: sz.text,
+        caption: `FBA fee $${Number(b.fee_to_use).toFixed(2)} billed`,
+        tip: `${b.note} Quote was $${b.quoted_fee ?? "—"}. ROI uses the billed figure.`,
+      };
+    }
+    if (b.understated) {
+      return {
+        level: "caution",
+        text: sz.text,
+        caption: "fee may be understated",
+        tip: `${b.note} No sales history for this ASIN, so the ROI still uses Amazon's quote — treat it as a floor, not a figure.`,
+      };
+    }
+    return { ...base, tip: b.note || base.tip };
+  }
+
   function classifyVariations() {
     const v = state.stability?.intel?.variation_count;
     if (v == null) return { level: "unknown", text: "Unknown" };
@@ -1899,7 +2020,9 @@
     const offers = state.history?.offers?.list || [];
     const sale = pickAnchorPrice(offers, state.sellerMode);
     if (sale == null) return null;
-    const unitFees = getActualFeeTotal(state.fees);
+    // Max Cost authorises what the seller may pay, so an understated fee here
+    // authorises overpaying -- the same failure as the ROI, one step later.
+    const unitFees = getActualFeeTotal(withBilledFba(state.fees));
     if (unitFees == null) return null;
     return Math.max(0, (sale - unitFees) / 1.30);
   }
@@ -2124,7 +2247,14 @@
       { k: "Historical Active Offers", level: sellerHist?.sufficient ? "good" : "unknown", text: historicalText, tip: "Active new-condition offers approximate seller participation — one seller can occasionally hold multiple offers. Trend is informational only in this phase.", src: ["history"] },
       { k: "Hazmat / Dangerous Goods", ...haz, tip: "Is this ASIN under Amazon's Dangerous Goods program? From the FBA compliance stage check.", src: ["fbaElig"] },
       { k: "IP Analysis", level: "good", text: "No known issues", tip: "No internal IP risk database matches.", src: [] },
-      { k: "Size Tier", ...sz, tip: "Estimated from package dimensions/weight.", src: ["dims"] },
+      // Size Tier now says what it MEANS for the fee, which is the only reason
+      // a sourcing screen shows a size tier at all. It used to sit here purely
+      // as a label while the ROI beside it quietly used a fee priced on actual
+      // weight -- so a bulky-but-light item read as a good buy and was not.
+      // src stays ["dims"]: the fee basis is not one of SUMMARY_SOURCES, so
+      // naming it here would claim a gate that does not exist. It arrives
+      // later and repaints this grid itself.
+      { k: "Size Tier", ...sizeTierRow(sz), src: ["dims"] },
       { k: "Variations", ...vars, tip: "Number of child ASINs from Keepa.", src: ["stability"] },
     ];
     const grid = $("apx-diag-grid");
@@ -3290,6 +3420,7 @@
       if (changed) {
         state.fees = null;
         state.feesRefPrice = null;
+        state.feeBasis = null;
 
         state.history = null;
         state.stability = null;
