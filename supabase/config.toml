@@ -537,3 +537,9 @@ verify_jwt = false
 # guard, and the function has no write path at all.
 [functions.probe-order-status-sample]
 verify_jwt = false
+
+# Batch resolver for months-old Pending orders. Invoked from migrations with
+# x-internal-secret and no Authorization header, so the gateway must not demand
+# a JWT. requireInternalCall() is the guard, and writing needs apply:true.
+[functions.resolve-stuck-pending-orders]
+verify_jwt = false
