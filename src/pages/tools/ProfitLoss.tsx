@@ -374,7 +374,9 @@ export default function ProfitLoss() {
   const [warehouseWriteoffRowCount, setWarehouseWriteoffRowCount] = useState(0);
   const [netProfit, setNetProfit] = useState(0);
   const [showRefundsDialog, setShowRefundsDialog] = useState(false);
-  const [exportingExcel, setExportingExcel] = useState(false);
+  // Which variant is running, not merely whether one is -- two buttons share
+  // this and each needs to show its own spinner.
+  const [exportingExcel, setExportingExcel] = useState<null | 'styled' | 'plain'>(null);
   const [excelDownload, setExcelDownload] = useState<{ url: string; filename: string } | null>(null);
 
   useEffect(() => {
@@ -1455,15 +1457,27 @@ export default function ProfitLoss() {
     }
   };
 
-  const exportToExcel = async () => {
+  /**
+   * @param plain  Strip every border and fill, and set the sheet to print on
+   *               one page wide.
+   *
+   * The styled export is built to be READ on screen -- section fills, zebra
+   * striping, a box around every cell. Printed, that runs to about eight pages,
+   * and the rules are what make it eight: a bordered cell cannot be trimmed at
+   * the edges, and the colour blocks stop Excel's own fit-to-width from
+   * helping. The plain variant keeps the hierarchy in BOLD and ITALIC, which
+   * costs no width, and leaves the page clean enough to crop.
+   */
+  const exportToExcel = async (plain = false) => {
     if (exportingExcel) return;
     if (!user || !startDate || !endDate || !summary) {
       toast.error("Load P&L data before exporting Excel.");
       return;
     }
 
-    setExportingExcel(true);
-    const exportToast = toast.loading("Preparing month-by-month export…");
+    setExportingExcel(plain ? 'plain' : 'styled');
+    const exportToast = toast.loading(
+      plain ? "Preparing plain export…" : "Preparing month-by-month export…");
     try {
       // Always export the FULL selected year month-by-month (Jan → Dec),
       // regardless of whether the user is currently viewing a monthly or yearly window.
@@ -2124,6 +2138,19 @@ export default function ProfitLoss() {
       const wb2 = new ExcelJS.Workbook();
       const ws2 = wb2.addWorksheet('P&L by Month', {
         views: [{ state: 'frozen', ySplit: 4, xSplit: 1 }],
+        // Fit-to-width is what actually reduces the page count; removing the
+        // rules alone would still spill columns onto a second sheet of paper.
+        // fitToHeight 0 means "as many pages tall as it needs" -- capping the
+        // height as well would shrink the type until it is unreadable.
+        ...(plain ? {
+          pageSetup: {
+            orientation: 'landscape' as const,
+            fitToPage: true,
+            fitToWidth: 1,
+            fitToHeight: 0,
+            margins: { left: 0.25, right: 0.25, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 },
+          },
+        } : {}),
       });
 
       const totalCols = 1 + months.length + 1;
@@ -2153,17 +2180,23 @@ export default function ProfitLoss() {
         // Title row (row 1) — big bold
         if (idx === 0) {
           ws2.mergeCells(`A${rowNum}:${lastColLetter}${rowNum}`);
-          excelRow.getCell(1).font = { bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
-          excelRow.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F1C3F' } };
-          excelRow.getCell(1).alignment = { horizontal: 'center', vertical: 'middle' };
-          excelRow.height = 24;
+          excelRow.getCell(1).font = plain
+            ? { bold: true, size: 13 }
+            : { bold: true, size: 14, color: { argb: 'FFFFFFFF' } };
+          if (!plain) {
+            excelRow.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F1C3F' } };
+          }
+          excelRow.getCell(1).alignment = { horizontal: plain ? 'left' : 'center', vertical: 'middle' };
+          if (!plain) excelRow.height = 24;
           return;
         }
         // Subtitle (mode) row 2
         if (idx === 1) {
           ws2.mergeCells(`A${rowNum}:${lastColLetter}${rowNum}`);
-          excelRow.getCell(1).font = { italic: true, size: 11, color: { argb: 'FF374151' } };
-          excelRow.getCell(1).alignment = { horizontal: 'center' };
+          excelRow.getCell(1).font = plain
+            ? { italic: true, size: 10 }
+            : { italic: true, size: 11, color: { argb: 'FF374151' } };
+          excelRow.getCell(1).alignment = { horizontal: plain ? 'left' : 'center' };
           return;
         }
 
@@ -2175,20 +2208,27 @@ export default function ProfitLoss() {
           currentSectionStart = rowNum;
           ws2.mergeCells(`A${rowNum}:${lastColLetter}${rowNum}`);
           const c = excelRow.getCell(1);
-          c.font = { bold: true, size: 12, color: { argb: 'FFFFFFFF' } };
-          c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F2A44' } };
-          c.alignment = { horizontal: 'left', vertical: 'middle', indent: 1 };
-          excelRow.height = 20;
+          // Bold alone carries the hierarchy on paper, and costs no width.
+          c.font = plain
+            ? { bold: true, size: 11 }
+            : { bold: true, size: 12, color: { argb: 'FFFFFFFF' } };
+          if (!plain) {
+            c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F2A44' } };
+          }
+          c.alignment = { horizontal: 'left', vertical: 'middle', indent: plain ? 0 : 1 };
+          if (!plain) excelRow.height = 20;
           return;
         }
 
         // Header row (Category | months… | TOTAL)
         if (firstCell === 'Category') {
           excelRow.eachCell((cell, colNumber) => {
-            cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF3B5998' } };
+            cell.font = plain ? { bold: true } : { bold: true, color: { argb: 'FFFFFFFF' } };
+            if (!plain) {
+              cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF3B5998' } };
+              cell.border = { top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder };
+            }
             cell.alignment = { horizontal: colNumber === 1 ? 'left' : 'center', vertical: 'middle' };
-            cell.border = { top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder };
           });
           return;
         }
@@ -2203,31 +2243,33 @@ export default function ProfitLoss() {
 
         excelRow.eachCell({ includeEmpty: true }, (cell, colNumber) => {
           if (colNumber > totalCols) return;
-          cell.border = { top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder };
+          if (!plain) {
+            cell.border = { top: thinBorder, bottom: thinBorder, left: thinBorder, right: thinBorder };
+          }
+          // Bold and italic survive into the plain variant: they are the only
+          // emphasis that costs nothing in width and nothing at the trimmed
+          // edge of a page.
+          const font = plain
+            ? { bold: isTotal, italic: isMemo }
+            : { bold: isTotal, italic: isMemo, color: { argb: isMemo ? 'FF6B7280' : 'FF111827' } };
           if (colNumber === 1) {
-            cell.alignment = { horizontal: 'left', vertical: 'middle', indent: 1, wrapText: true };
-            cell.font = {
-              bold: isTotal,
-              italic: isMemo,
-              color: { argb: isMemo ? 'FF6B7280' : 'FF111827' },
-            };
+            cell.alignment = { horizontal: 'left', vertical: 'middle', indent: plain ? 0 : 1, wrapText: !plain };
+            cell.font = font;
           } else {
             cell.numFmt = '$#,##0.00;[Red]($#,##0.00);"-"';
             cell.alignment = { horizontal: 'right', vertical: 'middle' };
-            cell.font = {
-              bold: isTotal,
-              italic: isMemo,
-              color: { argb: isMemo ? 'FF6B7280' : 'FF111827' },
+            cell.font = font;
+          }
+          if (!plain) {
+            cell.fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb: isTotal ? 'FFE5EDF7' : zebra },
             };
           }
-          cell.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: isTotal ? 'FFE5EDF7' : zebra },
-          };
         });
 
-        if (isTotal) {
+        if (isTotal && !plain) {
           excelRow.eachCell({ includeEmpty: true }, (cell, colNumber) => {
             if (colNumber > totalCols) return;
             cell.border = {
@@ -2245,8 +2287,9 @@ export default function ProfitLoss() {
         sectionRanges.push({ startRow: currentSectionStart, endRow: ws2.rowCount });
       }
 
-      // Thick outside border around each section
-      sectionRanges.forEach(({ startRow, endRow }) => {
+      // Thick outside border around each section. Skipped entirely in the plain
+      // variant -- this pass is the single biggest source of rules on the page.
+      if (!plain) sectionRanges.forEach(({ startRow, endRow }) => {
         for (let r = startRow; r <= endRow; r++) {
           for (let c = 1; c <= totalCols; c++) {
             const cell = ws2.getCell(r, c);
@@ -2262,14 +2305,17 @@ export default function ProfitLoss() {
       });
 
       // Column widths
-      ws2.getColumn(1).width = 42;
-      for (let i = 2; i <= 1 + months.length; i++) ws2.getColumn(i).width = 15;
-      ws2.getColumn(totalCols).width = 17;
+      // Narrower in the plain variant. The styled one wraps long category names
+      // over two lines inside a bordered cell and needs the room; without
+      // borders the text can simply run to its natural length.
+      ws2.getColumn(1).width = plain ? 34 : 42;
+      for (let i = 2; i <= 1 + months.length; i++) ws2.getColumn(i).width = plain ? 11 : 15;
+      ws2.getColumn(totalCols).width = plain ? 13 : 17;
 
       const arrayBuffer = await wb2.xlsx.writeBuffer();
       const blob = new Blob([arrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       const url = URL.createObjectURL(blob);
-      const filename = `ProfitLoss_${isEstimatedExport ? 'Estimated' : 'Reconciled'}_${exportYear}_MonthByMonth.xlsx`;
+      const filename = `ProfitLoss_${isEstimatedExport ? 'Estimated' : 'Reconciled'}_${exportYear}_MonthByMonth${plain ? '_Plain' : ''}.xlsx`;
       setExcelDownload(prev => {
         if (prev?.url) URL.revokeObjectURL(prev.url);
         return { url, filename };
@@ -2283,12 +2329,16 @@ export default function ProfitLoss() {
       a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
       document.body.removeChild(a);
 
-      toast.success("Excel file is ready. If it does not download automatically, click Download Ready File.", { id: exportToast });
+      toast.success(
+        plain
+          ? "Plain Excel file is ready — no borders or fills, set to print one page wide."
+          : "Excel file is ready. If it does not download automatically, click Download Ready File.",
+        { id: exportToast });
     } catch (err: any) {
       console.error('[Export] failed', err);
       toast.error(`Export failed: ${err?.message || 'unknown error'}`, { id: exportToast });
     } finally {
-      setExportingExcel(false);
+      setExportingExcel(null);
     }
   };
 
@@ -2568,9 +2618,23 @@ export default function ProfitLoss() {
                   {/* Same big-green treatment already used for the other
                       primary actions on this page, so the export reads as a
                       main action rather than a secondary one. */}
-                  <Button onClick={exportToExcel} disabled={exportingExcel} className="gap-2 bg-green-600 hover:bg-green-700 text-white font-semibold text-base px-6 py-5 shadow-md">
-                    {exportingExcel ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                    {exportingExcel ? 'Preparing Excel...' : 'Export Excel'}
+                  <Button onClick={() => exportToExcel(false)} disabled={!!exportingExcel} className="gap-2 bg-green-600 hover:bg-green-700 text-white font-semibold text-base px-6 py-5 shadow-md">
+                    {exportingExcel === 'styled' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                    {exportingExcel === 'styled' ? 'Preparing Excel...' : 'Export Excel'}
+                  </Button>
+                  {/* Same figures, no rules. The styled sheet runs to about
+                      eight printed pages because every cell is boxed and
+                      colour-blocked; this one prints clean and one page wide,
+                      so the edges can be trimmed. */}
+                  <Button
+                    onClick={() => exportToExcel(true)}
+                    disabled={!!exportingExcel}
+                    variant="outline"
+                    title="Same data with no borders or background fills, set to print one page wide"
+                    className="gap-2 font-semibold text-base px-6 py-5 shadow-md"
+                  >
+                    {exportingExcel === 'plain' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                    {exportingExcel === 'plain' ? 'Preparing plain...' : 'Export Plain'}
                   </Button>
                   {excelDownload && !exportingExcel && (
                     <Button asChild className="gap-2 bg-green-600 hover:bg-green-700 text-white font-semibold text-base px-6 py-5 shadow-md">
