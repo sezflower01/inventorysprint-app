@@ -33,6 +33,27 @@
     return { bsr: null, source: null };
   };
 
+  /**
+   * The subcategory rank, shown ONLY when there is no department rank.
+   *
+   * Deliberately NOT part of displayBsr(), and deliberately never passed to
+   * estimateMonthlySales(). A classification rank is a position inside a narrow
+   * subcategory: #400 in a small niche and #400 in Toys & Games describe very
+   * different products, and the Est/mo curve (100000 x BSR^-0.6) is calibrated
+   * on department ranks. Feeding a subcategory rank through it would turn a
+   * blank into a confident wrong number, which is the worse of the two.
+   *
+   * Worth showing anyway. Measured 2026-10-10 over 630 cached ASINs: 60
+   * (9.5 pct) have no department rank, 37.5 pct among books, and 43 of those 60
+   * have sold 5,085 units between them -- one of them 2,830. "No rank" was
+   * reading as "dead listing" on products that are anything but.
+   */
+  const displaySubRank = () => {
+    const rank = Number(state.product?.salesRankSub);
+    if (!Number.isFinite(rank) || rank <= 0) return null;
+    return { rank, title: state.product?.salesRankSubTitle || null };
+  };
+
   // The five lookups loadData() runs per scan, by the name each task marks
   // ready. renderSellerAmpSummary() fills a row as soon as ITS inputs are in,
   // rather than holding every row until the slowest lookup settles. Declared
@@ -1667,6 +1688,12 @@
         state.product.salesRank = Number.isFinite(Number(prod?.salesRank)) && Number(prod.salesRank) > 0
           ? Number(prod.salesRank)
           : null;
+        // Labelled fallback only -- never merged into salesRank, never fed to
+        // the Est/mo curve. See displaySubRank().
+        state.product.salesRankSub = Number.isFinite(Number(prod?.salesRankSub)) && Number(prod.salesRankSub) > 0
+          ? Number(prod.salesRankSub)
+          : null;
+        state.product.salesRankSubTitle = prod?.salesRankSubTitle || null;
         renderMeta(); renderEligibility(); renderFbaEligibility(); renderFbaCompliance(); renderRoiAndSignal();
         // Also re-render the stability block: it owns the BSR card, and when
         // Keepa finishes FIRST that card was drawn before Amazon's fallback
@@ -2205,12 +2232,25 @@
     // "No rank" only once BOTH sources have answered -- before that a dash
     // means "still loading", and claiming otherwise is worse than a dash.
     const bsrSettled = ready("stability") && state.product && "salesRank" in state.product;
-    $("apx-sa-bsr").textContent = bsr ? "#" + bsr.toLocaleString() : (bsrSettled ? "No rank" : "—");
+    const sub = bsr ? null : displaySubRank();
+    $("apx-sa-bsr").textContent = bsr
+      ? "#" + bsr.toLocaleString()
+      : (sub ? "#" + sub.rank.toLocaleString() + " sub" : (bsrSettled ? "No rank" : "—"));
     { const _b = $("apx-sa-bsr"); if (_b) _b.title = bsr
         ? (bsrSource === "amazon" ? "Amazon's own sales rank (Keepa has none for this product)" : "Keepa sales rank")
-        : "No sales rank from Keepa or Amazon"; }
+        : (sub
+            ? "#" + sub.rank.toLocaleString() + (sub.title ? " in " + sub.title : "")
+              + " — a SUBCATEGORY rank. No department rank exists for this product, and "
+              + "subcategory ranks are not comparable between products, so this one is not "
+              + "used for the sales estimate."
+            : "No sales rank from Keepa or Amazon"); }
+    // `bsr`, never `sub`: see displaySubRank(). A subcategory rank through this
+    // curve produces a number that looks authoritative and is not.
     const sales = estimateMonthlySales(intel, bsr);
     $("apx-sa-sales").textContent = sales ? sales.toLocaleString() + "/mo" : "—";
+    { const _s = $("apx-sa-sales"); if (_s && !sales && sub) {
+        _s.title = "No estimate: this product has only a subcategory rank, which the "
+                 + "estimate cannot be derived from."; } }
     { const _b = $("apx-sa-sales-bar"); if (_b) _b.textContent = sales ? sales.toLocaleString() + "/mo" : "—"; }
     const maxCost = computeMaxCost();
     $("apx-sa-maxcost").textContent = maxCost != null ? fmtMoney(maxCost, state.currency) : "—";

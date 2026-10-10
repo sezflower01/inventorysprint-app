@@ -112,6 +112,10 @@ Deno.serve(async (req) => {
       //
       // The label is the terminal state. Excluding it here is what makes it one.
       .or("price_confidence.is.null,price_confidence.neq.ESTIMATE_UNRECOVERABLE")
+      // Over-fetch: capped orders are filtered out in code below, and without
+      // the headroom a batch of 25 could be entirely capped rows and resolve
+      // nothing -- which would trip the stall detector for the wrong reason.
+      .limit(limit * 3)
       // '%-REFUND' misses '...-REFUND-1', and 115 such rows exist. The dry run
       // surfaced three of them -- writing a positive sold_price onto a refund
       // row would invert its sign. Match anywhere in the id, not just the end.
@@ -120,10 +124,53 @@ Deno.serve(async (req) => {
       // cohort. newestFirst exists because Amazon withholds ItemPrice on old
       // orders, and finding WHERE that boundary falls decides how much of this
       // cohort can be priced at all.
-      .order("order_date", { ascending: body?.newestFirst !== true })
-      .limit(limit);
+      .order("order_date", { ascending: body?.newestFirst !== true });
     if (rErr) return json({ error: rErr.message }, 500);
     if (!rows?.length) return json({ done: true, message: "no rows left in the cohort", tally: {} });
+
+    // ── GUARDRAIL 1: the attempt cap ────────────────────────────────────────
+    //
+    // The resolution log only gets a row on a SUCCESSFUL write, so an order
+    // Amazon throttles is retried leaving no trace -- the legitimate retry path,
+    // and precisely the one that can spin forever. This counts every ASK.
+    // Three strikes and the order is labelled and leaves the cohort, whatever
+    // Amazon did or did not say.
+    const candidateIds = [...new Set((rows as any[]).map(r =>
+      String(r.order_id).replace(/-REFUND(-\d+)?$/, "")))];
+
+    const { data: attemptRows } = await supabase
+      .from("stuck_pending_attempts")
+      .select("order_id, attempts")
+      .in("order_id", candidateIds);
+    const attemptsByOrder = new Map<string, number>(
+      (attemptRows ?? []).map((a: any) => [String(a.order_id), Number(a.attempts) || 0]));
+
+    // ── GUARDRAIL 2: the tripwire ───────────────────────────────────────────
+    //
+    // A successfully-written order must never be selected again -- that is what
+    // the terminal labels are for. If one is, the exit condition has failed a
+    // second time, and the right response is to stop and say so rather than to
+    // start writing. Three days of silent re-writing is what this exists to
+    // prevent happening twice.
+    const { data: loggedRows } = await supabase
+      .from("stuck_pending_resolution_log")
+      .select("order_id")
+      .in("order_id", candidateIds);
+    const alreadyLogged = [...new Set((loggedRows ?? []).map((l: any) => String(l.order_id)))];
+    if (alreadyLogged.length > 0) {
+      await supabase.from("stuck_pending_drain_state").update({
+        last_run_at: new Date().toISOString(),
+        last_note: `TRIPWIRE: ${alreadyLogged.length} already-resolved orders re-selected, run aborted`,
+      }).eq("id", 1);
+      return json({
+        tripwire: true,
+        aborted: true,
+        message: "selected orders that are already in the resolution log; the exit "
+               + "condition has failed again, so nothing was written",
+        alreadyLogged: alreadyLogged.slice(0, 20),
+        count: alreadyLogged.length,
+      });
+    }
 
     const token = await getLWAAccessToken(auth.refresh_token);
     const rawEndpoint = getSpApiEndpoint(auth.marketplace_id);
@@ -144,8 +191,29 @@ Deno.serve(async (req) => {
     }
 
     let i = 0;
+    let asked = 0;
     for (const [orderId, orderRows] of byOrder) {
       if (i++ > 0) await new Promise(r => setTimeout(r, PACE_MS));
+
+      const priorAttempts = attemptsByOrder.get(orderId) ?? 0;
+      if (priorAttempts >= 3) { bump("skipped_at_cap"); continue; }
+      // The query over-fetches so a batch is never all-capped; the BATCH SIZE
+      // is still `limit` asks, because that is what the pacing was sized for.
+      if (asked >= limit) { bump("deferred_to_next_run"); continue; }
+      asked++;
+      const thisAttempt = priorAttempts + 1;
+
+      // Record the ASK before making it. If this run dies mid-flight the
+      // attempt still counts -- an attempt counter that only increments on a
+      // clean finish does not bound anything.
+      if (apply) {
+        await supabase.from("stuck_pending_attempts").upsert({
+          order_id: orderId,
+          attempts: thisAttempt,
+          last_attempt: new Date().toISOString(),
+          terminal_reason: thisAttempt >= 3 ? "attempt_cap_reached" : null,
+        }, { onConflict: "order_id" });
+      }
 
       let status: string | null = null;
       try {
@@ -159,7 +227,21 @@ Deno.serve(async (req) => {
         changes.push({ order_id: orderId, error: e instanceof Error ? e.message : String(e) });
         continue;
       }
-      if (!status) { bump("no_status"); continue; }
+      if (!status) {
+        bump("no_status");
+        // Out of attempts and still no answer: label it so it leaves the
+        // cohort rather than coming back forever.
+        if (apply && thisAttempt >= 3) {
+          for (const row of orderRows) {
+            await supabase.from("sales_orders")
+              .update({ price_confidence: "ESTIMATE_UNRECOVERABLE",
+                        status_source: "resolve_stuck_pending_attempt_cap" })
+              .eq("id", row.id);
+          }
+          bump("capped_terminal");
+        }
+        continue;
+      }
       bump(status);
 
       // Amazon still says Pending: leave it completely alone. That is a real
@@ -296,7 +378,7 @@ Deno.serve(async (req) => {
 
     return json({
       apply, limit, minAgeDays,
-      ordersAsked: byOrder.size, rowsConsidered: rows.length,
+      ordersAsked: asked, ordersSelected: byOrder.size, rowsConsidered: rows.length,
       tally, changes,
     });
   } catch (err) {

@@ -551,6 +551,26 @@ Deno.serve(async (req) => {
       .map((r: any) => r?.rank).filter((n: any) => typeof n === 'number' && n > 0);
     const salesRank: number | null = broadRanks.length ? Math.min(...broadRanks) : null;
 
+    // Subcategory rank, as a LABELLED fallback only (2026-10-10).
+    //
+    // Measured over 630 cached ASINs: 60 (9.5 pct) have no displayGroupRank at
+    // all, rising to 37.5 pct on books and ISBNs, and the panel showed those as
+    // "No rank" while Amazon's own page displays something. 43 of those 60 have
+    // sold 5,085 units between them, so "no rank" was reading as "dead listing"
+    // on products that plainly are not.
+    //
+    // Still NOT merged into salesRank, and the reason stands: a classification
+    // rank is a position within a narrow subcategory and is not comparable
+    // between products. #400 in a tiny niche and #400 in Toys mean different
+    // things, and the Est/mo curve is calibrated on department ranks. It is
+    // returned separately so the panel can show it with its category name and
+    // keep it out of any estimate.
+    const subRankEntry = (rankGroup?.classificationRanks || [])
+      .filter((r: any) => typeof r?.rank === 'number' && r.rank > 0)
+      .sort((a: any, b: any) => a.rank - b.rank)[0] || null;
+    const salesRankSub: number | null = subRankEntry?.rank ?? null;
+    const salesRankSubTitle: string | null = subRankEntry?.title ?? null;
+
     // Keep what Amazon said, including nothing. Without this row a blank BSR in
     // the extension is unexplainable: "Amazon has no rank for this ASIN" and
     // "the lookup never ran" look identical (20260920060000). Fire-and-forget
@@ -1195,6 +1215,8 @@ Deno.serve(async (req) => {
         gatingReasons,
         // Amazon's own BSR, used by the panel only when Keepa has none.
         salesRank,
+        salesRankSub,
+        salesRankSubTitle,
         marketplaceGating  // New: array of eligibility per marketplace
       }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
