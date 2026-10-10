@@ -2305,12 +2305,53 @@ export default function ProfitLoss() {
       });
 
       // Column widths
-      // Narrower in the plain variant. The styled one wraps long category names
-      // over two lines inside a bordered cell and needs the room; without
-      // borders the text can simply run to its natural length.
-      ws2.getColumn(1).width = plain ? 34 : 42;
-      for (let i = 2; i <= 1 + months.length; i++) ws2.getColumn(i).width = plain ? 11 : 15;
-      ws2.getColumn(totalCols).width = plain ? 13 : 17;
+      // Column widths.
+      //
+      // The styled variant wraps long category names over two lines inside a
+      // bordered cell, so fixed widths are fine there.
+      //
+      // The plain variant cannot use a fixed width. Excel renders a numeric
+      // cell that does not fit as ######, and the P&L's own totals are the
+      // widest values on the sheet: "($45,512.61)" is twelve characters once
+      // the currency symbol, the thousands separators and the brackets around
+      // a negative are counted. A first pass at 11 masked exactly the rows
+      // that matter -- Total Expenses, COGS, Total Operating Expenses, Total
+      // Amazon Fees -- while leaving every ordinary line legible, which is the
+      // worst possible place to lose a digit.
+      //
+      // So measure the content instead of guessing a safer number: widen each
+      // column to its own longest formatted value and no further. That keeps
+      // the sheet as narrow as the data genuinely allows and makes ###### a
+      // structural impossibility rather than something to re-check by eye
+      // whenever a figure grows a digit.
+      const formattedWidth = (v: unknown) => {
+        if (typeof v !== 'number' || !Number.isFinite(v)) return String(v ?? '').length;
+        // Mirrors '$#,##0.00;[Red]($#,##0.00);"-"'.
+        const body = Math.abs(v).toLocaleString('en-US', {
+          minimumFractionDigits: 2, maximumFractionDigits: 2,
+        });
+        return 1 + body.length + (v < 0 ? 2 : 0);
+      };
+
+      if (plain) {
+        const widest = new Array(totalCols).fill(0);
+        rows.forEach((row) => {
+          for (let c = 0; c < totalCols; c++) {
+            if (c >= row.length) continue;
+            widest[c] = Math.max(widest[c], formattedWidth(row[c]));
+          }
+        });
+        // Header labels are text and set their own floor; +2 is Excel's own
+        // padding, which is not included in a character count.
+        ws2.getColumn(1).width = Math.min(Math.max(widest[0] + 2, 18), 38);
+        for (let i = 2; i <= totalCols; i++) {
+          ws2.getColumn(i).width = Math.max(widest[i - 1] + 2, 10);
+        }
+      } else {
+        ws2.getColumn(1).width = 42;
+        for (let i = 2; i <= 1 + months.length; i++) ws2.getColumn(i).width = 15;
+        ws2.getColumn(totalCols).width = 17;
+      }
 
       const arrayBuffer = await wb2.xlsx.writeBuffer();
       const blob = new Blob([arrayBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
