@@ -100,6 +100,18 @@ Deno.serve(async (req) => {
       .eq("is_cancelled", false)
       .or("sold_price.is.null,sold_price.eq.0")
       .gt("estimated_price", 0)
+      // THE EXIT CONDITION THIS WORKER DID NOT HAVE.
+      //
+      // A Shipped order whose price Amazon will not return gets labelled
+      // ESTIMATE_UNRECOVERABLE and keeps sold_price 0 and estimated_price > 0
+      // -- which is this query's own definition of an unresolved row. So it
+      // selected the same rows every run, asked Amazon again, wrote again, and
+      // logged again. Measured over three days on cron 194: 25 orders written
+      // 18,195 times, the worst 734 times, while the other 149 in the cohort
+      // were never reached because those 25 filled every batch.
+      //
+      // The label is the terminal state. Excluding it here is what makes it one.
+      .or("price_confidence.is.null,price_confidence.neq.ESTIMATE_UNRECOVERABLE")
       // '%-REFUND' misses '...-REFUND-1', and 115 such rows exist. The dry run
       // surfaced three of them -- writing a positive sold_price onto a refund
       // row would invert its sign. Match anywhere in the id, not just the end.
