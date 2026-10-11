@@ -39,6 +39,7 @@ export const TOOLS: ToolLink[] = [
   { path: '/tools/reimbursements', label: 'Reimbursements', ga: 'tool_menu_reimbursements', adminOnly: true },
   { path: '/tools/shipment-builder', label: 'FBA Shipment Builder', ga: 'tool_menu_shipment_builder', adminOnly: true },
   { path: '/tools/purchase-vs-shipment', label: 'Purchase vs Shipment Report', ga: 'tool_menu_purchase_vs_shipment' },
+  { path: '/tools/unshipped-purchases', label: 'Shipment Discrepancies', ga: 'tool_menu_unshipped_purchases' },
   { path: '/tools/shipment-tracking', label: 'Shipment Tracking', ga: 'tool_menu_shipment_tracking', adminOnly: true },
   { path: '/tools/shipment-accounting', label: 'Shipment Accounting', ga: 'tool_menu_shipment_accounting' },
   { path: '/tools/replenish-search', label: 'Replenish Search', ga: 'tool_menu_replenish_search', adminOnly: true },

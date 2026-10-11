@@ -75,6 +75,7 @@ type ListingRow = {
 type ShipItem = {
   asin: string | null;
   seller_sku: string | null;
+  shipment_id: string | null;
   quantity_shipped: number | null;
   quantity_received: number | null;
 };
@@ -100,6 +101,15 @@ type GapRow = {
   moneyAtRisk: number | null;
   ageDays: number | null;
   purchaseDate: string | null;
+  /**
+   * Every shipment this ASIN appears in, newest-looking first.
+   *
+   * A row saying "12 bought, 8 received" is only half an answer -- the next
+   * question is always WHICH shipment, and until now that meant leaving the
+   * page, opening Shipment Tracking and searching by ASIN. The ids were
+   * already in fba_shipment_items; the query simply did not ask for them.
+   */
+  shipmentIds: string[];
   kind: GapKind;
 };
 
@@ -266,7 +276,7 @@ export default function UnshippedPurchases() {
       setLoading(true);
       const [l, s, inv, sold] = await Promise.all([
         fetchAllPaged("created_listings", "id, asin, sku, title, image_url, units, received_quantity, cost, amount, date_created, created_at, supplier_links", user.id),
-        fetchAllPaged("fba_shipment_items", "asin, seller_sku, quantity_shipped, quantity_received", user.id),
+        fetchAllPaged("fba_shipment_items", "asin, seller_sku, shipment_id, quantity_shipped, quantity_received", user.id),
         fetchAllPaged("inventory", "asin, available, reserved, inbound", user.id),
         // Server-side aggregate. sales_orders is ~70k rows; totalling it in the
         // browser would mean 70+ paged requests per load, and any paging slip
@@ -348,13 +358,17 @@ export default function UnshippedPurchases() {
     // a listing is frequently recreated under a new SKU, and matching on the
     // pair would report the original purchase as unshipped every time that
     // happened. ASIN is the stable identity of the thing bought.
-    const shippedByAsin = new Map<string, { shipped: number; received: number }>();
+    const shippedByAsin = new Map<string, { shipped: number; received: number; ids: Set<string> }>();
     for (const it of shipItems) {
       const asin = it.asin;
       if (!asin) continue;
-      const agg = shippedByAsin.get(asin) ?? { shipped: 0, received: 0 };
+      const agg = shippedByAsin.get(asin) ?? { shipped: 0, received: 0, ids: new Set<string>() };
       agg.shipped += Number(it.quantity_shipped) || 0;
       agg.received += Number(it.quantity_received) || 0;
+      // A Set because one ASIN can appear on several lines of the same
+      // shipment; the id is the same shipment either way and listing it twice
+      // would read as two.
+      if (it.shipment_id) agg.ids.add(String(it.shipment_id));
       shippedByAsin.set(asin, agg);
     }
 
@@ -411,6 +425,7 @@ export default function UnshippedPurchases() {
         moneyAtRisk: null,
         ageDays: when ? Math.floor((now - when.getTime()) / 86_400_000) : null,
         purchaseDate: when ? when.toISOString() : null,
+        shipmentIds: [],
         kind: "never_shipped",
       });
     }
@@ -420,6 +435,10 @@ export default function UnshippedPurchases() {
       const ship = shippedByAsin.get(r.asin);
       r.shipped = ship?.shipped ?? 0;
       r.received = ship?.received ?? 0;
+      // Sorted so the column is stable between loads. Amazon's FBA ids are not
+      // ordered by date, so this is not chronological and is not presented as
+      // though it were -- it only stops the list reshuffling on every render.
+      r.shipmentIds = ship ? Array.from(ship.ids).sort() : [];
       r.sold = soldByAsin.get(r.asin) ?? 0;
       r.onHand = stockByAsin.get(r.asin) ?? 0;
 
@@ -715,6 +734,7 @@ export default function UnshippedPurchases() {
                   <th className="text-right">Missing</th>
                   <th className="text-right">Value</th>
                   <th className="text-right">Age</th>
+                  <th>Shipments</th>
                   <th>Status</th>
                   <th className="text-right">Trace</th>
                 </tr>
@@ -803,6 +823,41 @@ export default function UnshippedPurchases() {
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums text-xs text-muted-foreground">
                         {r.ageDays != null ? `${r.ageDays}d` : "—"}
+                      </td>
+                      {/* Which shipment, linked straight to Seller Central.
+                          "8 of 12 received" always leads to "which shipment",
+                          and that used to mean leaving the page and searching
+                          Shipment Tracking by ASIN. Same URL shape the
+                          Shipment Tracking page and the ASIN trace dialog
+                          already use, so the three agree. */}
+                      <td className="px-3 py-2">
+                        {r.shipmentIds.length === 0 ? (
+                          <span className="text-muted-foreground text-xs" title="No FBA shipment record references this ASIN">—</span>
+                        ) : (
+                          <div className="flex flex-wrap gap-1 max-w-[200px]">
+                            {r.shipmentIds.slice(0, 3).map((sid) => (
+                              <a
+                                key={sid}
+                                href={`https://sellercentral.amazon.com/fba/inbound-shipment/summary/${sid}/contents`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={(e) => e.stopPropagation()}
+                                className="font-mono text-[11px] text-primary hover:underline"
+                                title={`Open shipment ${sid} in Seller Central`}
+                              >
+                                {sid}
+                              </a>
+                            ))}
+                            {r.shipmentIds.length > 3 && (
+                              <span
+                                className="text-[11px] text-muted-foreground"
+                                title={r.shipmentIds.join("\n")}
+                              >
+                                +{r.shipmentIds.length - 3} more
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </td>
                       <td className="px-3 py-2">
                         <Badge variant="outline" className={`text-[11px] ${meta.cls}`} title={meta.blurb}>

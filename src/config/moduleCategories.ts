@@ -255,9 +255,16 @@ export const MODULE_CATEGORIES: ModuleCategory[] = [
         ga: "tool_menu_price_discrepancy_audit",
       },
       {
+        // Renamed and re-described because it could not be found by what it
+        // does. The card said "purchases with no shipment", which names one of
+        // its four buckets; the page opens on a tab called Discrepancies and
+        // the other three are unit shortfalls -- Short (fewer units locatable
+        // than purchased), Amazon didn't receive (shipped but not checked in),
+        // and Never reached Amazon. Someone looking for a units discrepancy
+        // had no reason to click it.
         path: "/tools/unshipped-purchases",
-        label: "Unshipped Purchases",
-        description: "Money spent that never reached Amazon — find purchases with no shipment.",
+        label: "Shipment Discrepancies",
+        description: "Units purchased vs units Amazon actually received — short shipments, never-arrived, and unchecked-in stock.",
         icon: SearchX,
         color: "from-rose-500 to-red-600",
         adminOnly: false,
