@@ -237,6 +237,24 @@ export const MODULE_CATEGORIES: ModuleCategory[] = [
         ga: "tool_menu_purchase_vs_shipment",
       },
       {
+        // Buckets every price mismatch the moment it loads: Confirmed
+        // Mismatch, FX Suspect, Qty-halving, Pending Estimates, Missing My
+        // Price. It was in the tools dropdown only, which is a poor place for
+        // the one screen that answers "is a number on my reports wrong".
+        //
+        // Three of its buckets name faults this codebase has actually had --
+        // unconverted native currency, a double-divide in a backfill writer,
+        // and estimates standing in for confirmed prices -- so it is the first
+        // screen to open when a figure looks wrong, not the last.
+        path: "/tools/price-discrepancy-audit",
+        label: "Price Discrepancy Audit",
+        description: "Where a Sales Report price disagrees with what you listed at — FX, qty and estimate faults, bucketed.",
+        icon: ShieldAlert,
+        color: "from-amber-500 to-orange-600",
+        adminOnly: false,
+        ga: "tool_menu_price_discrepancy_audit",
+      },
+      {
         path: "/tools/unshipped-purchases",
         label: "Unshipped Purchases",
         description: "Money spent that never reached Amazon — find purchases with no shipment.",
@@ -260,16 +278,16 @@ export const MODULE_CATEGORIES: ModuleCategory[] = [
         // it answers "did this shipment actually pay for itself", and that is
         // not a question anyone remembers a URL for.
         //
-        // adminOnly matches the existing tools.ts entry for this path rather
-        // than widening access: the page's own isAdmin checks only gate its
-        // repair tools, but the menu has always treated the page as admin-only
-        // and a card is not the place to change that quietly.
+        // Not admin-only, by request. The route carries no ModuleGuard, so any
+        // signed-in user could already reach it by URL; the flag only ever
+        // controlled whether it was findable. The page's own isAdmin checks
+        // still gate its repair tools, which is where the risk actually was.
         path: "/tools/shipment-accounting",
         label: "Shipment Accounting",
         description: "Cost, fees and revenue per shipment — find units sent that never arrived.",
         icon: Banknote,
         color: "from-emerald-500 to-teal-600",
-        adminOnly: true,
+        adminOnly: false,
         ga: "tool_menu_shipment_accounting",
       },
     ],
