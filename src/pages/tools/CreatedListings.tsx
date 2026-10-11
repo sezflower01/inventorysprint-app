@@ -36,7 +36,7 @@ import { EditListingDialog } from "@/components/listings/EditListingDialog";
 import { ImportFromInventoryDialog } from "@/components/listings/ImportFromInventoryDialog";
 import { PurchaseDetailsDialog } from "@/components/listings/PurchaseDetailsDialog";
 import { CostOverrideDialog } from "@/components/inventory/CostOverrideDialog";
-import { getListingUnitCost } from "@/lib/cost-contract";
+import { getListingUnitCost, getListingTotalCost } from "@/lib/cost-contract";
 import { useFbaEligibility } from "@/hooks/use-fba-eligibility";
 import { FbaReadinessTracker } from "@/components/fba/FbaReadinessTracker";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -135,6 +135,23 @@ export default function CreatedListings() {
   const [inventory, setInventory] = useState<InventoryItem[]>(() => memorySnapshot?.data ?? []);
   const [loading, setLoading] = useState(() => !memorySnapshot?.data?.length);
   const [searchTerm, setSearchTerm] = useState("");
+  /**
+   * Total Cost range -- what the whole batch cost.
+   *
+   * Filters `cost`, the column the table shows as "Total Cost". NOT `amount`,
+   * which the table shows as "COG" and is the per-unit figure. Both columns
+   * are on screen side by side, and created_listings and inventory swap the
+   * meaning of these two fields entirely, so the input is labelled with the
+   * exact header text rather than anything that could be read as the other one.
+   *
+   * A range rather than a text match: an exact string search on a decimal
+   * almost never hits -- "580.15" would miss $580.00 and $581.00 -- which is
+   * never what "find the purchase around this size" means.
+   *
+   * Held as strings so the boxes can be empty. An empty end is an open end.
+   */
+  const [costMin, setCostMin] = useState("");
+  const [costMax, setCostMax] = useState("");
   const [updatingPrice, setUpdatingPrice] = useState<string | null>(null);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editDialogItem, setEditDialogItem] = useState<InventoryItem | null>(null);
@@ -357,6 +374,8 @@ export default function CreatedListings() {
       if (raw) {
         const s = JSON.parse(raw);
         if (typeof s.searchTerm === "string") setSearchTerm(s.searchTerm);
+        if (typeof s.costMin === "string") setCostMin(s.costMin);
+        if (typeof s.costMax === "string") setCostMax(s.costMax);
         if (typeof s.selectedSupplier === "string") setSelectedSupplier(s.selectedSupplier);
         if (typeof s.currentPage === "number") setCurrentPage(s.currentPage);
         if (typeof s.itemsPerPage === "number") setItemsPerPage(s.itemsPerPage);
@@ -380,6 +399,8 @@ export default function CreatedListings() {
     try {
       sessionStorage.setItem(VIEW_STATE_KEY, JSON.stringify({
         searchTerm,
+        costMin,
+        costMax,
         selectedSupplier,
         currentPage,
         itemsPerPage,
@@ -390,7 +411,7 @@ export default function CreatedListings() {
         scrollY: window.scrollY,
       }));
     } catch {/* ignore */}
-  }, [searchTerm, selectedSupplier, currentPage, itemsPerPage, selectedMonth, selectedYear, showNotesOnly, sourceFilter]);
+  }, [searchTerm, costMin, costMax, selectedSupplier, currentPage, itemsPerPage, selectedMonth, selectedYear, showNotesOnly, sourceFilter]);
 
   // Save scroll position on unmount/navigation
   useEffect(() => {
@@ -1901,6 +1922,13 @@ export default function CreatedListings() {
 
   const filteredInventory = useMemo(() => {
     const term = searchTerm.trim().toLowerCase();
+    // parseFloat, not Number: Number("") is 0, which would become a real lower
+    // bound of zero -- an active filter that drops nothing and looks like it is
+    // working.
+    const costLo = costMin.trim() === "" ? null : parseFloat(costMin);
+    const costHi = costMax.trim() === "" ? null : parseFloat(costMax);
+    const costActive = (costLo !== null && Number.isFinite(costLo))
+                    || (costHi !== null && Number.isFinite(costHi));
     const filterMonth = parseInt(selectedMonth);
     const filterYear = parseInt(selectedYear);
     const hasSupplierSearch = supplierSearch.trim().length > 0 || (selectedSupplier !== "all" && selectedSupplier !== "none");
@@ -1908,6 +1936,23 @@ export default function CreatedListings() {
       // Source filter (newly created listing vs added purchase batch)
       if (sourceFilter === "new" && !isNewlyCreatedRow(item)) return false;
       if (sourceFilter === "purchase" && isNewlyCreatedRow(item)) return false;
+
+      // Total Cost range.
+      //
+      // Through getListingTotalCost, not raw item.cost, so this agrees with
+      // what the row actually DISPLAYS. The contract prefers `cost` and falls
+      // back to amount * units, so a batch that only recorded a per-unit
+      // figure still has a total and still belongs in the results. Reading the
+      // column directly would silently drop exactly those rows.
+      if (costActive) {
+        const total = Number(getListingTotalCost(item));
+        // A row with no cost recorded cannot satisfy a cost range. Excluding it
+        // is the honest answer; including it would pad the result with rows
+        // whose cost is unknown, which is the opposite of what was asked.
+        if (!Number.isFinite(total) || total <= 0) return false;
+        if (costLo !== null && Number.isFinite(costLo) && total < costLo) return false;
+        if (costHi !== null && Number.isFinite(costHi) && total > costHi) return false;
+      }
 
       // Notes-only filter: skip date/supplier filters, show only items with notes
       if (showNotesOnly) {
@@ -1920,8 +1965,11 @@ export default function CreatedListings() {
         );
       }
 
-      // Skip date filter when supplier search is active OR when a search term is entered
-      if (!hasSupplierSearch && !term) {
+      // Skip the date filter when supplier search, a search term OR a cost
+      // range is active -- all three are "find this across my history"
+      // questions, and answering one with a single month on screen would be a
+      // worse answer than none.
+      if (!hasSupplierSearch && !term && !costActive) {
         if (item.date_created) {
           // date_created is a DATE column — parse as YYYY-MM-DD to avoid UTC->local TZ rollback
           const dateStr = String(item.date_created).slice(0, 10); // "2026-05-01"
@@ -1960,7 +2008,7 @@ export default function CreatedListings() {
         item.title.toLowerCase().includes(term)
       );
     });
-  }, [inventory, searchTerm, selectedSupplier, supplierByItem, selectedMonth, selectedYear, supplierSearch, showNotesOnly, sourceFilter]);
+  }, [inventory, searchTerm, costMin, costMax, selectedSupplier, supplierByItem, selectedMonth, selectedYear, supplierSearch, showNotesOnly, sourceFilter]);
 
   // Sort filtered inventory
   const sortedInventory = [...filteredInventory].sort((a, b) => {
@@ -2556,6 +2604,53 @@ export default function CreatedListings() {
                 }}
                 className="max-w-[260px]"
               />
+              {/* Two boxes, not one: the question is almost always a band
+                  ("which purchases were around $500") and an exact decimal
+                  match answers it badly. Labelled with the table's own column
+                  header so it cannot be mistaken for the per-unit COG column
+                  sitting next to it. */}
+              <div className="flex items-end gap-1.5">
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="cost-min" className="text-[11px] font-medium text-muted-foreground">
+                    Total Cost
+                  </label>
+                  <Input
+                    id="cost-min"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    inputMode="decimal"
+                    placeholder="min"
+                    value={costMin}
+                    onChange={(e) => { setCostMin(e.target.value); setCurrentPage(1); }}
+                    className="w-[92px]"
+                    title="Lowest Total Cost to show (what the whole lot cost). Leave blank for no lower limit."
+                  />
+                </div>
+                <span className="pb-2 text-muted-foreground text-xs">to</span>
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  inputMode="decimal"
+                  placeholder="max"
+                  value={costMax}
+                  onChange={(e) => { setCostMax(e.target.value); setCurrentPage(1); }}
+                  className="w-[92px]"
+                  title="Highest Total Cost to show (what the whole lot cost). Leave blank for no upper limit."
+                />
+                {(costMin || costMax) && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-9 px-2 text-xs"
+                    onClick={() => { setCostMin(""); setCostMax(""); setCurrentPage(1); }}
+                    title="Clear the Total Cost range"
+                  >
+                    Clear
+                  </Button>
+                )}
+              </div>
               <Button
                 variant="outline"
                 size="sm"
