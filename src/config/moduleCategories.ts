@@ -254,6 +254,24 @@ export const MODULE_CATEGORIES: ModuleCategory[] = [
         adminOnly: false,
         ga: "tool_menu_shipment_tracking",
       },
+      {
+        // The only shipment page with no card. It was reachable from the tools
+        // dropdown and by typing the URL, which is why it kept getting lost --
+        // it answers "did this shipment actually pay for itself", and that is
+        // not a question anyone remembers a URL for.
+        //
+        // adminOnly matches the existing tools.ts entry for this path rather
+        // than widening access: the page's own isAdmin checks only gate its
+        // repair tools, but the menu has always treated the page as admin-only
+        // and a card is not the place to change that quietly.
+        path: "/tools/shipment-accounting",
+        label: "Shipment Accounting",
+        description: "Cost, fees and revenue per shipment — find units sent that never arrived.",
+        icon: Banknote,
+        color: "from-emerald-500 to-teal-600",
+        adminOnly: true,
+        ga: "tool_menu_shipment_accounting",
+      },
     ],
   },
   {
