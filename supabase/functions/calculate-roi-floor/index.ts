@@ -1,5 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
-import { convertCurrency, getSellerHomeCurrency } from '../_shared/fx-utils.ts';
+import { convertCurrency, getSellerHomeCurrency, getUsdToRate } from '../_shared/fx-utils.ts';
 import { waitForApiToken } from "../_shared/rate-limiter.ts";
 
 const corsHeaders = {
@@ -314,13 +314,29 @@ Deno.serve(async (req) => {
 
     console.log(`[calculate-roi-floor] RESULT asin=${asin}: minPrice=${result.minPrice} actualRoi=${result.actualRoi}% iterations=${result.iterations}`);
 
-    // Also update asin_fee_cache with the live fee data for future use
+    // Also update asin_fee_cache with the live fee data for future use.
+    //
+    // CURRENCY: the Fees API is asked in the MARKETPLACE's currency
+    // (PriceToEstimateFees uses cfg.currency), so result.fees.fbaFee comes back
+    // in MXN for Mexico, CAD for Canada, BRL for Brazil.
+    // asin_fee_cache.fba_fee_fixed is contracted as USD -- the note in
+    // calculate-roi states it -- and this wrote the native figure straight in.
+    //
+    // Measured 2026-10-14: 92 MX rows from this writer averaged $48.07 against
+    // $4.35 from sp_api_live for the same marketplace, maximum $98.20. Those
+    // are pesos sitting in a dollar column.
+    //
+    // The RATE is unaffected: referralFee and minPrice are both native, so the
+    // ratio cancels. That is why this writer's referral percentages always
+    // looked sane while its fees did not, and why only the fee is converted.
+    const feeFx = await getUsdToRate(supabase, MKT[marketplace]?.currency ?? 'USD');
+    const fbaFeeUsd = feeFx > 0 ? result.fees.fbaFee / feeFx : result.fees.fbaFee;
     const effectiveRefRate = result.minPrice > 0 ? result.fees.referralFee / result.minPrice : 0.15;
     await supabase.from('asin_fee_cache').upsert({
       user_id: userId,
       asin,
       marketplace,
-      fba_fee_fixed: result.fees.fbaFee,
+      fba_fee_fixed: fbaFeeUsd,
       referral_rate: effectiveRefRate,
       fee_source: 'live_roi_floor',
       last_verified_at: new Date().toISOString(),

@@ -28,6 +28,12 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { fetchLiveFeesForAsin } from "../_shared/spapi-fees-live.ts";
+import { getUsdToRate } from "../_shared/fx-utils.ts";
+
+/** Marketplace -> the currency the Fees API answers in for it. */
+const MARKETPLACE_CURRENCY: Record<string, string> = {
+  US: "USD", CA: "CAD", MX: "MXN", BR: "BRL",
+};
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -209,6 +215,7 @@ async function liveRefreshBelowFloorPendingAsins(
 
     const result = await fetchLiveFeesForAsin(supabase, asin, marketplace, price);
     if (!result) continue;
+    const feeFx = await getUsdToRate(supabase, MARKETPLACE_CURRENCY[marketplace] ?? "USD");
 
     const { error: upsertErr } = await supabase
       .from("asin_fee_cache")
@@ -217,8 +224,23 @@ async function liveRefreshBelowFloorPendingAsins(
           user_id: userId,
           asin,
           marketplace,
-          fba_fee_fixed: result.fbaFee,
-          referral_rate: result.referralRate,
+          // Same currency fault as calculate-roi-floor, same fix.
+          // fetchLiveFeesForAsin asks the Fees API in config.currency, so
+          // fbaFee returns in MXN/CAD/BRL while asin_fee_cache.fba_fee_fixed
+          // is contracted as USD. backfill-fee-cache, the writer behind the
+          // trusted fees_api rows, states the rule outright: "sends NATIVE
+          // currency, converts response back to USD before returning".
+          fba_fee_fixed: feeFx > 0 ? result.fbaFee / feeFx : result.fbaFee,
+          // The rate is NOT converted -- it is a ratio of two native amounts
+          // and is already dimensionless. But it is range-checked, because
+          // this writer has produced impossible ones: 7 MX rows, 3 of them
+          // above 25 pct and one at 69.14 pct, which Amazon charges on no
+          // category. A rate that cannot be real is not written at all, so the
+          // read path falls through to a source that can be trusted rather
+          // than onto a confident wrong number.
+          referral_rate: (result.referralRate > 0 && result.referralRate <= 0.30)
+            ? result.referralRate
+            : null,
           is_media: result.isMedia,
           fee_source: "live_verified",
           last_verified_at: new Date().toISOString(),
