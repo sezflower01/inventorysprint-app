@@ -215,7 +215,14 @@ async function liveRefreshBelowFloorPendingAsins(
 
     const result = await fetchLiveFeesForAsin(supabase, asin, marketplace, price);
     if (!result) continue;
-    const feeFx = await getUsdToRate(supabase, MARKETPLACE_CURRENCY[marketplace] ?? "USD");
+    const feeCurrency = MARKETPLACE_CURRENCY[marketplace] ?? "USD";
+    const feeFx = feeCurrency === "USD" ? 1 : await getUsdToRate(supabase, feeCurrency);
+    // Same rule as calculate-roi and calculate-roi-floor: no FX, no write. The
+    // native figure is not an acceptable fallback -- it is the fault itself.
+    if (!Number.isFinite(feeFx) || feeFx <= 0) {
+      console.warn(`[learn-intl-fee-multipliers] FX unavailable for ${feeCurrency}->USD; skipping ${asin}/${marketplace}`);
+      continue;
+    }
 
     const { error: upsertErr } = await supabase
       .from("asin_fee_cache")
@@ -230,7 +237,7 @@ async function liveRefreshBelowFloorPendingAsins(
           // is contracted as USD. backfill-fee-cache, the writer behind the
           // trusted fees_api rows, states the rule outright: "sends NATIVE
           // currency, converts response back to USD before returning".
-          fba_fee_fixed: feeFx > 0 ? result.fbaFee / feeFx : result.fbaFee,
+          fba_fee_fixed: result.fbaFee / feeFx,
           // The rate is NOT converted -- it is a ratio of two native amounts
           // and is already dimensionless. But it is range-checked, because
           // this writer has produced impossible ones: 7 MX rows, 3 of them

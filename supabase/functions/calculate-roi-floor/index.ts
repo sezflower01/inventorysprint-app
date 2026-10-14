@@ -329,19 +329,29 @@ Deno.serve(async (req) => {
     // The RATE is unaffected: referralFee and minPrice are both native, so the
     // ratio cancels. That is why this writer's referral percentages always
     // looked sane while its fees did not, and why only the fee is converted.
-    const feeFx = await getUsdToRate(supabase, MKT[marketplace]?.currency ?? 'USD');
-    const fbaFeeUsd = feeFx > 0 ? result.fees.fbaFee / feeFx : result.fees.fbaFee;
+    const feeCurrency = MKT[marketplace]?.currency ?? 'USD';
+    const feeFx = feeCurrency === 'USD' ? 1 : await getUsdToRate(supabase, feeCurrency);
     const effectiveRefRate = result.minPrice > 0 ? result.fees.referralFee / result.minPrice : 0.15;
-    await supabase.from('asin_fee_cache').upsert({
-      user_id: userId,
-      asin,
-      marketplace,
-      fba_fee_fixed: fbaFeeUsd,
-      referral_rate: effectiveRefRate,
-      fee_source: 'live_roi_floor',
-      last_verified_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    }, { onConflict: 'user_id,asin,marketplace' });
+
+    // If FX is unavailable, DO NOT WRITE. calculate-roi settled this already --
+    // "SKIPPING cache upsert to avoid native-as-USD corruption" -- and falling
+    // back to the native figure is precisely the bug being fixed here, just
+    // reached by a different route. A missing row is recoverable; a peso in a
+    // dollar column is not, because nothing downstream can tell.
+    if (Number.isFinite(feeFx) && feeFx > 0) {
+      await supabase.from('asin_fee_cache').upsert({
+        user_id: userId,
+        asin,
+        marketplace,
+        fba_fee_fixed: result.fees.fbaFee / feeFx,
+        referral_rate: effectiveRefRate,
+        fee_source: 'live_roi_floor',
+        last_verified_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id,asin,marketplace' });
+    } else {
+      console.warn(`[calculate-roi-floor] FX unavailable for ${feeCurrency}->USD; skipping fee cache upsert for ${asin}/${marketplace}`);
+    }
 
     return new Response(
       JSON.stringify({
