@@ -23,9 +23,18 @@
 // warns about, and exactly how the repricer gets starved. Reuse, never
 // duplicate.
 //
-// That target keeps verify_jwt = true because the browser calls it too, so
-// the user's own Authorization header is forwarded and it resolves the same
-// user. No service-role key is needed and none is used.
+// The user's own Authorization header is forwarded to that target, which
+// resolves the same user from it via supabase.auth.getUser(). No
+// service-role key is needed and none is used.
+//
+// Note the target runs verify_jwt = FALSE live (checked 2026-10-14 with
+// `supabase functions list`), even though it is absent from config.toml --
+// so it was set outside the repo and config.toml does not describe it. That
+// does not change anything here: the forward is honoured by the target's own
+// getUser() call rather than by the gateway, and THIS function keeps the
+// default verify_jwt = true, so the guarded entry point is this one. If the
+// forward ever broke, the target would still be reachable but would fail its
+// own auth check, which surfaces below as a 502 carrying its error.
 //
 // CURRENCY. estimated_price is contracted NATIVE marketplace currency for
 // non-US rows, and Keepa returns native. No conversion happens here, and
