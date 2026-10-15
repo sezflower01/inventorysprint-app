@@ -489,7 +489,20 @@ const KeepaRecheckButton = ({
         body: { asin, marketplace },
         headers: { Authorization: `Bearer ${session.access_token}` },
       });
-      if (error) throw error;
+
+      // supabase-js throws a bare "Edge Function returned a non-2xx status
+      // code" and leaves the real reason unread in error.context, which is a
+      // Response. The first live press failed on an RLS deny and reported
+      // nothing useful, so read the body out and show what actually broke.
+      if (error) {
+        let detail = error.message;
+        const ctx = (error as { context?: unknown }).context;
+        if (ctx instanceof Response) {
+          const body = await ctx.clone().json().catch(() => null);
+          if (body?.error) detail = String(body.error);
+        }
+        throw new Error(detail);
+      }
       if (data?.error) throw new Error(data.error);
 
       if (!data?.applied) {
