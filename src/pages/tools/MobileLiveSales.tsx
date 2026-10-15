@@ -447,6 +447,97 @@ interface AsinRow {
 }
 
 
+/* ─────────── non-US Keepa estimate recheck ─────────── */
+
+/**
+ * Re-reads Keepa's Buy Box for one ASIN on one NON-US marketplace and
+ * rewrites the pending price estimate from it.
+ *
+ * Non-US only, deliberately. Measured 2026-10-14 over 928 settled CA orders,
+ * mean absolute error: the live `listings_api` estimate 28.1%, Keepa's Buy
+ * Box 14.4% on the 340 orders it covers (where listings_api scores 26.2% on
+ * those same orders). Roughly twice as accurate, which is what makes a
+ * manual recheck worth a button. US is refused server-side — its estimate
+ * chain has own-Buy-Box snapshots anchored much closer to purchase time, so
+ * Keepa would be a downgrade there.
+ *
+ * It costs Keepa tokens on every press: the non-US history cache is
+ * effectively always expired (CA 1 of 125 rows unexpired, MX 0 of 103, BR 0
+ * of 90 on 2026-10-14), so this is never a free cache read. The edge
+ * function routes through mobile-scan-price-history so the shared
+ * 20-tokens/min gate and the repricer reserve still apply.
+ */
+const KeepaRecheckButton = ({
+  asin,
+  marketplace,
+  onApplied,
+}: {
+  asin: string;
+  marketplace: string;
+  onApplied?: () => void;
+}) => {
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) throw new Error("Not signed in");
+
+      const { data, error } = await supabase.functions.invoke("keepa-recheck-nonus-estimate", {
+        body: { asin, marketplace },
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+
+      if (!data?.applied) {
+        toast({
+          title: `${marketplace}: nothing to adjust`,
+          description: data?.message || `Keepa returned no price for ${asin} on ${marketplace}.`,
+        });
+        return;
+      }
+
+      // Report the actual before/after rather than just "done" — a price
+      // estimate that moved silently is how the 27% overstatement stayed
+      // invisible for months.
+      const first = (data.orders || [])[0];
+      const moved = first
+        ? `${Number(first.old_estimate).toFixed(2)} → ${Number(first.new_estimate).toFixed(2)}`
+        : `${Number(data.keepa?.price ?? 0).toFixed(2)}`;
+      toast({
+        title: `${marketplace} estimate updated from Keepa`,
+        description: `${data.applied} pending order${data.applied === 1 ? "" : "s"}: ${moved} ${marketplace} (${data.keepa?.track}). Fees and ROI follow on the next sync.`,
+      });
+      onApplied?.();
+    } catch (e: unknown) {
+      toast({
+        title: `Keepa recheck failed (${marketplace})`,
+        description: e instanceof Error ? e.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={run}
+      disabled={busy}
+      title={`Recheck Keepa's ${marketplace} Buy Box and adjust the pending estimate for ${asin}`}
+      aria-label={`Recheck Keepa ${marketplace} estimate for ${asin}`}
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wide bg-sky-400/20 text-sky-100 border border-sky-300/50 hover:bg-sky-400/30 active:bg-sky-400/40 disabled:opacity-60"
+    >
+      {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCw className="h-3 w-3" />}
+      Keepa
+    </button>
+  );
+};
+
 /* ─────────── record detail view ─────────── */
 
 const RecordDetail = ({
@@ -456,6 +547,7 @@ const RecordDetail = ({
   onBack,
   rangeStart,
   rangeEnd,
+  onEstimateAdjusted,
 }: {
   row: AsinRow;
   currencySymbol: string;
@@ -465,6 +557,10 @@ const RecordDetail = ({
   onBack: () => void;
   rangeStart: string;
   rangeEnd: string;
+  /** Reload the period so an adjusted estimate shows immediately — the
+   * page persists a localStorage cache, so without this the new number
+   * stays invisible and the button looks broken. */
+  onEstimateAdjusted?: () => void;
 }) => {
   const [labelDialogOpen, setLabelDialogOpen] = useState(false);
   const cur = currencySymbol;
@@ -568,11 +664,18 @@ const RecordDetail = ({
               {row.asin}
             </a>
             {(row.marketplaces && row.marketplaces.length > 0 ? row.marketplaces : ["US"]).map((m) => (
-              <span
-                key={m}
-                className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wide bg-white/10 text-white border border-white/20"
-              >
-                {m}
+              <span key={m} className="inline-flex items-center gap-1">
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold tracking-wide bg-white/10 text-white border border-white/20">
+                  {m}
+                </span>
+                {/* Non-US only — see KeepaRecheckButton for why US is excluded. */}
+                {m.toUpperCase() !== "US" && (
+                  <KeepaRecheckButton
+                    asin={row.asin}
+                    marketplace={m}
+                    onApplied={onEstimateAdjusted}
+                  />
+                )}
               </span>
             ))}
           </div>
@@ -2416,6 +2519,11 @@ const MobileLiveSales = () => {
           onBack={() => setSelected(null)}
           rangeStart={periodInfo.start}
           rangeEnd={periodInfo.end}
+          // DB-only reload. Deliberately NOT refreshLiveSales(true): that
+          // also kicks the Amazon background sync, which is unnecessary work
+          // here — the estimate was just written locally, and the lock makes
+          // the next natural sync preserve it anyway.
+          onEstimateAdjusted={() => void fetchToday()}
         />
       ) : (
       <main
