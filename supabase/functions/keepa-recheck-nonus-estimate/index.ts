@@ -206,7 +206,24 @@ Deno.serve(async (req) => {
     if (logErr) return json({ error: `Backup failed, nothing was changed: ${logErr.message}` }, 500);
 
     // 4. Apply, with the lock so the next poll cannot revert it.
+    //
+    // price_source stays STABLE (`keepa_buybox:manual:<track>`) because the
+    // display path keys off it: isLowConfidenceHint in salesCalculations.ts is
+    // a blocklist, and this prefix matches nothing on it, so the value counts
+    // in Live Sales. Renaming it to an `estimated:keepa*` form would silently
+    // exclude it.
+    //
+    // locked_from carries a UNIQUE suffix, and that is load-bearing.
+    // preserve_manual_price_override requires locked_from to CHANGE to a
+    // manual label, because a BEFORE UPDATE trigger cannot tell a column the
+    // writer omitted from one it set to the same value -- NEW inherits OLD
+    // either way. Writing a constant label here would make a second press
+    // indistinguishable from an automatic partial write, so it would be
+    // silently rejected while the audit row still claimed success. That
+    // exact bug shipped on 2026-10-16 and wasted three presses on MX order
+    // 702-6705125-8817807.
     const source = `keepa_buybox:manual:${picked.track}`;
+    const lockLabel = `${source}@${new Date().toISOString()}`;
     const results: Array<Record<string, unknown>> = [];
     for (const o of targets) {
       const { error: updErr } = await supabase
@@ -214,7 +231,7 @@ Deno.serve(async (req) => {
         .update({
           estimated_price: newEstimate,
           locked_est_price: newEstimate,
-          locked_from: source,
+          locked_from: lockLabel,
           price_source: source,
           price_confidence: 'ESTIMATE_KEEPA_MANUAL',
         })
