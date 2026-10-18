@@ -639,9 +639,20 @@ serve(async (req) => {
         continue;
       }
 
-      // reference_price from inventory/buy_box is NATIVE for non-US markets.
-      const referencePriceNative = referencePrice;
-      const referencePriceUsd = isNonUs ? referencePriceNative / fxRate : referencePriceNative;
+      // reference_price is USD, NOT native. The previous comment here claimed
+      // "reference_price from inventory/buy_box is NATIVE for non-US markets"
+      // and that was simply false: `inventory` is ONE pool shared by all four
+      // marketplaces and is denominated in USD (see CLAUDE.md), and
+      // buy_box_cache is US. Treating a USD figure as native asked Amazon to
+      // quote fees for, say, 9.90 MXN instead of ~182 MXN -- a different and
+      // much lower fee band, which under-quotes the FBA fee.
+      //
+      // The RATE survived that bug because it is a ratio: Amazon's referral
+      // fee scales with whatever price you ask with, so referralFeeNative /
+      // referencePriceNative cancels out. Only the ABSOLUTE fees were wrong,
+      // which is exactly the shape of the 2026-10-18 finding.
+      const referencePriceNative = isNonUs ? referencePrice * fxRate : referencePrice;
+      const referencePriceUsd = referencePrice;
 
       const fees = await fetchFeesForAsin(
         supabase,
@@ -712,26 +723,79 @@ serve(async (req) => {
           successCount++;
 
           // Step 4: Update existing sales_orders with cached fees
-          // Calculate fees for each order using the cached rate
+          // Calculate fees for each order using the cached rate.
+          //
+          // THREE FAULTS WERE FIXED HERE ON 2026-10-18, all found on CA order
+          // 701-0974352-2997055 (B07KY25WY7, q1, Amazon CA$20.36):
+          //
+          // 1. NO MARKETPLACE FILTER. This selected every order for the ASIN
+          //    across ALL marketplaces and wrote fees derived from THIS
+          //    marketplace's rate onto all of them. A CA fee fetch would
+          //    overwrite US, MX and BR orders of the same ASIN, and vice
+          //    versa. That is a silent cross-marketplace corruption.
+          //
+          // 2. estimated_price WAS NEVER CONSULTED. A pending order has
+          //    item_price = 0 and sold_price = 0, so `price` always fell
+          //    through to referencePrice -- an inventory figure for the ASIN,
+          //    not this order's price. The CA order above was billed
+          //    9.90 x 0.1505 = 1.49 while the buyer paid CA$20.36, whose
+          //    referral is CA$3.06 (US$2.16). Wrong by a third.
+          //
+          // 3. NO CURRENCY HANDLING. The result was tagged `from_cache`,
+          //    which the display contract (src/lib/sales/feeNormalization.ts)
+          //    reads as "referral_fee is NATIVE, fba_fee is already USD" --
+          //    so a USD-derived 1.49 was then divided by the FX rate and
+          //    shown as $1.05. The storage error and the display assumption
+          //    compounded in the same direction.
+          //
+          // CURRENCY CONTRACT, now explicit and honoured:
+          //   sold_price / item_price are USD everywhere.
+          //   estimated_price is NATIVE for non-US, USD for US.
+          //   referral_fee is stored NATIVE (what `from_cache` means).
+          //   fba_fee is stored USD (fees.fbaFeeFixed already is).
           const { data: ordersToUpdate } = await supabase
             .from('sales_orders')
-            .select('id, sold_price, item_price, quantity, unit_cost')
+            .select('id, sold_price, item_price, estimated_price, quantity, unit_cost, marketplace')
             .eq('user_id', userId)
             .eq('asin', asin)
+            .eq('marketplace', marketplace)
             .or('fees_missing.eq.true,fees_source.is.null,fees_source.eq.unavailable');
 
           if (ordersToUpdate && ordersToUpdate.length > 0) {
             for (const order of ordersToUpdate) {
-              const price = order.item_price || order.sold_price || referencePrice;
-              const referralFee = price * fees.referralRate;
-              const totalFees = referralFee + fees.fbaFeeFixed;
+              // The order's own price, expressed NATIVE, preferring settled
+              // over estimated. sold_price/item_price are USD so they are
+              // multiplied up; estimated_price is already native for non-US.
+              const settledUsd = Number(order.item_price || order.sold_price || 0);
+              const estimatedNative = Number(order.estimated_price || 0);
+              let priceNative = 0;
+              let priceBasis = 'reference';
+              if (settledUsd > 0) {
+                priceNative = isNonUs ? settledUsd * fxRate : settledUsd;
+                priceBasis = 'settled';
+              } else if (estimatedNative > 0) {
+                priceNative = estimatedNative;
+                priceBasis = 'estimated';
+              } else {
+                // Last resort, and now converted rather than assumed native.
+                priceNative = referencePriceNative;
+              }
+
+              const referralFee = priceNative * fees.referralRate; // NATIVE
+              const totalFees = (isNonUs ? referralFee / fxRate : referralFee) + fees.fbaFeeFixed; // USD
+              console.log(`[BACKFILL] fee basis=${priceBasis} ${marketplace} native=${priceNative.toFixed(2)} referral_native=${referralFee.toFixed(2)} fba_usd=${fees.fbaFeeFixed.toFixed(2)}`);
               
-              // Calculate ROI if we have unit cost
+              // ROI entirely in USD. unit_cost is USD by the cost contract and
+              // totalFees above is USD, so the sale side must be converted too
+              // -- the old line multiplied a possibly-native `price` against
+              // USD costs and USD fees, which inflated ROI on every non-US
+              // order by the FX rate (18x on MX).
+              const priceUsd = isNonUs ? priceNative / fxRate : priceNative;
               const unitCost = order.unit_cost || 0;
               const qty = order.quantity || 1;
               const totalCost = unitCost * qty;
-              const totalSale = price * qty;
-              const netProfit = totalSale - (totalFees * qty) - totalCost;
+              const totalSaleUsd = priceUsd * qty;
+              const netProfit = totalSaleUsd - (totalFees * qty) - totalCost;
               const roi = totalCost > 0 ? Math.round((netProfit / totalCost) * 1000) / 10 : null;
 
               await supabase
