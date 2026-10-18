@@ -439,6 +439,13 @@ interface AsinRow {
   /** True when an order in this period has NO fulfillment_channel from Amazon. */
   hasUnknownChannelOrder?: boolean;
   marketplaces?: string[];
+  /** Revenue in USD contributed by each marketplace in this row.
+   * A row aggregates by ASIN, so one line can mix CA and US sales under a
+   * single revenue figure. On 2026-10-18 a CA order worth CA$20.36 contributed
+   * $0.00 (no estimate at all) while two US sales of the same ASIN showed
+   * $9.90 -- and the row looked like a healthy $9.90 CA sale. Splitting the
+   * revenue per marketplace is what makes that visible. */
+  marketplaceRevenue?: Record<string, number>;
   orderIds?: string[];
   /** True when ≥1 non-US row had no stored fees AND no asin_fee_cache entry. */
   feesMissing?: boolean;
@@ -1909,6 +1916,8 @@ const MobileLiveSales = () => {
           existing.cost += lineCost;
           if (oid) existing._orderIds.add(oid);
           existing._marketplaces.add(mkt);
+          existing.marketplaceRevenue = existing.marketplaceRevenue || {};
+          existing.marketplaceRevenue[mkt] = (existing.marketplaceRevenue[mkt] || 0) + lineRevenue;
           if (isFbmOrder) existing.hasFbmOrder = true;
           if (channelUnknown) existing.hasUnknownChannelOrder = true;
           if (feeCacheMissingNonUs) {
@@ -1951,6 +1960,7 @@ const MobileLiveSales = () => {
             feesMissingMarketplaces: feeCacheMissingNonUs ? [mkt] : undefined,
             _orderIds: set,
             _marketplaces: new Set([mkt]),
+            marketplaceRevenue: { [mkt]: lineRevenue },
           });
         }
       }
@@ -3238,14 +3248,30 @@ const MobileLiveSales = () => {
                       >
                         {r.asin}
                       </a>
-                      {(r.marketplaces && r.marketplaces.length > 0 ? r.marketplaces : ["US"]).map((m) => (
-                        <span
-                          key={m}
-                          className="inline-flex shrink-0 items-center rounded border border-white/25 bg-white/10 px-1.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wide text-white"
-                        >
-                          {m}
-                        </span>
-                      ))}
+                      {(r.marketplaces && r.marketplaces.length > 0 ? r.marketplaces : ["US"]).map((m) => {
+                        // A marketplace present on the row but contributing no
+                        // revenue is the failure this marking exists for: the
+                        // badge alone made a $0 CA order indistinguishable
+                        // from a CA order that sold. Amber + "$0" says which.
+                        const mktRev = r.marketplaceRevenue?.[m];
+                        const contributesNothing = mktRev !== undefined && mktRev <= 0;
+                        return (
+                          <span
+                            key={m}
+                            title={contributesNothing
+                              ? `${m} has orders in this period but contributes $0.00 — no confirmed or estimated price`
+                              : `${m}: $${(mktRev ?? 0).toFixed(2)}`}
+                            className={`inline-flex shrink-0 items-center gap-0.5 rounded border px-1.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wide ${
+                              contributesNothing
+                                ? "border-amber-300/70 bg-amber-400/20 text-amber-100"
+                                : "border-white/25 bg-white/10 text-white"
+                            }`}
+                          >
+                            {m}
+                            {contributesNothing && <span className="normal-case">$0</span>}
+                          </span>
+                        );
+                      })}
                       {r.latestPurchaseTimePt && (
                         <span className="text-white/70 text-[10px] uppercase tracking-wider">· {r.latestPurchaseTimePt}</span>
                       )}

@@ -68,14 +68,49 @@ type Track = typeof TRACKS[number];
 
 interface Point { t: string; v: number }
 
-/** Newest usable point across the tracks, in preference order. */
-function pickPrice(series: Record<string, unknown>): { price: number; track: Track; at: string } | null {
+/**
+ * The usable point NEAREST the order's purchase time, across the tracks in
+ * preference order.
+ *
+ * This used to take the NEWEST point, and that was the single biggest source
+ * of error in the feature. Measured 2026-10-18 on the orders the button had
+ * moved:
+ *
+ *   B002HJ4HSS  bought Oct 7 01:05 | newest point Oct 15 11:59 | gap 8d 11h
+ *   B08HHBDW3C  bought Oct 8 01:53 | newest point Oct 15 12:00 | gap 7d 10h
+ *
+ * Those two were the oldest pending orders, so "newest" handed them THIS
+ * WEEK's price for a sale made a week earlier -- which is how they moved
+ * +93 pct and +113 pct. The newer orders, with gaps under a day, barely moved.
+ *
+ * It also made the replay that justified the feature inapplicable: that scored
+ * "buybox NEAREST the order date" at 14.4 pct mean absolute error, which is
+ * not what the code did. Anchoring to purchase time is what makes the measured
+ * number describe the shipped behaviour.
+ *
+ * `atMs` is the order's purchase timestamp in ms. When it is unavailable the
+ * function falls back to newest, which is the old behaviour and is still
+ * better than nothing -- but the caller reports which anchor was used.
+ */
+function pickPrice(
+  series: Record<string, unknown>,
+  atMs: number | null,
+): { price: number; track: Track; at: string; anchor: 'purchase' | 'newest'; gapHours: number | null } | null {
   for (const track of TRACKS) {
     const pts = (series?.[track] as Point[] | undefined) || [];
-    const usable = pts.filter((p) => Number.isFinite(Number(p?.v)) && Number(p.v) > 0);
+    const usable = pts.filter((p) => Number.isFinite(Number(p?.v)) && Number(p.v) > 0 && !!p?.t);
     if (usable.length === 0) continue;
-    const newest = usable.reduce((a, b) => (new Date(b.t) > new Date(a.t) ? b : a));
-    return { price: Number(newest.v), track, at: newest.t };
+
+    if (atMs === null) {
+      const newest = usable.reduce((a, b) => (new Date(b.t) > new Date(a.t) ? b : a));
+      return { price: Number(newest.v), track, at: newest.t, anchor: 'newest', gapHours: null };
+    }
+
+    const nearest = usable.reduce((a, b) =>
+      Math.abs(new Date(b.t).getTime() - atMs) < Math.abs(new Date(a.t).getTime() - atMs) ? b : a,
+    );
+    const gapHours = Math.abs(new Date(nearest.t).getTime() - atMs) / 3_600_000;
+    return { price: Number(nearest.v), track, at: nearest.t, anchor: 'purchase', gapHours };
   }
   return null;
 }
@@ -120,7 +155,7 @@ Deno.serve(async (req) => {
     // estimate currently standing in for it, not cancelled, not a refund.
     const { data: pending, error: pendErr } = await supabase
       .from('sales_orders')
-      .select('id, order_id, asin, marketplace, quantity, estimated_price, price_source, locked_from, order_date')
+      .select('id, order_id, asin, marketplace, quantity, estimated_price, price_source, locked_from, order_date, purchase_timestamp_utc')
       .eq('user_id', userId)
       .eq('asin', asin)
       .eq('marketplace', marketplace)
@@ -163,8 +198,20 @@ Deno.serve(async (req) => {
       }, 502);
     }
 
-    const picked = pickPrice(hist.series || {});
-    if (!picked) {
+    // PER-ORDER pricing. The Keepa history is fetched ONCE, but each order is
+    // priced from the point nearest ITS OWN purchase time -- two orders for the
+    // same ASIN bought a week apart must not receive the same number. This is
+    // the whole point of the 2026-10-18 change; applying one "newest" price to
+    // every order is what produced the +93 pct and +113 pct moves.
+    const priced = targets.map((o) => {
+      const ts = o.purchase_timestamp_utc
+        ? new Date(o.purchase_timestamp_utc as string).getTime()
+        : (o.order_date ? new Date(o.order_date as string).getTime() : null);
+      const atMs = ts !== null && Number.isFinite(ts) ? ts : null;
+      return { order: o, pick: pickPrice(hist.series || {}, atMs) };
+    });
+
+    if (priced.every((p) => p.pick === null)) {
       return json({
         ok: false, applied: 0, asin, marketplace,
         error: `Keepa returned no Buy Box or offer price for ${asin} on ${marketplace}.`,
@@ -172,33 +219,37 @@ Deno.serve(async (req) => {
       });
     }
 
-    const newEstimate = Math.round(picked.price * 100) / 100;
-
     if (dryRun) {
       return json({
         ok: true, dryRun: true, asin, marketplace,
-        keepa: { price: newEstimate, track: picked.track, captured_at: picked.at, cached: hist.cached ?? false },
-        would_update: targets.map((o) => ({
+        cached: hist.cached ?? false,
+        would_update: priced.map(({ order: o, pick }) => ({
           order_id: o.order_id,
+          purchased_at: o.purchase_timestamp_utc ?? o.order_date ?? null,
           old_estimate: Number(o.estimated_price || 0),
-          new_estimate: newEstimate,
+          new_estimate: pick ? Math.round(pick.price * 100) / 100 : null,
+          keepa_track: pick?.track ?? null,
+          keepa_point_at: pick?.at ?? null,
+          anchor: pick?.anchor ?? null,
+          gap_hours: pick?.gapHours === null || pick?.gapHours === undefined
+            ? null : Math.round(pick.gapHours * 10) / 10,
         })),
       });
     }
 
     // 3. Back up BEFORE writing.
     const { error: logErr } = await supabase.from('keepa_estimate_recheck_log').insert(
-      targets.map((o) => ({
+      priced.filter((p) => p.pick !== null).map(({ order: o, pick }) => ({
         user_id: userId,
         order_id: o.order_id,
         asin,
         marketplace,
         old_estimate: Number(o.estimated_price || 0),
-        new_estimate: newEstimate,
+        new_estimate: Math.round(pick!.price * 100) / 100,
         old_price_source: o.price_source ?? null,
         old_locked_from: o.locked_from ?? null,
-        keepa_track: picked.track,
-        keepa_point_at: picked.at,
+        keepa_track: pick!.track,
+        keepa_point_at: pick!.at,
       })),
     );
     // A failed backup aborts the write. An unrecoverable override is worse
@@ -222,16 +273,24 @@ Deno.serve(async (req) => {
     // silently rejected while the audit row still claimed success. That
     // exact bug shipped on 2026-10-16 and wasted three presses on MX order
     // 702-6705125-8817807.
-    const source = `keepa_buybox:manual:${picked.track}`;
-    const lockLabel = `${source}@${new Date().toISOString()}`;
+    const stamp = new Date().toISOString();
     const results: Array<Record<string, unknown>> = [];
-    for (const o of targets) {
+    for (const { order: o, pick } of priced) {
+      if (!pick) {
+        results.push({
+          order_id: o.order_id, ok: false,
+          error: 'no usable Keepa point for this order',
+        });
+        continue;
+      }
+      const newEstimate = Math.round(pick.price * 100) / 100;
+      const source = `keepa_buybox:manual:${pick.track}`;
       const { error: updErr } = await supabase
         .from('sales_orders')
         .update({
           estimated_price: newEstimate,
           locked_est_price: newEstimate,
-          locked_from: lockLabel,
+          locked_from: `${source}@${stamp}:${o.order_id}`,
           price_source: source,
           price_confidence: 'ESTIMATE_KEEPA_MANUAL',
         })
@@ -242,24 +301,25 @@ Deno.serve(async (req) => {
         order_id: o.order_id,
         old_estimate: Number(o.estimated_price || 0),
         new_estimate: newEstimate,
+        keepa_track: pick.track,
+        keepa_point_at: pick.at,
+        anchor: pick.anchor,
+        gap_hours: pick.gapHours === null ? null : Math.round(pick.gapHours * 10) / 10,
         ok: !updErr,
         error: updErr?.message ?? null,
       });
     }
 
     const applied = results.filter((r) => r.ok).length;
+    const anchored = results.filter((r) => r.anchor === 'purchase').length;
 
     return json({
       ok: true,
       asin,
       marketplace,
       applied,
-      keepa: {
-        price: newEstimate,
-        track: picked.track,
-        captured_at: picked.at,
-        cached: hist.cached ?? false,
-      },
+      cached: hist.cached ?? false,
+      anchored_to_purchase: anchored,
       orders: results,
     });
   } catch (e) {
