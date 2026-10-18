@@ -28,8 +28,54 @@ export function classifySpapiError(raw: string): SpapiIssueType {
     return "forbidden";
   if (m.includes("401") || m.includes("unauthorized") || m.includes("unauthenticated"))
     return "unauthorized";
-  if (m.includes("network") || m.includes("timeout") || m.includes("fetch failed"))
+  // TRANSPORT failures. This list was once just network/timeout/fetch failed,
+  // and that was too literal: on 2026-10-18 08:55 GMT the monitor got
+  //
+  //   error sending request from 10.32.180.184:46164 for
+  //   .../sellers/v1/marketplaceParticipations (3.162.114.211:443):
+  //   client error (SendRequest): connection error: connection reset
+  //
+  // which contains none of those three words, so it fell through to "other"
+  // and emailed -- despite "other" being the only type that is NOT suppressed
+  // as transient. The next tick succeeded: the whole incident lasted 4m32s and
+  // nothing was wrong with the credentials. Worse, the email told the seller to
+  // re-test and reconnect, which would have rotated a working refresh token
+  // over a dropped TCP connection.
+  //
+  // A transport error is one where no HTTP response ever arrived, so it says
+  // nothing at all about whether the credentials are valid. Amazon resets
+  // connections routinely under load.
+  if (
+    m.includes("network") ||
+    m.includes("timeout") ||
+    m.includes("timed out") ||
+    m.includes("fetch failed") ||
+    m.includes("connection reset") ||
+    m.includes("connection error") ||
+    m.includes("connection closed") ||
+    m.includes("connection refused") ||
+    m.includes("connection aborted") ||
+    m.includes("econnreset") ||
+    m.includes("econnrefused") ||
+    m.includes("econnaborted") ||
+    m.includes("etimedout") ||
+    m.includes("epipe") ||
+    m.includes("broken pipe") ||
+    m.includes("sendrequest") ||
+    m.includes("error sending request") ||
+    m.includes("unexpected eof") ||
+    m.includes("handshake") ||
+    m.includes("dns error") ||
+    m.includes("unreachable") ||
+    m.includes("502") ||
+    m.includes("503") ||
+    m.includes("504") ||
+    m.includes("bad gateway") ||
+    m.includes("service unavailable") ||
+    m.includes("gateway timeout")
+  ) {
     return "network";
+  }
   return "other";
 }
 
@@ -46,6 +92,32 @@ function humanIssue(t: SpapiIssueType): string {
 }
 
 const NOTIFY_COOLDOWN_HOURS = 6; // re-notify at most every 6h while issue stays open
+
+// How long a TRANSPORT failure must persist before it is worth an email. The
+// monitor ticks every 5 minutes, so 30 means roughly six consecutive failures.
+// Below this it is a blip and emailing is worse than silence -- see the
+// 2026-10-18 incident noted in classifySpapiError, which lasted 4m32s.
+const NETWORK_SUSTAINED_MINUTES = 30;
+
+/** What the seller should actually DO about each issue type. */
+function actionFor(t: SpapiIssueType): string {
+  switch (t) {
+    case "invalid_grant":
+      return "Open <strong>Settings → Amazon Connection</strong> and reconnect — the refresh token was rejected and must be re-authorized.";
+    case "invalid_client":
+      return "Check the <strong>LWA Client ID and Secret</strong> in Settings → Amazon Connection. The credentials themselves are being refused, so reconnecting alone will not help.";
+    case "missing_credentials":
+      return "No SP-API credentials are stored for this user. Connect the Amazon account in <strong>Settings → Amazon Connection</strong>.";
+    case "forbidden":
+      return "The credentials work but lack permission for this call. Check the app's <strong>roles and scopes</strong> in Seller Central → Apps &amp; Services → Develop Apps.";
+    case "unauthorized":
+      return "Re-test the connection in <strong>Settings → Amazon Connection</strong>. If it keeps failing, reconnect to mint a fresh token.";
+    case "network":
+      return "<strong>No action needed on your credentials.</strong> This is a network fault reaching Amazon — no HTTP response arrived, so it says nothing about whether your tokens are valid. It is only being reported because it has persisted; if it clears on its own, nothing was wrong.";
+    default:
+      return "Re-test the connection in <strong>Settings → Amazon Connection</strong>. If the test passes, this was transient and needs no action.";
+  }
+}
 
 /**
  * Record an SP-API health failure for `userId` and email the admin if this is
@@ -70,7 +142,7 @@ export async function raiseSpapiAlert(opts: {
     // Find existing OPEN alert for this user/issue
     const { data: existing } = await admin
       .from("spapi_health_alerts")
-      .select("id, last_notified_at, notify_count")
+      .select("id, last_notified_at, notify_count, first_detected_at")
       .eq("user_id", opts.userId)
       .eq("issue_type", issueType)
       .eq("status", "open")
@@ -111,8 +183,22 @@ export async function raiseSpapiAlert(opts: {
       shouldNotify = true; // first detection — always email
     }
 
-    // Suppress email for transient network blips
-    if (issueType === "network") shouldNotify = false;
+    // Transport failures are suppressed while they still look like a blip, but
+    // NOT forever: previously `network` never emailed at all, which means a
+    // genuine multi-hour outage reaching Amazon would have been completely
+    // silent. A 4-minute reset is noise; an hour of resets is an outage the
+    // seller needs to know about, because nothing is syncing meanwhile.
+    //
+    // The threshold is measured from first_detected_at, so it takes several
+    // consecutive failing ticks (the monitor runs every 5 minutes) before any
+    // email goes out.
+    if (issueType === "network") {
+      const firstSeen = existing?.first_detected_at
+        ? new Date(existing.first_detected_at)
+        : now;
+      const openMinutes = (now.getTime() - firstSeen.getTime()) / 60_000;
+      if (openMinutes < NETWORK_SUSTAINED_MINUTES) shouldNotify = false;
+    }
 
     if (!shouldNotify) return;
 
@@ -134,7 +220,7 @@ export async function raiseSpapiAlert(opts: {
           <pre style="margin:0;white-space:pre-wrap;font-size:12px;color:#111827">${escapeHtml(opts.errorMessage.slice(0, 1500))}</pre>
         </div>
         <p style="margin-top:18px;color:#374151;font-size:14px">
-          Action required: open <strong>Settings → Amazon Connection</strong> for the affected user, re-test credentials, and reconnect if the refresh token is rejected.
+          ${actionFor(issueType)}
         </p>
         <p style="margin-top:8px;color:#9ca3af;font-size:12px">
           Future emails for this same issue are throttled to one every ${NOTIFY_COOLDOWN_HOURS}h until it resolves.
