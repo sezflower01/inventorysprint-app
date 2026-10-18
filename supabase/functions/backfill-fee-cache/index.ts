@@ -384,6 +384,9 @@ serve(async (req) => {
     let targetUserId: string | null = null;
     let maxAsins = 10; // Default batch size
     let forceBypassTtl = false; // When true, re-fetch even fresh cache entries
+    // Optional allow-list of {asin, marketplace} to narrow this run. See the
+    // TARGETING note further down for why it exists.
+    let reqBodyOnly: unknown[] = [];
     const delayMs = 2500; // 2.5 seconds between API calls
 
     try {
@@ -391,6 +394,7 @@ serve(async (req) => {
       targetUserId = body.user_id || null;
       maxAsins = body.max_asins || 10;
       forceBypassTtl = body.force_bypass_ttl === true;
+      reqBodyOnly = Array.isArray(body.only) ? body.only : [];
     } catch {
       // No body or invalid JSON - run for all users (cron mode)
     }
@@ -455,6 +459,40 @@ serve(async (req) => {
       const key = `${order.user_id}:${order.asin}:${marketplace}`;
       if (!uniqueAsins.has(key)) {
         uniqueAsins.set(key, { userId: order.user_id, asin: order.asin, marketplace });
+      }
+    }
+
+    // TARGETING. Without this the function cannot be asked for a SPECIFIC
+    // asin+marketplace: it pulls up to 500 candidate orders, dedupes them, and
+    // takes the first max_asins -- and the query has no ORDER BY, so which
+    // ones it takes is arbitrary. On 2026-10-18 there were 741 candidate pairs
+    // and two runs (max_asins 5, then 60) both failed to reach the one CA pair
+    // that an order actually needed. Fixing one missing fee row should not be
+    // a lottery.
+    //
+    // `only` is an allow-list of {asin, marketplace} that narrows the deduped
+    // set. It does NOT bypass the TTL or backoff checks below -- pass
+    // force_bypass_ttl for that -- and it never invents a pair that is not
+    // already a genuine candidate, so it cannot be used to spend Fees API
+    // calls on ASINs with no orders behind them.
+    const onlyRaw = Array.isArray(reqBodyOnly) ? reqBodyOnly : [];
+    if (onlyRaw.length > 0) {
+      const wanted = new Set(
+        onlyRaw
+          .filter((o: unknown): o is { asin: string; marketplace?: string } =>
+            !!o && typeof (o as { asin?: unknown }).asin === 'string')
+          .map((o) => `${String(o.asin).trim().toUpperCase()}:${String(o.marketplace || 'US').trim().toUpperCase()}`),
+      );
+      let dropped = 0;
+      for (const [key, data] of [...uniqueAsins]) {
+        if (!wanted.has(`${data.asin.toUpperCase()}:${data.marketplace.toUpperCase()}`)) {
+          uniqueAsins.delete(key);
+          dropped++;
+        }
+      }
+      console.log(`[BACKFILL] only-filter active: kept ${uniqueAsins.size}, dropped ${dropped}`);
+      if (uniqueAsins.size === 0) {
+        console.warn(`[BACKFILL] only-filter matched NOTHING. Requested: ${[...wanted].join(', ')}`);
       }
     }
 
