@@ -145,3 +145,64 @@ describe("AUDIT §14 - US untouched", () => {
     expect(getConfirmedSalesOrderRevenueUsd(row, toUsd)).toBeCloseTo(39.98, 2);
   });
 });
+
+describe("pending lowball guard is US-only (2026-10-19 regression)", () => {
+  // The guard was written and validated for US rows -- its own comment says
+  // "Validated against 900 recent ... Pending + suspect-sourced US rows" --
+  // but it was never scoped to US and ran BEFORE the marketplace === "US"
+  // short-circuit. On non-US it compares a USD `raw` against a NATIVE
+  // estimated_price, so `raw < est * 0.85` is true for essentially every
+  // healthy row, and it then returned estimated_price UNCONVERTED.
+  //
+  // Live case: MX order 701-8676794-7473022, Amazon MX$669.62, correctly
+  // stored as 36.43 USD with estimated_price 669.62 native. The report showed
+  // $669.62 -- an 18x overstatement of a perfectly good row.
+  const mxHealthyPending = {
+    marketplace: "MX",
+    quantity: 1,
+    sold_price: 36.43,
+    total_sale_amount: 36.43,
+    estimated_price: 669.62, // NATIVE MXN, by contract
+    price_source: "orders_itemprice", // on the suspect list
+    order_status: "Pending",
+    order_date: new Date().toISOString().slice(0, 10),
+  };
+
+  it("does NOT swap a correct MX USD revenue for the native estimate", () => {
+    const usd = getConfirmedSalesOrderRevenueUsd(mxHealthyPending, toUsd);
+    expect(usd).toBeCloseTo(36.43, 2);
+    expect(usd).not.toBeCloseTo(669.62, 2);
+  });
+
+  it("holds for CA too", () => {
+    const ca = {
+      ...mxHealthyPending,
+      marketplace: "CA",
+      sold_price: 14.38,
+      total_sale_amount: 14.38,
+      estimated_price: 20.36,
+    };
+    expect(getConfirmedSalesOrderRevenueUsd(ca, toUsd)).toBeCloseTo(14.38, 2);
+  });
+
+  it("still fires for the US case it was built for", () => {
+    // The original finding: a 10-unit US order showing $150.57 while still
+    // Pending when the seller's own listing price made $215.10 the real total.
+    const us = {
+      marketplace: "US",
+      quantity: 10,
+      sold_price: 15.057,
+      total_sale_amount: 150.57,
+      estimated_price: 21.51,
+      price_source: "orders_itemprice",
+      order_status: "Pending",
+      order_date: new Date().toISOString().slice(0, 10),
+    };
+    expect(getConfirmedSalesOrderRevenueUsd(us, toUsd)).toBeCloseTo(215.1, 2);
+  });
+
+  it("leaves a SETTLED non-US row alone", () => {
+    const settled = { ...mxHealthyPending, order_status: "Shipped" };
+    expect(getConfirmedSalesOrderRevenueUsd(settled, toUsd)).toBeCloseTo(36.43, 2);
+  });
+});

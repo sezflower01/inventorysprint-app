@@ -220,6 +220,32 @@ function isRecentPendingSuspectLowball(
   raw: number,
   qty: number,
 ): boolean {
+  // US ONLY. The note above describes a US problem and says so: "Validated
+  // against 900 recent (order_date within 30d) Pending + suspect-sourced US
+  // rows". But the check was never actually scoped to US, and it runs BEFORE
+  // the `marketplace === "US"` short-circuit further down, so it fired on
+  // CA/MX/BR too -- and there it is guaranteed to misfire.
+  //
+  // The reason is a unit mismatch, not a tuning problem. `raw` is USD
+  // (total_sale_amount / sold_price) while estimated_price is NATIVE for
+  // non-US. So `raw < est * 0.85` compares dollars against pesos and is true
+  // for essentially every healthy MX row: 36.43 < 669.62 * 0.85. The guard
+  // then returns estimated_price * qty UNCONVERTED, replacing a correct USD
+  // figure with a raw native one.
+  //
+  // Live example, MX order 701-8676794-7473022 on 2026-10-19: Amazon
+  // MX$669.62, correctly stored as sold_price = total_sale_amount = 36.43 USD
+  // with estimated_price = 669.62 native. The report showed $669.62 -- an
+  // 18x overstatement of a row that had nothing wrong with it.
+  //
+  // Scoping to US is the fix rather than converting the estimate, because for
+  // non-US the magnitude guards ABOVE already detect native-in-a-USD-column,
+  // and estimated_price cannot stand in for a USD figure without conversion
+  // anyway. If this is ever wanted for non-US it needs toUsd(), which this
+  // function does not receive.
+  const marketplace = String(row.marketplace || "US").trim().toUpperCase() || "US";
+  if (marketplace !== "US") return false;
+
   const status = String(row.order_status || "").trim().toLowerCase();
   if (status !== "pending") return false;
 
