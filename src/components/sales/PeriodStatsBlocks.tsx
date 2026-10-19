@@ -579,16 +579,36 @@ const isRealAsinStrict = (val: string | null | undefined): boolean =>
   // shared converter anyway so that reviving the component cannot revive the
   // bug: each of the three used `estimated_price * qty` with no conversion,
   // which would put pesos into a USD total the moment it rendered.
-const getStrictLineRevenue = (row: StrictSalesOrderRow, toUsd?: ToUsdConverter) => {
+const getStrictLineRevenue = (row: StrictSalesOrderRow, toUsd?: ToUsdConverter) =>
+  settledOnlyOrConverted(row, toUsd);
+
+/**
+ * Shared fallback for this file's revenue helpers.
+ *
+ * With a converter, the one shared helper does the work. WITHOUT one it
+ * returns the SETTLED figure only and never estimated_price, because
+ * estimated_price is native for non-US and this file has no FX source of its
+ * own -- no fxRates, no toUsd anywhere in it.
+ *
+ * I originally wrote these three call sites as getPendingEstimateUsd(row,
+ * toUsd) with no `toUsd` in scope. That is a ReferenceError, and it shipped
+ * because `npm run build` does not typecheck and this component is not
+ * imported by any page, so the line never executes. Reviving the component
+ * would have crashed it -- the exact failure the routing was meant to prevent.
+ * A caller that wants non-US revenue here must pass a converter.
+ */
+function settledOnlyOrConverted(
+  row: { quantity?: number | null; sold_price?: number | null; total_sale_amount?: number | null },
+  toUsd?: ToUsdConverter,
+): number {
   if (toUsd) return getPendingEstimateUsd(row as never, toUsd);
   const qty = Math.max(1, Number(row.quantity || 0));
   const totalSale = Number(row.total_sale_amount || 0);
   if (totalSale > 0) return totalSale;
   const soldPrice = Number(row.sold_price || 0);
   if (soldPrice > 0) return soldPrice * qty;
-  // No converter supplied: refuse to return a native figure dressed as USD.
   return 0;
-};
+}
 
 const dedupeStrictRows = <T extends { order_id?: string | null; asin?: string | null; quantity?: number | null; sold_price?: number | null }>(rows: T[]): T[] => {
   // Phase 1: exact (order_id + asin) dedup
@@ -1283,7 +1303,7 @@ export default function PeriodStatsBlocks({
     const normalizedOrderId = (id: string) => String(id || '').replace(/-REFUND.*$/i, '');
     // See the note on getStrictLineRevenue: estimated_price is native for
     // non-US, so it only becomes revenue through the shared converter.
-    const getLineSales = (r: any) => getPendingEstimateUsd(r, toUsd);
+    const getLineSales = (r: any) => settledOnlyOrConverted(r);
 
     const purchaseOrderRows = await fetchAllPages<any>(() => {
       let q = supabase
@@ -2359,12 +2379,7 @@ export default function PeriodStatsBlocks({
       return asin === 'PENDING' || title.startsWith('order processing');
     };
 
-    const getLineSales = (row: any) => {
-      const qty = Math.max(1, Number(row.quantity || 0));
-      // estimated_price is native for non-US; the shared converter is the
-      // only place it may become USD revenue.
-      return getPendingEstimateUsd(row, toUsd);
-    };
+    const getLineSales = (row: any) => settledOnlyOrConverted(row);
 
     const dropReasons = {
       cancelledFlag: 0,

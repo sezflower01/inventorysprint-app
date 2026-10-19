@@ -30,6 +30,41 @@ The product is an **Amazon FBA seller-operations platform**: repricing, inventor
 
 `npm run build` runs `scripts/build-extension-zips.js` **before** Vite. A build failure may originate there, not in the frontend.
 
+### ⚠️ `tsc --noEmit -p tsconfig.json` CHECKS NOTHING
+
+The root `tsconfig.json` has **`"files": []`** and only project `references`. Without
+`--build`, `tsc` follows neither — so:
+
+```bash
+npx tsc --noEmit -p tsconfig.json   # prints nothing, because it compiled ZERO files
+```
+
+Empty output here means "nothing was checked", **not** "clean". Verified 2026-10-19 by
+planting a deliberately bogus named import and getting silence back.
+
+`tsconfig.app.json` does check `src`, but it has **~56 pre-existing errors** (mostly
+`SoFecParityBanner.tsx` and the seller-analyzer hooks, from a stale generated
+`src/integrations/supabase/types.ts` missing newer tables), so it cannot be used as a
+pass/fail gate either — only diffed against that baseline, or filtered to the files you
+touched:
+
+```bash
+npx tsc --noEmit -p tsconfig.app.json 2>&1 | grep -E "YourFile"
+```
+
+**`npm run build` is the only reliable gate, and it does NOT typecheck** — it is Rollup,
+which catches missing *exports* but not missing *names*. On 2026-10-19 both failed to
+catch each other: `tsc -p tsconfig.json` missed an import of a non-existent export
+(`MARKETPLACE_CURRENCY` from `marketplaceCurrency.ts`, which broke the Vercel build), and
+`npm run build` missed a `toUsd` that was not in scope (a latent ReferenceError that
+survived only because the file is dead code). Run **both** before pushing anything that
+touches imports.
+
+`MARKETPLACE_CURRENCY` lives in `src/lib/sales/currencyConversion.ts`, not in the
+obviously-named `src/lib/marketplaceCurrency.ts` (which exports `MARKETPLACE_CONFIGS` and
+`getCurrencyForMarketplace`). `MobileLiveSales.tsx` and `LiveSalesPopup.tsx` each declare
+their own *local* copy, which is what makes the wrong guess easy.
+
 ### Tests
 
 There is no `npm test` script, but **Vitest IS available and there ARE test files in `src`** — e.g. `src/lib/repricer/__tests__/assignmentStatus.test.ts`, `src/lib/sales/__tests__/currencyConversion.test.ts`. Run them directly:
