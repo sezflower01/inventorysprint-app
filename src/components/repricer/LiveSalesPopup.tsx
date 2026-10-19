@@ -6,6 +6,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useSalesSync } from "@/contexts/SalesSyncContext";
 import { useHomeMarketplace } from "@/hooks/use-home-marketplace";
 import { getOrderPromoUsd } from "@/lib/salesCalculations";
+import { getPendingEstimateUsd } from "@/lib/sales/currencyConversion";
 import {
   Dialog,
   DialogContent,
@@ -108,16 +109,14 @@ const isReliablePriceSource = (priceSource: string | null | undefined): boolean 
 // toUsd() conversion the caller applies to every other signal — otherwise
 // an already-USD estimate gets divided by the FX rate a second time,
 // shrinking non-US estimates by the FX factor (e.g. ~17x for MXN).
-const estimatedPriceToNative = (
-  estimatedUsd: number,
-  marketplace: string | null | undefined,
-  fxRates: Record<string, number>,
-) => {
-  const currency = MARKETPLACE_CURRENCY[String(marketplace || "US").trim()] || "USD";
-  if (currency === "USD") return estimatedUsd;
-  const rate = fxRates?.[currency];
-  return rate && rate > 0 ? estimatedUsd * rate : estimatedUsd;
-};
+/** native -> USD, the direction this file actually needs. */
+const toUsdFromRates = (fxRates: Record<string, number>) =>
+  (amount: number, marketplace?: string | null) => {
+    const currency = MARKETPLACE_CURRENCY[String(marketplace || "US").trim()] || "USD";
+    if (currency === "USD") return amount;
+    const rate = fxRates?.[currency];
+    return rate && rate > 0 ? amount / rate : amount;
+  };
 
 const getLineRevenue = (row: {
   quantity?: number | null;
@@ -135,16 +134,21 @@ const getLineRevenue = (row: {
   // locked_est_price is a frozen, native-currency snapshot (e.g. a real
   // pricing-API hint) — prefer it over the weaker estimated_price fallback
   // when both exist, since it more often reflects the actual order price.
-  const lockedEst = Number(row.locked_est_price || 0);
-  const estimatedUsd = Number(row.estimated_price || 0);
-  let gross = 0;
-  if (totalSale > 0) gross = totalSale;
-  else if (soldPrice > 0) gross = soldPrice * qty;
-  else if (lockedEst > 0) gross = lockedEst * qty;
-  else if (estimatedUsd > 0) gross = estimatedPriceToNative(estimatedUsd, row.marketplace, fxRates) * qty;
-  if (gross <= 0) return 0;
+  // WAS DOUBLY WRONG, in both directions. This function used to return a
+  // NATIVE figure and the call sites then applied toUsd() to it:
+  //
+  //   settled MX row  36.43 USD used as gross -> toUsd() -> $1.98   (18x LOW)
+  //   pending MX row  669.62 native -> estimatedPriceToNative()
+  //                   multiplied an ALREADY-NATIVE value by the rate,
+  //                   then toUsd() divided it back -> $669.62       (18x HIGH)
+  //
+  // It now returns USD directly, via the one shared helper, and the call sites
+  // no longer convert. estimatedPriceToNative is gone -- its name described
+  // converting USD to native, which is backwards for estimated_price.
+  const estimateUsd = getPendingEstimateUsd(row, toUsdFromRates(fxRates));
+  if (estimateUsd <= 0) return 0;
   // Net Amazon-funded coupon (USD-safe; non-US handled via FEC promo path)
-  return Math.max(0, gross - getOrderPromoUsd(row));
+  return Math.max(0, estimateUsd - getOrderPromoUsd(row));
 };
 
 const getUnitPriceForAverage = (row: {
@@ -156,15 +160,9 @@ const getUnitPriceForAverage = (row: {
   marketplace?: string | null;
 }, fxRates: Record<string, number>) => {
   const qty = Math.max(1, Number(row.quantity || 0));
-  const soldPrice = Number(row.sold_price || 0);
-  const totalSale = Number(row.total_sale_amount || 0);
-  const lockedEst = Number(row.locked_est_price || 0);
-  const estimatedUsd = Number(row.estimated_price || 0);
-  if (totalSale > 0) return totalSale / qty;
-  if (soldPrice > 0) return soldPrice;
-  if (lockedEst > 0) return lockedEst;
-  if (estimatedUsd > 0) return estimatedPriceToNative(estimatedUsd, row.marketplace, fxRates);
-  return 0;
+  // USD per unit, through the shared helper, for the same reason as above.
+  const lineUsd = getPendingEstimateUsd(row, toUsdFromRates(fxRates));
+  return lineUsd > 0 ? lineUsd / qty : 0;
 };
 
 // Amazon stores order_date in Pacific Time — match that for day boundaries
@@ -373,9 +371,11 @@ const LiveSalesPopup = ({ open, onOpenChange, marketplace: initialMarketplace = 
         if (!asin) continue;
 
         const qty = Math.max(1, Number(row.quantity || 0));
+        // getLineRevenue and avgUnitPrice are both USD now, so there is no
+        // toUsd() here any more -- applying one was what made settled non-US
+        // rows read 18x too small.
         const explicit = getLineRevenue(row, fxRates);
-        const rawRevenue = explicit > 0 ? explicit : avgUnitPrice > 0 ? avgUnitPrice * qty : 0;
-        const lineRevenue = toUsd(rawRevenue, (row as any).marketplace);
+        const lineRevenue = explicit > 0 ? explicit : avgUnitPrice > 0 ? avgUnitPrice * qty : 0;
 
         totalUnits += qty;
         totalRevenue += lineRevenue;
@@ -411,9 +411,9 @@ const LiveSalesPopup = ({ open, onOpenChange, marketplace: initialMarketplace = 
           );
           if (!dateStr || dateStr.length < 10) continue;
           const qty = Math.max(1, Number(row.quantity || 0));
+          // Already USD -- see the note at the other call site.
           const explicit = getLineRevenue(row, fxRates);
-          const rawRev = explicit > 0 ? explicit : avgUnitPrice > 0 ? avgUnitPrice * qty : 0;
-          const lineRev = toUsd(rawRev, (row as any).marketplace);
+          const lineRev = explicit > 0 ? explicit : avgUnitPrice > 0 ? avgUnitPrice * qty : 0;
           const entry = dayMap.get(dateStr) || { units: 0, revenue: 0 };
           entry.units += qty;
           entry.revenue += lineRev;

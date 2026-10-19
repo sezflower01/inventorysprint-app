@@ -5,6 +5,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { fetchAllPages } from "@/lib/sales/paginatedFetch";
 import { cn } from "@/lib/utils";
 import { getGrossSalesForOrder, buildSnapshotMap, type SaleOrder, type InventoryInfo as SalesInventoryInfo, type PriceSnapshot } from "@/lib/salesCalculations";
+import { getPendingEstimateUsd, type ToUsdConverter } from "@/lib/sales/currencyConversion";
 import { addDaysISO, getBusinessDateISO, makePeriodKey, SALES_BUSINESS_TZ } from "@/lib/sales/dateRange";
 import { TrendingUp, TrendingDown, Info, RefreshCw, History, CalendarRange, X, Calendar } from "lucide-react";
 import SellerboardBreakdown from "./SellerboardBreakdown";
@@ -572,14 +573,20 @@ const isPendingPlaceholderStrict = (row: { asin?: string | null; title?: string 
 const isRealAsinStrict = (val: string | null | undefined): boolean =>
   /^B0[A-Z0-9]{8}$/i.test(String(val || '').trim());
 
-const getStrictLineRevenue = (row: StrictSalesOrderRow) => {
+  // NOTE: this component is currently NOT imported by any page -- only
+  // `import type { PeriodStat }` is, which is erased at build time. These
+  // helpers therefore display nothing today. They are routed through the
+  // shared converter anyway so that reviving the component cannot revive the
+  // bug: each of the three used `estimated_price * qty` with no conversion,
+  // which would put pesos into a USD total the moment it rendered.
+const getStrictLineRevenue = (row: StrictSalesOrderRow, toUsd?: ToUsdConverter) => {
+  if (toUsd) return getPendingEstimateUsd(row as never, toUsd);
   const qty = Math.max(1, Number(row.quantity || 0));
   const totalSale = Number(row.total_sale_amount || 0);
   if (totalSale > 0) return totalSale;
   const soldPrice = Number(row.sold_price || 0);
   if (soldPrice > 0) return soldPrice * qty;
-  const estimated = Number(row.estimated_price || 0);
-  if (estimated > 0) return estimated * qty;
+  // No converter supplied: refuse to return a native figure dressed as USD.
   return 0;
 };
 
@@ -1274,16 +1281,9 @@ export default function PeriodStatsBlocks({
     // Settlement RPC still provides fees, refunds, and operational charges.
     // ─────────────────────────────────────────────────────────────────────────
     const normalizedOrderId = (id: string) => String(id || '').replace(/-REFUND.*$/i, '');
-    const getLineSales = (r: any) => {
-      const qty = Math.max(1, Number(r.quantity || 0));
-      const totalSaleAmount = Number(r.total_sale_amount || 0);
-      const soldPrice = Number(r.sold_price || 0);
-      if (totalSaleAmount > 0) return totalSaleAmount;
-      if (soldPrice > 0) return soldPrice * qty;
-      const estPrice = Number(r.estimated_price || 0);
-      if (estPrice > 0) return estPrice * qty;
-      return 0;
-    };
+    // See the note on getStrictLineRevenue: estimated_price is native for
+    // non-US, so it only becomes revenue through the shared converter.
+    const getLineSales = (r: any) => getPendingEstimateUsd(r, toUsd);
 
     const purchaseOrderRows = await fetchAllPages<any>(() => {
       let q = supabase
@@ -2361,14 +2361,9 @@ export default function PeriodStatsBlocks({
 
     const getLineSales = (row: any) => {
       const qty = Math.max(1, Number(row.quantity || 0));
-      const totalSaleAmount = Number(row.total_sale_amount || 0);
-      const soldPrice = Number(row.sold_price || 0);
-      if (totalSaleAmount > 0) return totalSaleAmount;
-      if (soldPrice > 0) return soldPrice * qty;
-      // Fallback to estimated_price for pending/unsettled orders
-      const estPrice = Number(row.estimated_price || 0);
-      if (estPrice > 0) return estPrice * qty;
-      return 0;
+      // estimated_price is native for non-US; the shared converter is the
+      // only place it may become USD revenue.
+      return getPendingEstimateUsd(row, toUsd);
     };
 
     const dropReasons = {

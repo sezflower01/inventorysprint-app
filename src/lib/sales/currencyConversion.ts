@@ -332,3 +332,81 @@ export function isLegacyUsdEstimatedPriceSource(priceSource: string | null | und
     priceSource.startsWith("hint:")
   );
 }
+
+/**
+ * THE ONE PLACE a pending order's estimate becomes USD revenue.
+ *
+ * estimated_price and locked_est_price are NATIVE marketplace currency for
+ * non-US rows and USD for US rows (see the contract at the top of this file).
+ * Multiplying either by quantity without converting puts pesos, Canadian
+ * dollars or reais into a USD total. That mistake was made independently in
+ * at least six places, in both directions:
+ *
+ *   currencyConversion   a US-only Pending guard returned estimated_price raw,
+ *                        so MX order 701-8676794-7473022 reported $669.62
+ *                        instead of $36.43 (fixed 2026-10-19)
+ *   LiveSalesPopup       worked internally in native and called toUsd() at the
+ *                        end, but fed it USD fields -- so a settled MX row came
+ *                        out 18x too SMALL ($1.98) while a pending one came out
+ *                        18x too BIG, because estimatedPriceToNative multiplied
+ *                        an already-native value by the rate
+ *   CancelledOrdersSection  read estimated_price BEFORE sold_price and never
+ *                        converted it
+ *   PeriodStatsBlocks    three copies of `estimated * qty` with no conversion
+ *                        (currently dead code -- the component is not imported
+ *                        by any page -- but it would ship the bug the moment
+ *                        anyone rendered it)
+ *
+ * Call this instead of reaching for the columns. It returns USD for every
+ * marketplace, prefers the settled figure when there is one, and leaves US
+ * rows numerically untouched.
+ */
+export function getPendingEstimateUsd(
+  row: ConfirmedSalesRevenueRow & { locked_est_price?: number | null },
+  toUsd: ToUsdConverter,
+): number {
+  const qty = Math.max(1, Number(row.quantity || 0));
+
+  // A settled figure outranks any estimate. These columns are USD already, so
+  // they must NOT be passed through toUsd() -- doing that is the
+  // LiveSalesPopup bug.
+  const confirmedUsd = getConfirmedSalesOrderRevenueUsd(row, toUsd);
+  if (confirmedUsd > 0) return confirmedUsd;
+
+  const marketplace = String(row.marketplace || "US").trim().toUpperCase() || "US";
+
+  // locked_est_price first: a frozen snapshot of the order's own price, which
+  // beats estimated_price because the latter tracks the CURRENT listing and
+  // drifts when the seller reprices.
+  const lockedNative = Number(row.locked_est_price || 0) * qty;
+  if (lockedNative > 0) return toUsd(lockedNative, marketplace);
+
+  const estimatedNative = Number(row.estimated_price || 0) * qty;
+  if (estimatedNative > 0) return toUsd(estimatedNative, marketplace);
+
+  return 0;
+}
+
+/**
+ * USD value of a CANCELLED order's line, for "what we did not earn" displays.
+ *
+ * Separate from the above because a cancelled row legitimately has no settled
+ * price and the estimate IS the best figure -- but it still has to be
+ * converted. CancelledOrdersSection read estimated_price first and showed it
+ * raw, so a cancelled MX order appeared as a four-figure dollar loss.
+ */
+export function getCancelledLineUsd(
+  row: ConfirmedSalesRevenueRow & { locked_est_price?: number | null },
+  toUsd: ToUsdConverter,
+): number {
+  const qty = Math.max(1, Number(row.quantity || 0));
+  const marketplace = String(row.marketplace || "US").trim().toUpperCase() || "US";
+
+  const estimatedNative = Number(row.estimated_price || 0);
+  if (estimatedNative > 0) return Math.abs(toUsd(estimatedNative * qty, marketplace));
+
+  // sold_price / total_sale_amount are USD; no conversion.
+  const soldUsd = Number(row.sold_price || 0) * qty;
+  if (soldUsd > 0) return Math.abs(soldUsd);
+  return Math.abs(Number(row.total_sale_amount || 0));
+}

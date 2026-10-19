@@ -3,6 +3,8 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { Loader2, RotateCw, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { getCancelledLineUsd } from "@/lib/sales/currencyConversion";
+import { MARKETPLACE_CURRENCY } from "@/lib/marketplaceCurrency";
 
 interface CancelledRow {
   id: string;
@@ -32,6 +34,31 @@ export default function CancelledOrdersSection({ rangeStart, rangeEnd, label, da
   const { user } = useAuth();
   const [rows, setRows] = useState<CancelledRow[]>([]);
   const [loading, setLoading] = useState(false);
+  // Own FX. This component is rendered by both LiveSales and MobileLiveSales
+  // and receives no converter, which is how it ended up showing a cancelled
+  // MX order's native estimate as dollars.
+  const [fxRates, setFxRates] = useState<Record<string, number>>({});
+
+  const toUsd = useCallback((amount: number, mp?: string | null) => {
+    const currency = MARKETPLACE_CURRENCY[String(mp || "US").trim()] || "USD";
+    if (currency === "USD") return amount;
+    const rate = fxRates[currency];
+    return rate && rate > 0 ? amount / rate : amount;
+  }, [fxRates]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase.from("fx_rates").select("quote, rate").eq("base", "USD");
+      if (cancelled || !data) return;
+      const map: Record<string, number> = {};
+      for (const r of data as Array<{ quote: string; rate: number }>) {
+        if (r?.quote && Number(r.rate) > 0) map[r.quote] = Number(r.rate);
+      }
+      setFxRates(map);
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const fetchCancelled = useCallback(async () => {
     if (!user?.id || !rangeStart || !rangeEnd) return;
@@ -80,10 +107,9 @@ export default function CancelledOrdersSection({ rangeStart, rangeEnd, label, da
   }, [fetchCancelled]);
 
   const totalQty = rows.length; // cancelled rows have qty zeroed; show order count as units
-  const totalAmount = rows.reduce(
-    (s, r) => s + Math.abs(Number(r.estimated_price ?? r.sold_price ?? r.total_sale_amount ?? 0)),
-    0,
-  );
+  // Was: Math.abs(estimated_price ?? sold_price ?? total_sale_amount) -- which
+  // took the NATIVE estimate first and never converted it.
+  const totalAmount = rows.reduce((s, r) => s + getCancelledLineUsd(r, toUsd), 0);
 
   const cardBg = dark ? "bg-white/[0.04] border border-white/10 rounded-xl" : "bg-card rounded-lg border";
   const titleCls = dark ? "text-white" : "";
@@ -139,7 +165,7 @@ export default function CancelledOrdersSection({ rangeStart, rangeEnd, label, da
               <tbody>
                 {rows.map((r) => {
                   const amt = Math.abs(
-                    Number(r.estimated_price ?? r.sold_price ?? r.total_sale_amount ?? 0),
+                    getCancelledLineUsd(r, toUsd),
                   );
                   return (
                     <tr key={r.id} className={`${rowBorder} opacity-80`}>
