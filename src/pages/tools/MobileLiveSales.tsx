@@ -2977,8 +2977,20 @@ const MobileLiveSales = () => {
               )}
 
               {(() => {
+                // Payout formula deliberately UNCHANGED.
                 const payout = disp.revenue - disp.fees - disp.refunds;
                 const refundPct = disp.revenue > 0 ? (disp.refunds / disp.revenue) * 100 : 0;
+                // Settled credits (reimbursements, warehouse lost/damage,
+                // liquidations, other income). These are real cash Amazon
+                // disburses but they are NOT sales, so they stay out of the
+                // payout formula above and are shown on their own line.
+                const adjustmentsCredit = displayAdjustments.credits * fc.factor * homeRate;
+                // How much of `revenue` is an estimate rather than a settled
+                // price. On a day of fresh pending orders this is ~100%, which
+                // is exactly why the combined figure must state its basis.
+                const estimatedPart = (displayPendingEst.revenueUsd || 0) * fc.factor * homeRate;
+                const settledPart = Math.max(0, disp.revenue - estimatedPart);
+                const combined = payout + adjustmentsCredit;
                 return (
                   <>
                     <div className="mt-3 rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-3 py-2 flex items-center justify-between">
@@ -2994,6 +3006,67 @@ const MobileLiveSales = () => {
                         </div>
                       )}
                     </div>
+
+                    {/* Settled adjustments, and a combined figure that names its
+                        own basis. Deliberately NOT called "payout incl.
+                        adjustments": the payout term is estimate-based whenever
+                        orders are still pending, while adjustments are settled
+                        cash, so the sum mixes two bases and has to say so. */}
+                    {adjustmentsCredit !== 0 && (
+                      <div className="mt-2 rounded-lg border border-sky-400/30 bg-sky-500/10 px-3 py-2">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <div className="text-[11px] uppercase tracking-wider font-bold text-sky-200/90">Adjustments (settled)</div>
+                            <div className="text-[10px] text-sky-200/60 font-medium">
+                              Reimbursements, warehouse lost/damage, credits — not from this period&apos;s sales
+                            </div>
+                          </div>
+                          <div className="text-2xl font-extrabold tabular-nums tracking-tight text-sky-200">
+                            {adjustmentsCredit < 0 ? "−" : "+"}{homeCurrencySymbol}{Math.abs(adjustmentsCredit).toFixed(2)}
+                          </div>
+                        </div>
+
+                        <div className="mt-2 border-t border-white/10 pt-2">
+                          <div className="flex items-center justify-between">
+                            <div>
+                              <div className="text-[11px] uppercase tracking-wider font-bold text-white">
+                                Expected cash
+                              </div>
+                              <div className="text-[10px] text-white/60 font-medium">
+                                Est. payout {homeCurrencySymbol}{payout.toFixed(2)} + settled adjustments {homeCurrencySymbol}{adjustmentsCredit.toFixed(2)}
+                              </div>
+                            </div>
+                            <div className={`text-2xl font-extrabold tabular-nums tracking-tight ${combined >= 0 ? "text-white" : "text-rose-300"}`}>
+                              {combined < 0 ? "−" : ""}{homeCurrencySymbol}{Math.abs(combined).toFixed(2)}
+                            </div>
+                          </div>
+
+                          {/* Which parts are settled vs estimated. */}
+                          <div className="mt-2 text-[10px] leading-snug text-white/55">
+                            <div className="font-bold text-white/70 uppercase tracking-wider mb-1">Basis</div>
+                            <div>
+                              Sales {homeCurrencySymbol}{disp.revenue.toFixed(2)} ={" "}
+                              {homeCurrencySymbol}{settledPart.toFixed(2)} settled +{" "}
+                              {homeCurrencySymbol}{estimatedPart.toFixed(2)} estimated
+                              {disp.revenue > 0 && estimatedPart / disp.revenue > 0.5 && (
+                                <span className="text-amber-200/80 font-semibold">
+                                  {" "}— mostly estimated, so the payout term will move as orders settle
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-0.5">
+                              Adjustments {homeCurrencySymbol}{Math.abs(adjustmentsCredit).toFixed(2)} are settled cash from{" "}
+                              {displayAdjustments.events} financial event{displayAdjustments.events === 1 ? "" : "s"}, already paid or payable.
+                            </div>
+                            <div className="mt-1 text-white/45">
+                              The P&amp;L <span className="font-semibold text-white/60">includes</span> these adjustments; the Est. Amazon Payout
+                              tile above <span className="font-semibold text-white/60">excludes</span> them. That is the expected difference
+                              between the two reports — reconcile using Expected cash, not the payout tile.
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
                     <div className="mt-2 rounded-lg border border-rose-400/25 bg-rose-500/10 px-3 py-2 flex items-center justify-between">
                       <div>
                         <div className="text-[11px] uppercase tracking-wider font-bold text-rose-200/90">Refund %</div>
