@@ -38,6 +38,8 @@ interface FbmOrderRow {
   shipping_label_fee: number | null;
   shipping_label_fee_source: string | null;
   shipping_label_fee_synced_at: string | null;
+  /** Positive only on FBA orders, so it is proof the row is NOT FBM. */
+  fba_fee?: number | null;
 }
 
 interface Props {
@@ -73,7 +75,7 @@ export default function FbmLabelCostDialog({
     try {
       const { data, error } = await supabase
         .from("sales_orders")
-        .select("id, order_id, order_date, order_status, fulfillment_channel, marketplace, quantity, sold_price, estimated_price, shipping_label_fee, shipping_label_fee_source, shipping_label_fee_synced_at")
+        .select("id, order_id, order_date, order_status, fulfillment_channel, marketplace, quantity, sold_price, estimated_price, shipping_label_fee, shipping_label_fee_source, shipping_label_fee_synced_at, fba_fee")
         .eq("asin", asin)
         .gte("order_date", rangeStart)
         .lte("order_date", rangeEnd)
@@ -83,7 +85,26 @@ export default function FbmLabelCostDialog({
       if (error) throw error;
       setRows(((data ?? []) as FbmOrderRow[]).filter((row) => {
         const channel = String(row.fulfillment_channel || "").toUpperCase();
-        return channel !== "AFN";
+        if (channel.startsWith("AFN")) return false;
+        if (channel.startsWith("MFN")) return true;
+        // UNTAGGED. `channel !== "AFN"` used to let these through, which meant
+        // a missing tag was read as "this is FBM, a label fee is coming". That
+        // default is wrong far more often than it is right: 1,774 of 2,743
+        // October orders carry no fulfillment_channel at all (65 pct).
+        //
+        // Measured 2026-10-19 on the six rows the seller was typing in by
+        // hand, all ASIN B08229T8SS: two carry fba_fee 4.36, so they are FBA
+        // and NO seller-paid label will ever exist for them -- yet they showed
+        // "awaiting label fee" indefinitely and the poller would not touch
+        // them either, because it filters .eq("fulfillment_channel","MFN")
+        // while this list filtered !== "AFN". The two criteria disagreed, and
+        // the gap was the seller doing data entry.
+        //
+        // An FBA fulfilment fee is Amazon charging to ship it, which only
+        // happens on FBA, so it is positive proof this is not FBM. Without
+        // that proof the row is still shown (it may genuinely be FBM) but the
+        // caller can label it honestly rather than promising a fee.
+        return Number(row.fba_fee || 0) <= 0;
       }));
     } catch (err) {
       toast({ title: "Failed to load FBM orders", description: (err as Error).message, variant: "destructive" });
@@ -196,7 +217,11 @@ export default function FbmLabelCostDialog({
                             </span>
                           </>
                         ) : (
-                          <p className="text-[10px] uppercase text-muted-foreground">awaiting label fee</p>
+                          <p className="text-[10px] uppercase text-muted-foreground">
+                            {String(row.fulfillment_channel || "").toUpperCase().startsWith("MFN")
+                              ? "awaiting label fee"
+                              : "channel not reported by Amazon — may not be FBM"}
+                          </p>
                         )}
                       </div>
                     </div>
