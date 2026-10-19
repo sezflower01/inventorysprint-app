@@ -87,24 +87,26 @@ export default function FbmLabelCostDialog({
         const channel = String(row.fulfillment_channel || "").toUpperCase();
         if (channel.startsWith("AFN")) return false;
         if (channel.startsWith("MFN")) return true;
-        // UNTAGGED. `channel !== "AFN"` used to let these through, which meant
-        // a missing tag was read as "this is FBM, a label fee is coming". That
-        // default is wrong far more often than it is right: 1,774 of 2,743
-        // October orders carry no fulfillment_channel at all (65 pct).
+        // UNTAGGED: always shown, and labelled as unknown rather than filtered.
         //
-        // Measured 2026-10-19 on the six rows the seller was typing in by
-        // hand, all ASIN B08229T8SS: two carry fba_fee 4.36, so they are FBA
-        // and NO seller-paid label will ever exist for them -- yet they showed
-        // "awaiting label fee" indefinitely and the poller would not touch
-        // them either, because it filters .eq("fulfillment_channel","MFN")
-        // while this list filtered !== "AFN". The two criteria disagreed, and
-        // the gap was the seller doing data entry.
+        // 7c84a6f hid untagged rows whose fba_fee was positive, on the theory
+        // that an FBA fulfilment fee proves the order is not FBM. Measured
+        // 2026-10-19 against rows whose channel Amazon DID state, that theory
+        // is wrong: 45 of 88 known-MFN orders (51.1 pct) ALSO carry an
+        // fba_fee, while 100 pct of AFN rows do and 0 pct of AFN rows carry a
+        // label fee. So fba_fee does not discriminate -- hiding on it would
+        // conceal roughly half the genuine FBM population from the one screen
+        // that can fix them.
         //
-        // An FBA fulfilment fee is Amazon charging to ship it, which only
-        // happens on FBA, so it is positive proof this is not FBM. Without
-        // that proof the row is still shown (it may genuinely be FBM) but the
-        // caller can label it honestly rather than promising a fee.
-        return Number(row.fba_fee || 0) <= 0;
+        // The sound discriminator runs the other way: a LABEL fee proves FBM
+        // (97.7 pct of MFN rows have one, no AFN row does). That cannot
+        // exclude anything here, because these rows have no label fee yet --
+        // which is why they are on this list.
+        //
+        // So: show every untagged row, and let the label say it is unknown
+        // instead of promising a fee. 1,774 of 2,743 October orders are
+        // untagged, so the honest word matters more than the filter.
+        return true;
       }));
     } catch (err) {
       toast({ title: "Failed to load FBM orders", description: (err as Error).message, variant: "destructive" });
@@ -220,7 +222,7 @@ export default function FbmLabelCostDialog({
                           <p className="text-[10px] uppercase text-muted-foreground">
                             {String(row.fulfillment_channel || "").toUpperCase().startsWith("MFN")
                               ? "awaiting label fee"
-                              : "channel not reported by Amazon — may not be FBM"}
+                              : "channel unknown — Amazon did not report FBA or FBM"}
                           </p>
                         )}
                       </div>
