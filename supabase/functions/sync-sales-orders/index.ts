@@ -230,6 +230,7 @@ import {
 } from '../_shared/cost-contract.ts';
 import { waitForApiToken, backoffMs } from '../_shared/rate-limiter.ts';
 import { mergeOrderItemsByAsin } from '../_shared/order-items.ts';
+import { storedOrderChannel, orderIsFbm, orderChannelIsKnown, orderChannelKey } from '../_shared/fulfillment-channel.ts';
 import { HealthSignals } from '../_shared/health-signal.ts';
 import { maybeFirePromoTripwire } from '../_shared/promo-tripwire.ts';
 import { computeBbOwnEstimateFields, makeSellerIdCache } from '../_shared/bbOwnEstimate.ts';
@@ -1079,7 +1080,14 @@ async function handleSyncRequest(req: Request): Promise<Response> {
           
           // Fetch actual fees from SP-API
           // Detect FBM orders: use IsAmazonFulfilled=false for FBM
-          const isFbmOrder = order.fulfillment_channel === 'MFN';
+          // EXPLICIT: only a stated MFN counts as FBM. An unknown channel is
+          // treated as FBA, which is what this line already did -- kept so the
+          // fee quote for existing rows does not change. Logged so the
+          // assumption is visible.
+          const isFbmOrder = orderIsFbm(order.fulfillment_channel);
+          if (!orderChannelIsKnown(order.fulfillment_channel)) {
+            console.log(`📦 FEE_CHANNEL_ASSUMED_FBA: ${order.order_id}/${order.asin} has no fulfillment_channel`);
+          }
           const apiFees = await fetchProductFees(accessToken, order.asin, priceToUse, 'ATVPDKIKX0DER', {}, undefined, !isFbmOrder);
           
           if (apiFees) {
@@ -1383,8 +1391,17 @@ async function handleSyncRequest(req: Request): Promise<Response> {
       // Unknown channel counts as AFN, which is what the old `.some()` did for
       // an ASIN with no MFN order, so ASINs Amazon never gave a channel for
       // (13,142 orders in 2026) behave exactly as before.
-      const channelKeyFor = (o: any) =>
-        String(o?.fulfillment_channel || '').trim().toUpperCase() === 'MFN' ? 'MFN' : 'AFN';
+      // EXPLICIT, and deliberately unchanged in behaviour: an unknown channel
+      // still groups as AFN, exactly as the note above requires, so no
+      // existing fee figure moves. The difference is that the assumption is
+      // now named and counted rather than collapsed silently.
+      let unknownChannelGrouped = 0;
+      const channelKeyFor = (o: any) => {
+        const known = storedOrderChannel(o?.fulfillment_channel);
+        if (known) return known;
+        unknownChannelGrouped++;
+        return 'AFN'; // ASSUMED, not known. Same result as before by design.
+      };
       const groupKeyFor = (o: any) => {
         const mp = o.marketplace || 'US';
         const mpId = MARKETPLACE_NAME_TO_ID[mp] || MARKETPLACE_NAME_TO_ID['US'];
@@ -3906,7 +3923,11 @@ async function handleSyncRequest(req: Request): Promise<Response> {
               order_status: 'Pending',
               order_date: targetRow?.order_date || order.order_date,
               marketplace: targetRow?.marketplace || 'US',
-              fulfillment_channel: targetRow?.fulfillment_channel || 'AFN',
+              // NO 'AFN' DEFAULT. This used to read `|| 'AFN'`, which stored a
+              // guess that is indistinguishable from Amazon's own answer. If
+              // the existing row has no channel, keep it NULL and let the
+              // readers state their assumption explicitly instead.
+              fulfillment_channel: storedOrderChannel(targetRow?.fulfillment_channel),
               order_type: 'StandardOrder',
               updated_at: new Date().toISOString(),
             };
@@ -8273,7 +8294,9 @@ async function enrichPendingOrdersWithAsins(
             enrichedAsinForAssignment,
             sku || order.sku || order.seller_sku,
             enrichedMarketplace,
-            order.fulfillment_channel === 'MFN' ? 'FBM' : 'FBA'
+            // ASSUMED FBA when unknown -- unchanged on purpose, so repricer
+            // assignments for existing rows stay as they are.
+            orderChannelKey(order.fulfillment_channel)
           );
           // Update daily rollup when ASIN is resolved from PENDING
           const enrichedAsin = updateData.asin || order.asin;
@@ -8684,20 +8707,42 @@ async function fetchFinancialEvents(
 // metadata, returned regardless of order status. Used so a settlement-only
 // insert (financial event arrived with no prior Orders API record) gets the
 // true purchase date instead of the settlement/posted date.
-async function fetchOrderPurchaseDateForSettlement(orderId: string, accessToken: string): Promise<string | null> {
+/**
+ * GetOrder metadata for one settled order.
+ *
+ * This used to return only PurchaseDate and throw the rest of the payload
+ * away -- including FulfillmentChannel, which is the single field that would
+ * have prevented 57,509 rows from having a NULL channel. The call is already
+ * being made and paid for, so capturing the channel costs nothing.
+ *
+ * fulfillmentChannel is deliberately `null` when Amazon does not state one.
+ * It must NOT default to 'AFN': a default is indistinguishable from a fact
+ * once stored, and that is precisely why the existing 14,068 AFN rows cannot
+ * be used as ground truth.
+ */
+async function fetchOrderMetaForSettlement(
+  orderId: string,
+  accessToken: string,
+): Promise<{ purchaseDate: string | null; fulfillmentChannel: string | null }> {
+  const empty = { purchaseDate: null, fulfillmentChannel: null };
   try {
     const url = `https://sellingpartnerapi-na.amazon.com/orders/v0/orders/${orderId}`;
     const headers = await signRequest('GET', url, '', accessToken);
     const res = await fetch(url, { method: 'GET', headers: { ...headers, 'Content-Type': 'application/json' } });
     if (!res.ok) {
-      console.warn(`⚠️ SETTLEMENT_PURCHASE_DATE_LOOKUP: ${orderId} failed: ${res.status}`);
-      return null;
+      console.warn(`⚠️ SETTLEMENT_ORDER_META: ${orderId} failed: ${res.status}`);
+      return empty;
     }
     const data = await res.json();
-    return data?.payload?.PurchaseDate || null;
+    const raw = String(data?.payload?.FulfillmentChannel || '').trim().toUpperCase();
+    const channel = storedOrderChannel(raw);
+    if (!channel && raw) {
+      console.warn(`⚠️ SETTLEMENT_ORDER_META: ${orderId} unexpected FulfillmentChannel="${raw}" -> storing NULL`);
+    }
+    return { purchaseDate: data?.payload?.PurchaseDate || null, fulfillmentChannel: channel };
   } catch (err) {
-    console.warn(`⚠️ SETTLEMENT_PURCHASE_DATE_LOOKUP: ${orderId} exception: ${(err as Error).message}`);
-    return null;
+    console.warn(`⚠️ SETTLEMENT_ORDER_META: ${orderId} exception: ${(err as Error).message}`);
+    return empty;
   }
 }
 
@@ -9289,17 +9334,23 @@ async function processFinancialEvent(
         // settled 2026-07-23 — without this lookup it permanently showed as a
         // 07-23 sale. Falls back to postedDate only if the lookup fails.
         let resolvedOrderDate = postedDate;
+        let resolvedFulfillmentChannel: string | null = null;
         if (accessToken) {
-          const realPurchaseDate = await fetchOrderPurchaseDateForSettlement(orderId, accessToken);
-          if (realPurchaseDate) {
-            resolvedOrderDate = getPacificDateString(realPurchaseDate);
+          const orderMeta = await fetchOrderMetaForSettlement(orderId, accessToken);
+          if (orderMeta.purchaseDate) {
+            resolvedOrderDate = getPacificDateString(orderMeta.purchaseDate);
             console.log(`📅 SETTLEMENT_PURCHASE_DATE_RESOLVED: ${orderId} settlement=${postedDate} -> real purchase=${resolvedOrderDate}`);
           }
+          // Captured from the SAME response, which was already being fetched.
+          resolvedFulfillmentChannel = orderMeta.fulfillmentChannel;
+          console.log(`📦 SETTLEMENT_CHANNEL: ${orderId} -> ${resolvedFulfillmentChannel ?? 'NULL (Amazon did not say)'}`);
         }
         console.log(`📝 Inserting settled order: ${orderId} / ${finalAsin} | asinSource: ${finalAsinSource} | price_source=financial_events | order_date=${resolvedOrderDate}`);
         const { error: insertError } = await supabase.from('sales_orders').insert({
           user_id: userId,
           order_id: orderId,
+          // NULL when Amazon did not state one -- see fetchOrderMetaForSettlement.
+          fulfillment_channel: resolvedFulfillmentChannel,
           asin: finalAsin,
           seller_sku: sku,
           title,

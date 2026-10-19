@@ -71,3 +71,63 @@ export function channelFromListingsApi(listingData: any): "FBA" | "FBM" | null {
   }
   return null;
 }
+
+/* ───────────────────────── ORDER channel ─────────────────────────
+ *
+ * Everything above infers a LISTING's channel from inventory evidence. This
+ * section is about an ORDER, where Amazon states the answer directly in the
+ * Orders API `FulfillmentChannel` field — so there is nothing to infer, only
+ * a value to record faithfully or admit is missing.
+ *
+ * WHY THIS IS HERE. The same two lines were written independently in
+ * fetch-live-orders and sync-sales-orders, both as
+ * `amazonOrder?.FulfillmentChannel || 'AFN'`, and that default is how 14,068
+ * rows ended up carrying an AFN that cannot be distinguished from a fact.
+ * Measured 2026-10-19: 57,509 rows have no channel at all, and the column is
+ * read in ten places that each decide for themselves what a missing value
+ * means. One definition, two functions, tested.
+ *
+ * THE SPLIT THAT MATTERS, and it is not symmetric:
+ *
+ *   storedOrderChannel()  what to WRITE. Amazon's value or NULL. Never a
+ *                         guess, because a stored guess is permanent and
+ *                         indistinguishable from data.
+ *   orderIsFbm()          what to READ. Only a stated MFN is FBM. An unknown
+ *                         channel reads as NOT FBM, i.e. it behaves as FBA —
+ *                         which is what every existing caller already did, so
+ *                         adopting this changes no existing figure.
+ *
+ * Those two are deliberately different. Writing NULL while reading it as FBA
+ * is not a contradiction: it records honestly what Amazon said, and keeps
+ * every downstream fee and ROI calculation exactly as it was.
+ */
+
+/** Amazon's answer, normalised — or null when it did not give one. */
+export function storedOrderChannel(raw: unknown): "AFN" | "MFN" | null {
+  const v = String(raw ?? "").trim().toUpperCase();
+  if (v === "AFN") return "AFN";
+  if (v === "MFN") return "MFN";
+  return null;
+}
+
+/**
+ * Is this order merchant-fulfilled?
+ *
+ * Only a stated MFN qualifies. Unknown returns false — the caller is assuming
+ * FBA, which preserves existing behaviour. Use orderChannelIsKnown() when the
+ * difference between "Amazon said FBA" and "nobody knows" actually matters,
+ * such as deciding whether to promise a shipping label fee.
+ */
+export function orderIsFbm(storedChannel: unknown): boolean {
+  return storedOrderChannel(storedChannel) === "MFN";
+}
+
+/** True only when Amazon actually stated a channel. */
+export function orderChannelIsKnown(storedChannel: unknown): boolean {
+  return storedOrderChannel(storedChannel) !== null;
+}
+
+/** 'FBM' for a stated MFN, otherwise 'FBA' — the assumption made explicit. */
+export function orderChannelKey(storedChannel: unknown): "FBA" | "FBM" {
+  return orderIsFbm(storedChannel) ? "FBM" : "FBA";
+}

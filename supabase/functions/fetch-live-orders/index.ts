@@ -3,6 +3,7 @@ import { getListingUnitCost, getInventoryUnitCost } from "../_shared/cost-contra
 import { logHealthSignal, HealthSignals } from "../_shared/health-signal.ts";
 import { computeBbOwnEstimateFields, makeSellerIdCache } from "../_shared/bbOwnEstimate.ts";
 import { waitForApiToken } from "../_shared/rate-limiter.ts";
+import { storedOrderChannel, orderIsFbm, orderChannelKey } from '../_shared/fulfillment-channel.ts';
 let _currentUserId: string | null = null;
 
 type CostResolution = { unitCost: number | null; source: string | null };
@@ -2281,14 +2282,23 @@ Deno.serve(async (req) => {
 
       // TERTIARY CLASSIFIER DISABLED — over-fired on Pending $0 orders and wiped real profit.
       // Only Amazon's native IsReplacementOrder flag + Shipped-$0 heuristic are trusted.
-      const fulfillmentChannelRaw = amazonOrder?.FulfillmentChannel || 'AFN';
+      // NO 'AFN' DEFAULT (2026-10-19). Amazon's own value or NULL -- a stored
+      // default cannot later be told apart from a fact, which is exactly why
+      // the 14,068 existing AFN rows are unusable as ground truth.
+      const fulfillmentChannelRaw = storedOrderChannel(amazonOrder?.FulfillmentChannel);
       const zeroPrincipalAfnClassifierHit = false;
 
       const orderType = isReplacement ? 'Replacement' : orderTypeRaw;
       
       // Detect FBA vs FBM: AFN = Amazon Fulfilled Network (FBA), MFN = Merchant Fulfilled Network (FBM)
-      const fulfillmentChannel = amazonOrder?.FulfillmentChannel || 'AFN';
-      const isFbmOrder = fulfillmentChannel === 'MFN';
+      // Stored value: Amazon's answer, or NULL when it is silent. Never a guess.
+      const fulfillmentChannel = storedOrderChannel(amazonOrder?.FulfillmentChannel);
+      // Read value: only a stated MFN is FBM. Unknown behaves as FBA exactly as
+      // before, so no FBA-dependent calculation on an existing row shifts.
+      const isFbmOrder = orderIsFbm(fulfillmentChannel);
+      if (!fulfillmentChannel) {
+        console.log(`📦 CHANNEL_UNKNOWN: ${orderId} — Amazon gave no FulfillmentChannel; storing NULL, treating as FBA for fees`);
+      }
       if (isFbmOrder) {
         console.log(`[LIVE_ORDERS] 📦 FBM order detected: ${orderId} (FulfillmentChannel=${fulfillmentChannel})`);
       }
@@ -3619,7 +3629,8 @@ Deno.serve(async (req) => {
             o.asin,
             o.seller_sku || o.sku,
             o.marketplace || 'US',
-            o.fulfillment_channel === 'MFN' ? 'FBM' : 'FBA'
+            // ASSUMED FBA when unknown -- unchanged on purpose.
+            orderChannelKey(o.fulfillment_channel)
           );
         }
       }
