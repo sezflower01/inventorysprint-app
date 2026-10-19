@@ -3,8 +3,11 @@ import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { Loader2, RotateCw, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { getCancelledLineUsd } from "@/lib/sales/currencyConversion";
-import { MARKETPLACE_CURRENCY } from "@/lib/marketplaceCurrency";
+// MARKETPLACE_CURRENCY lives in currencyConversion, NOT marketplaceCurrency --
+// the latter exports MARKETPLACE_CONFIGS and getCurrencyForMarketplace instead.
+// MobileLiveSales declares its own local copy, which is what misled me into
+// importing from the wrong module and broke the production build at d94712d.
+import { getCancelledLineUsd, MARKETPLACE_CURRENCY } from "@/lib/sales/currencyConversion";
 
 interface CancelledRow {
   id: string;
