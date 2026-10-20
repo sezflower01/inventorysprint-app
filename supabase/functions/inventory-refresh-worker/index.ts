@@ -1,6 +1,7 @@
 // Drains the inventory_refresh_queue and invokes rescue-inventory-asin per item.
 // Replaces the prior 4k-simultaneous pg_net fan-out which was timing out at 5s.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
+import { readRescueOutcome, type RescueOutcome } from './rescue-outcome.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -30,7 +31,22 @@ const DEFAULT_BATCH = 30;
 const CONCURRENCY = 4;
 const PER_ITEM_TIMEOUT_MS = 25_000;
 
-async function callRescue(item: { user_id: string; asin: string; sku: string; marketplace: string }) {
+// WHY this reads the response body and not just res.ok.
+//
+// rescue-inventory-asin returns 200 both when it writes stock and when it
+// deliberately declines to -- a tombstoned row, no exact seller-SKU match, a
+// non-US marketplace, a suspicious unconfirmed zero. It already tells us which,
+// in `skipped_update_reason`. This worker used to ignore the body entirely, so
+// every decline was recorded as 'success'.
+//
+// Cost of that: B00LFXMBKI sat at available=0 from 2026-09-03 to 2026-10-20
+// while selling 52 units, and the queue showed an unbroken run of green
+// 3-hourly successes the whole time. Amazon said 145 units. Nothing was
+// broken enough to look at, which is exactly the problem -- a queue that
+// cannot say "I chose not to write this" cannot be trusted to mean stock is
+// current. Treat a parse failure as a plain success, not a skip, so a response
+// shape change degrades to the old behaviour instead of flooding skips.
+async function callRescue(item: { user_id: string; asin: string; sku: string; marketplace: string }): Promise<RescueOutcome> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), PER_ITEM_TIMEOUT_MS);
   try {
@@ -50,12 +66,9 @@ async function callRescue(item: { user_id: string; asin: string; sku: string; ma
       signal: ctrl.signal,
     });
     const text = await res.text();
-    if (!res.ok) {
-      return { ok: false, error: `rescue ${res.status}: ${text.slice(0, 300)}` };
-    }
-    return { ok: true };
+    return readRescueOutcome(res.status, text);
   } catch (e: any) {
-    return { ok: false, error: `fetch: ${e?.message || String(e)}` };
+    return { kind: 'failed' as const, error: `fetch: ${e?.message || String(e)}` };
   } finally {
     clearTimeout(t);
   }
@@ -106,17 +119,32 @@ Deno.serve(async (req) => {
 
     const items = (claimed || []) as any[];
     if (items.length === 0) {
-      return { items_processed: 0, detail: { processed: 0, success: 0, errors: 0, drained: true } };
+      return { items_processed: 0, detail: { processed: 0, success: 0, errors: 0, skipped: 0, drained: true } };
     }
 
-    let success = 0, errors = 0;
+    let success = 0, errors = 0, skipped = 0;
+    const skippedReasons: Record<string, number> = {};
     let cursor = 0;
     async function worker() {
       while (cursor < items.length) {
         const idx = cursor++;
         const it = items[idx];
         const r = await callRescue(it);
-        if (r.ok) {
+        if (r.kind === 'declined') {
+          // Terminal, like success -- the decision was correct and there is
+          // nothing to retry -- but it must NOT read as "stock refreshed".
+          skipped++;
+          skippedReasons[r.reason] = (skippedReasons[r.reason] || 0) + 1;
+          const { error: skipErr } = await supa.rpc('mark_inventory_refresh_skipped', {
+            p_id: it.id, p_reason: r.reason,
+          });
+          if (skipErr) {
+            // Never lose the row to a missing/renamed RPC: fall back to the
+            // old behaviour rather than leaving it claimed forever.
+            console.error(`[inventory-refresh-worker] mark_skipped failed (${skipErr.message}) — falling back to success for ${it.asin}`);
+            await supa.rpc('mark_inventory_refresh_success', { p_id: it.id });
+          }
+        } else if (r.kind === 'written') {
           success++;
           await supa.rpc('mark_inventory_refresh_success', { p_id: it.id });
         } else {
@@ -128,9 +156,20 @@ Deno.serve(async (req) => {
     const workers = Array.from({ length: Math.min(CONCURRENCY, items.length) }, () => worker());
     await Promise.all(workers);
 
+    if (skipped > 0) {
+      console.log(
+        `[inventory-refresh-worker] ${skipped}/${items.length} DECLINED (not failures, not writes): ` +
+        Object.entries(skippedReasons).map(([k, v]) => `${k}=${v}`).join(' '),
+      );
+    }
+
     return {
       items_processed: items.length,
-      detail: { processed: items.length, success, errors, drained: items.length < batchSize },
+      detail: {
+        processed: items.length, success, errors, skipped,
+        skipped_reasons: skippedReasons,
+        drained: items.length < batchSize,
+      },
     };
   });
 

@@ -262,7 +262,7 @@ async function processUser(supabase: any, userId: string) {
   while (true) {
     const { data: batch } = await supabase
       .from('inventory')
-      .select('id, asin, sku, listing_status, available, reserved')
+      .select('id, asin, sku, listing_status, available, reserved, last_inventory_sync_at')
       .eq('user_id', userId)
       .range(page * 1000, (page + 1) * 1000 - 1);
     if (!batch?.length) break;
@@ -274,17 +274,59 @@ async function processUser(supabase: any, userId: string) {
   console.log(`[ghost-cleanup] ${allInventory.length} inventory rows for user ${userId}`);
 
   // Find ghost listings: in inventory but NOT in Amazon catalog report
+  //
+  // THE STOCK GATE, and why absence from the catalog report is not proof of
+  // death. The report is the Listings/MerchantListings view, and it LAGS a
+  // newly created listing. The FBA inventory API does not. So a SKU that is
+  // missing from the report while Amazon is actively reporting units for it is
+  // a report lag, not a dead listing -- and tombstoning it is a one-way door,
+  // because fn_protect_ghost_tombstone then refuses every ordinary write and
+  // only source = 'force_relist' can reopen it.
+  //
+  // Lived case, 2026-09-03: B00LFXMBKI / 6DA-X5B-Y5SO was created at 17:52 and
+  // this function tombstoned it at 18:00:35, eight minutes later, purely
+  // because the catalog report had not caught up. It stayed tombstoned for
+  // seven weeks. Amazon held 145 fulfillable units the whole time and the ASIN
+  // sold 52; the row showed available 0, which removed it from Inventory
+  // Valuation (understating it by $5,075), from the repricer's view, and from
+  // the FBA shipment builder, so restocking it needed a manual sync. The
+  // refresh queue meanwhile reported success on every 3-hourly run because
+  // rescue-inventory-asin was declining to write and nobody read the reason.
+  //
+  // The freshness requirement matters as much as the quantity: a stale nonzero
+  // `available` left over from months ago would otherwise make a genuinely
+  // dead listing permanently un-tombstonable. Only stock Amazon confirmed
+  // recently counts as evidence it is alive.
+  const STOCK_EVIDENCE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
   const ghostItems: any[] = [];
+  const heldBackForStock: any[] = [];
   for (const inv of allInventory) {
     if (!inv.sku) continue;
     // Skip already-marked items
     if (inv.listing_status === 'NOT_IN_CATALOG' || inv.listing_status === 'DELETED') continue;
     if (!activeCatalogSkus.has(inv.sku)) {
+      const units = (inv.available ?? 0) + (inv.reserved ?? 0);
+      const syncedAt = inv.last_inventory_sync_at ? Date.parse(inv.last_inventory_sync_at) : NaN;
+      const stockIsFresh = Number.isFinite(syncedAt) &&
+        (Date.now() - syncedAt) <= STOCK_EVIDENCE_MAX_AGE_MS;
+      if (units > 0 && stockIsFresh) {
+        heldBackForStock.push(inv);
+        continue;
+      }
       ghostItems.push(inv);
     }
   }
 
   console.log(`[ghost-cleanup] Found ${ghostItems.length} ghost listings for user ${userId}`);
+  if (heldBackForStock.length > 0) {
+    // Loud on purpose: each of these is a row the old code would have locked.
+    console.log(
+      `[ghost-cleanup] HELD BACK ${heldBackForStock.length} absent-from-report rows that Amazon ` +
+      `still reports stock for (catalog report lag, not dead listings): ` +
+      heldBackForStock.slice(0, 20).map((g: any) =>
+        `${g.asin}/${g.sku}(${(g.available ?? 0)}+${(g.reserved ?? 0)})`).join(' '),
+    );
+  }
 
   // Mark ghost items as NOT_IN_CATALOG
   let markedCount = 0;
@@ -359,5 +401,13 @@ async function processUser(supabase: any, userId: string) {
     marked_not_in_catalog: markedCount,
     assignments_disabled: assignmentsDisabled,
     ghost_skus: ghostItems.slice(0, 20).map((g: any) => ({ sku: g.sku, asin: g.asin, status: g.listing_status })),
+    // Surfaced in the response, not just the log, so a caller can see what the
+    // stock gate protected without digging through function logs.
+    held_back_for_stock: heldBackForStock.length,
+    held_back_skus: heldBackForStock.slice(0, 20).map((g: any) => ({
+      sku: g.sku, asin: g.asin,
+      available: g.available ?? 0, reserved: g.reserved ?? 0,
+      last_inventory_sync_at: g.last_inventory_sync_at,
+    })),
   };
 }
