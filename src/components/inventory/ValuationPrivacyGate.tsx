@@ -108,24 +108,36 @@ export function ValuationPrivacyGate({ children, className }: ValuationPrivacyGa
   return (
     <>
       <div className={className}>
-        {revealed ? (
-          <div className="relative">
-            {children}
-            {/* Sits over the card's own top-right corner. z-10 clears the
-                card's decorative gradient blur, which is absolutely
-                positioned and would otherwise swallow the click. */}
+        {/* A fixed-height control row ABOVE the card, not a button floated
+            over it.
+            The first version of this put Hide at `absolute top-1.5 right-1.5`
+            inside the card. That corner is not empty: the desktop card is a
+            horizontal row of tiles ending in Projected Margin, whose 10px
+            label sits exactly there. With the card's px-5 padding, a ~46px
+            button 6px from the edge would have covered about 30px of that
+            column -- and the one moment this control matters is when someone
+            is walking over, which is the worst moment to be hunting for a
+            label-obscuring ghost button.
+            The row keeps its height in BOTH states so revealing and hiding
+            never shift the page. It is empty while locked, because the locked
+            placeholder carries its own Reveal button as the obvious action. */}
+        <div className="flex items-center justify-end h-7">
+          {revealed && (
             <Button
               type="button"
               variant="ghost"
               size="sm"
               onClick={() => setRevealed(false)}
-              className="absolute top-1.5 right-1.5 z-10 h-7 gap-1.5 px-2 text-[10px] font-medium text-muted-foreground hover:text-foreground"
+              className="h-7 gap-1.5 px-2 text-[11px] font-medium text-muted-foreground hover:text-foreground"
               title="Hide these figures again"
             >
               <EyeOff className="h-3.5 w-3.5" />
-              Hide
+              Hide figures
             </Button>
-          </div>
+          )}
+        </div>
+        {revealed ? (
+          children
         ) : (
           /* Matches the real card's shape -- same rounded-2xl, border and
              px-5 py-4 -- so revealing it does not shift the page. Visually
