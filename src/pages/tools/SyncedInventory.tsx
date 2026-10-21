@@ -26,7 +26,12 @@ import { CreatePurchaseFromCostButton } from "@/components/inventory/CreatePurch
 
 import { useAsinPurchaseRecords } from "@/hooks/use-asin-purchase-records";
 import { calculateReplenishQty } from "@/lib/replenishment";
-import { parseListingDate } from "@/lib/listingDate";
+import {
+  parseListingDate,
+  resolveCreatedDate,
+  compareCreatedDate,
+  type CreatedDateBasis,
+} from "@/lib/listingDate";
 import { usePageFavicon } from "@/hooks/use-page-favicon";
 import { useSubscription } from "@/hooks/use-subscription";
 import { Button } from "@/components/ui/button";
@@ -67,6 +72,13 @@ interface InventoryItem {
   sales_30d?: number;
   sales_period_days?: number;
   listing_created_at?: string | null;
+  /**
+   * WHICH source listing_created_at came from. 'purchase_added' means it is a
+   * purchase-added timestamp standing in for a listing date -- those sort to
+   * the end and are labelled, never passed off as creation dates. See
+   * resolveCreatedDate in src/lib/listingDate.ts.
+   */
+  listing_created_basis?: CreatedDateBasis;
   last_inventory_sync_at?: string | null;
   last_summaries_at?: string | null;
   historical_sales?: number;
@@ -437,7 +449,11 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
       fees: any;
       image_url: string | null;
       price: number | null;
+      // The REAL listing date only. Never falls back to created_at -- see
+      // purchase_added_at below and resolveCreatedDate's header.
       date_created: string | null;
+      /** created_listings.created_at: when the purchase was added here. */
+      purchase_added_at: string | null;
     }
   >();
   const costMapByAsin = new Map<
@@ -450,6 +466,7 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
       image_url: string | null;
       price: number | null;
       date_created: string | null;
+      purchase_added_at: string | null;
     }
   >();
 
@@ -540,7 +557,14 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
           fees: null,
           image_url: clItem.image_url || null,
           price: clItem.price !== null ? Number(clItem.price) : null,
-          date_created: clItem.date_created || clItem.created_at || null,
+          // Was `clItem.date_created || clItem.created_at`, which quietly
+          // substituted a purchase-added timestamp for a listing date on the
+          // 709 rows that have no date_created -- and created_at runs ~236
+          // days later on average, so those rows jumped to the top of a
+          // newest-first sort. The two are kept separate now and the basis is
+          // resolved at the row, not guessed here.
+          date_created: clItem.date_created || null,
+          purchase_added_at: clItem.created_at || null,
         };
 
         // Most accurate: SKU match
@@ -794,7 +818,17 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
       created_at: cl.created_at,
       updated_at: cl.updated_at,
       fees_json: null,
-      listing_created_at: cl.date_created || cl.created_at,
+      // Resolved with its basis instead of `cl.date_created || cl.created_at`:
+      // when date_created is missing the value is a purchase-added timestamp,
+      // and it must sort last and be labelled rather than silently pass as a
+      // creation date.
+      ...(() => {
+        const c = resolveCreatedDate({
+          dateCreated: cl.date_created,
+          purchaseAddedAt: cl.created_at,
+        });
+        return { listing_created_at: c.value, listing_created_basis: c.basis };
+      })(),
       last_inventory_sync_at: null,
       source: 'created_listing', // Mark source for identification
       unit_cost_manual: false,
@@ -880,7 +914,19 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
         ? getDaysSince(historicalSalesMap.get(item.asin)!.earliestDate) 
         : undefined,
       // Use date_created from created_listings if synced inventory doesn't have it
-      listing_created_at: item.listing_created_at || costEntry?.date_created || null,
+      // Same resolution for inventory-backed rows. inventory.listing_created_at
+      // is the correct primary source but is NULL on every row today (0 of
+      // 4,594 measured 2026-10-21), so in practice this lands on the
+      // created_listings pair -- kept first regardless, because it is the
+      // right answer the moment that column is populated.
+      ...(() => {
+        const c = resolveCreatedDate({
+          listingCreatedAt: item.listing_created_at,
+          dateCreated: costEntry?.date_created,
+          purchaseAddedAt: costEntry?.purchase_added_at,
+        });
+        return { listing_created_at: c.value, listing_created_basis: c.basis };
+      })(),
     } as InventoryItem;
 
     return result;
@@ -944,7 +990,7 @@ export default function SyncedInventory() {
   const [searchTerm, setSearchTerm] = useState("");
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(() => (typeof window !== 'undefined' && window.innerWidth < 768) ? 20 : 50);
-  const [sortBy, setSortBy] = useState<'available' | 'roi' | 'replenish' | 'created' | 'sales' | 'bsr' | 'status' | 'valueStock' | 'daysOfCover' | 'attentionScore' | 'ads' | 'unitCost' | 'lastSynced' | 'unfulfilled' | null>('valueStock');
+  const [sortBy, setSortBy] = useState<'available' | 'roi' | 'replenish' | 'created' | 'sales' | 'bsr' | 'status' | 'valueStock' | 'daysOfCover' | 'attentionScore' | 'ads' | 'unitCost' | 'lastSynced' | 'unfulfilled' | null>('created');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [stockFilter, setStockFilter] = useState<'all' | 'in-stock' | 'out-of-stock' | 'needs-replenish' | 'slow-selling' | 'preserved'>('all');
   const [showGhostsOnly, setShowGhostsOnly] = useState(false);
@@ -1866,7 +1912,16 @@ export default function SyncedInventory() {
       
       // Apply created age filter for slow-selling items
       if (matchesStock && createdAgeFilter !== 'all') {
-        const createdDate = parseListingDate(item.listing_created_at);
+        // A purchase-added timestamp is treated as NO date here, reusing the
+        // policy below rather than inventing a second one. It is not evidence
+        // the listing is new: it runs ~236 days later than the real creation
+        // date on average, so trusting it made a years-old slow seller compute
+        // as weeks old. Under the default '1m' ("over 1 month") filter that
+        // EXCLUDED the row, hiding exactly the stale stock this filter exists
+        // to surface. As an unknown it is instead assumed old enough.
+        const createdDate = item.listing_created_basis === 'purchase_added'
+          ? null
+          : parseListingDate(item.listing_created_at);
         if (!createdDate) {
           // If no created date, INCLUDE the item - it's existing inventory that needs attention
           // Only exclude from "recent" filter since we can't confirm it's recent
@@ -1937,9 +1992,15 @@ export default function SyncedInventory() {
       return a.asin.localeCompare(b.asin);
     }
     if (sortBy === 'created') {
-      const aDate = parseListingDate(a.listing_created_at)?.getTime() ?? 0;
-      const bDate = parseListingDate(b.listing_created_at)?.getTime() ?? 0;
-      return sortDirection === 'asc' ? aDate - bDate : bDate - aDate;
+      // Real listing dates first, then purchase-added stand-ins, then
+      // unknowns -- the basis is a fixed primary key, so flipping the
+      // direction reorders within each group rather than promoting a
+      // purchase-added date above a real one.
+      return compareCreatedDate(
+        { value: a.listing_created_at ?? null, basis: a.listing_created_basis ?? 'none' },
+        { value: b.listing_created_at ?? null, basis: b.listing_created_basis ?? 'none' },
+        sortDirection,
+      );
     }
     if (sortBy === 'roi') {
       const aRoi = estimateRoi(a.price, a.unit_cost, resolveFees(a)) ?? -Infinity;
@@ -3175,10 +3236,29 @@ export default function SyncedInventory() {
                             )}
                             {/* BSR cell hidden */}
                             <td className="px-1 py-2 text-center text-xs">
-                              {parseListingDate(item.listing_created_at)
-                                ? parseListingDate(item.listing_created_at)!.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' })
-                                : <span className="text-muted-foreground">—</span>
-                              }
+                              {(() => {
+                                const d = parseListingDate(item.listing_created_at);
+                                if (!d) return <span className="text-muted-foreground">—</span>;
+                                const shown = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' });
+                                // A purchase-added timestamp is not a creation
+                                // date, so it is not displayed as one. Muted
+                                // and marked "added", with the reason on hover
+                                // -- these run ~236 days later on average, so
+                                // showing them bare invites exactly the wrong
+                                // read of how new a listing is.
+                                if (item.listing_created_basis === 'purchase_added') {
+                                  return (
+                                    <span
+                                      className="text-muted-foreground"
+                                      title="No listing creation date on record — this is when the purchase was added, which is typically months later. Sorted after every real creation date."
+                                    >
+                                      {shown}
+                                      <span className="ml-0.5 text-[9px] uppercase tracking-wide opacity-70">added</span>
+                                    </span>
+                                  );
+                                }
+                                return shown;
+                              })()}
                             </td>
                             <td className="px-1 py-2 text-center text-xs">
                               {(() => {
