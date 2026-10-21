@@ -20,6 +20,7 @@ const ReplenishmentShipmentBuilder = lazy(() => import("@/components/inventory/R
 import { BsrPopover } from "@/components/inventory/BsrPopover";
 const MissingValuationDialog = lazy(() => import("@/components/inventory/MissingValuationDialog").then(m => ({ default: m.MissingValuationDialog })));
 import { CostSourceBadge } from "@/components/inventory/CostSourceBadge";
+import { ValuationPrivacyGate } from "@/components/inventory/ValuationPrivacyGate";
 import { ApplyToPurchaseButton } from "@/components/inventory/ApplyToPurchaseButton";
 import { CreatePurchaseFromCostButton } from "@/components/inventory/CreatePurchaseFromCostButton";
 
@@ -2439,7 +2440,14 @@ export default function SyncedInventory() {
                      </div>
                    </div>
 
-                   <div className="relative group hidden md:block">
+                   {/* Desktop valuation card, behind the privacy gate. The
+                       `hidden md:block` breakpoint now lives on the GATE, not
+                       on this card -- otherwise the locked placeholder would
+                       also render on phones, stacked above the md:hidden
+                       mobile card just above. The mobile card is deliberately
+                       NOT gated: that is the owner's own device. */}
+                   <ValuationPrivacyGate className="hidden md:block">
+                   <div className="relative group">
                      <div className="absolute -inset-0.5 bg-gradient-to-r from-emerald-500/40 via-primary/40 to-blue-500/40 rounded-2xl blur opacity-40 group-hover:opacity-60 transition duration-500" />
                      <div className="relative bg-card border border-border/50 rounded-2xl px-5 py-4 shadow-xl backdrop-blur-sm">
                        <div className="flex items-center gap-5">
@@ -2661,6 +2669,7 @@ export default function SyncedInventory() {
                       </div>
                     </div>
                    </div>
+                   </ValuationPrivacyGate>
                    </>
                  );
                })()}
