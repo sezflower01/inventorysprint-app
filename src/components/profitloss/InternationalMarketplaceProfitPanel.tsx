@@ -18,8 +18,9 @@ import { toast } from "sonner";
 // at all -- there's nothing to attribute. CA/MX/BR sell via Remote
 // Fulfillment from the same US-purchased inventory, so there's no separate
 // international operation to carry its own overhead anyway.
-// Matches MonthlyPLBreakdown.tsx's INCOME_ROWS/EXPENSE_ROWS exactly (the
-// canonical taxonomy) -- restocking_fee and promotional_rebate_refunds are
+// Mirrors MonthlyPLBreakdown.tsx's INCOME_ROWS/EXPENSE_ROWS (the canonical
+// taxonomy) -- BY HAND, so it can and did fall behind; see compensated_clawback
+// below -- restocking_fee and promotional_rebate_refunds are
 // both credits: a restocking fee is charged to the RETURNING CUSTOMER and
 // kept by the seller (see fetch-profit-loss/index.ts's own comment on
 // processRefundEventToCache), and a promotional-rebate refund is Amazon
@@ -27,7 +28,17 @@ import { toast } from "sonner";
 // backwards understates international profit.
 const INCOME_KEYS = ["sales", "reimbursements", "shipping_credits", "gift_wrap_credits", "promotional_rebate_refunds", "restocking_fee", "other_income", "liquidations", "warehouse_lost", "warehouse_damage", "shipping_chargeback_refund"] as const;
 const INCOME_DEDUCTION_KEYS = ["refunds", "shipping_credit_refunds", "gift_wrap_credit_refunds", "promotional_rebates"] as const;
-const AMAZON_FEE_KEYS = ["referral_fees", "variable_closing_fees", "fixed_closing_fees", "fba_fees", "fba_customer_return_fees", "fba_inbound_fees", "fba_inbound_convenience_fee", "fba_storage_fees", "fba_removal_fees", "fba_disposal_fees", "fba_long_term_storage_fees", "digital_services_fee", "other_fees", "liquidations_brokerage_fee", "re_commerce_grading_charge", "hrr_non_apparel", "shipping_chargeback"] as const;
+// compensated_clawback added 2026-10-23. It was missing because when this list
+// was written the key sat in plModel MEMO_ROWS as display-only, so there was
+// nothing to mirror -- note hrr_non_apparel, its old memo-row neighbour, IS
+// here. Clawbacks became a real EXPENSE_ROWS line once fetch-profit-loss began
+// storing them (it had silently dropped every one, 0 rows across 22 months),
+// and without this entry international profit would keep ignoring them.
+//
+// This is exactly the hazard the comment above warns about: the list is a COPY
+// of plModel's taxonomy, so plModel changing does not update it. Any future
+// EXPENSE_ROWS addition has to be mirrored here by hand.
+const AMAZON_FEE_KEYS = ["referral_fees", "variable_closing_fees", "fixed_closing_fees", "fba_fees", "fba_customer_return_fees", "fba_inbound_fees", "fba_inbound_convenience_fee", "fba_storage_fees", "fba_removal_fees", "fba_disposal_fees", "fba_long_term_storage_fees", "digital_services_fee", "other_fees", "liquidations_brokerage_fee", "re_commerce_grading_charge", "hrr_non_apparel", "shipping_chargeback", "compensated_clawback"] as const;
 
 interface MarketplaceRow {
   marketplace: string;
