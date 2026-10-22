@@ -3322,26 +3322,45 @@ export default function SyncedInventory() {
                             <td className="px-1 py-2 text-center text-xs">
                               {(() => {
                                 const d = parseListingDate(item.listing_created_at);
-                                if (!d) return <span className="text-muted-foreground">—</span>;
-                                const shown = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' });
-                                // A purchase-added timestamp is not a creation
-                                // date, so it is not displayed as one. Muted
-                                // and marked "added", with the reason on hover
-                                // -- these run ~236 days later on average, so
-                                // showing them bare invites exactly the wrong
-                                // read of how new a listing is.
-                                if (item.listing_created_basis === 'purchase_added') {
+                                if (!d) {
                                   return (
                                     <span
                                       className="text-muted-foreground"
-                                      title="No listing creation date on record — this is when the purchase was added, which is typically months later. Sorted after every real creation date."
+                                      title="No date of any kind on record for this listing."
                                     >
-                                      {shown}
-                                      <span className="ml-0.5 text-[9px] uppercase tracking-wide opacity-70">added</span>
+                                      —
                                     </span>
                                   );
                                 }
-                                return shown;
+                                const shown = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' });
+                                const isAdded = item.listing_created_basis === 'purchase_added';
+                                // EVERY row is labelled, not just the odd ones.
+                                // An unlabelled date beside a labelled one is
+                                // ambiguous -- you cannot tell whether the bare
+                                // one is a real creation date or just a row
+                                // nobody got round to marking. Saying "created"
+                                // out loud is what makes "added" mean something.
+                                //
+                                // "added" is amber because it is NOT a creation
+                                // date: it is when the purchase was recorded,
+                                // ~236 days later than the real date on
+                                // average, so it must never read as equivalent.
+                                return (
+                                  <span
+                                    className="inline-flex flex-col leading-tight"
+                                    title={isAdded
+                                      ? 'Added purchase — no listing creation date on record, so this is when the purchase was recorded here. Typically months after the listing was actually created, and sorted after every real creation date.'
+                                      : 'Created — the listing creation date on record.'}
+                                  >
+                                    <span className={isAdded ? 'text-muted-foreground' : undefined}>{shown}</span>
+                                    <span className={cn(
+                                      "text-[9px] uppercase tracking-wide",
+                                      isAdded ? "text-amber-600 dark:text-amber-400 font-medium" : "text-muted-foreground opacity-70",
+                                    )}>
+                                      {isAdded ? 'added' : 'created'}
+                                    </span>
+                                  </span>
+                                );
                               })()}
                             </td>
                             <td className="px-1 py-2 text-center text-xs">
