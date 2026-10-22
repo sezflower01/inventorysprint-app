@@ -148,6 +148,29 @@ export const EXPENSE_ROWS: RowDef[] = [
   { label: "Liquidations Brokerage Fee", key: "liquidations_brokerage_fee", negative: true },
   { label: "Re-Commerce Grading Charge", key: "re_commerce_grading_charge", negative: true },
   { label: "High Return Rate (Non-Apparel)", key: "hrr_non_apparel", negative: true },
+  // Amazon reclaiming a reimbursement it had granted. A REAL expense row, not
+  // a memo one, since 2026-10-22.
+  //
+  // It sat in MEMO_ROWS labelled "already in Reimbursements", and that was
+  // false: the RPC merges reimbursements + ABS(reversal_reimbursement) +
+  // ABS(free_replacement_refund_items) and does NOT include clawback. Being
+  // informational, sumRows() skipped it, so it reached neither income nor
+  // expenses and never touched Net Profit. Nothing in the UI reads the RPC's
+  // own total_expenses (which does add it), so that path could not compensate.
+  //
+  // Harmless until now only because the writer never stored a single clawback:
+  // 0 rows and $0.00 across 22 months, while Amazon really was sending them.
+  // With the writer fixed, this row is what makes them count.
+  //
+  // The stored column is Amazon's signed value (negative). The RPC returns
+  // ABS() of it, i.e. a positive magnitude, which is the convention every
+  // EXPENSE_ROWS entry uses with negative: true -- magnitudes in, subtracted
+  // here. Known edge case: a POSITIVE clawback (Amazon reversing its own
+  // clawback) would be ABSed to a magnitude and subtracted as though it were
+  // another charge. No such row has ever existed, and fixing it means editing
+  // four large RPC bodies, which is a far bigger risk to the P&L than the case
+  // it guards. Revisit if one ever appears.
+  { label: "Compensated Clawbacks", key: "compensated_clawback", negative: true },
   // Amazon-purchased shipping label billed back to the seller. Comes from both
   // FBM Buy Shipping AND FBA Remote Fulfillment (e.g. US FBA shipped to CA/MX).
   { label: "Shipping Chargebacks (FBM Buy Shipping / FBA Remote Fulfillment)", key: "shipping_chargeback", negative: true },
@@ -182,7 +205,18 @@ export const OTHER_ROWS: RowDef[] = [
 
 /** Already counted inside a line above. Shown for audit, never summed. */
 export const MEMO_ROWS: RowDef[] = [
-  { label: "Compensated Clawbacks / Reversal Reimbursements (already in Reimbursements)", keys: ["compensated_clawback", "reversal_reimbursement"], informational: true },
+  // Reversal reimbursements only. Compensated clawbacks were removed from this
+  // row on 2026-10-22 and are a real EXPENSE_ROWS line above: they are NOT part
+  // of the RPC's merged Reimbursements figure, so claiming they were already
+  // counted was wrong and kept them out of Net Profit entirely.
+  //
+  // This one genuinely IS already counted -- the RPC's reimbursements column is
+  // reimbursements + ABS(reversal_reimbursement) + ABS(free_replacement_refund_items)
+  // -- so it must stay informational or it would be double counted. Measured
+  // 2026-10-22: REVERSAL_REIMBURSEMENT arrives POSITIVE from Amazon despite the
+  // name (InventoryLab calls the same rows CustomerReturn), so treating it as
+  // income is correct.
+  { label: "Reversal Reimbursements (already in Reimbursements)", key: "reversal_reimbursement", informational: true },
   { label: "Free Replacement Refund Items (already in Reimbursements)", key: "free_replacement_refund_items", informational: true },
   { label: "Amazon International Markets (already in Sales)", key: "intl_markets", informational: true },
 ];

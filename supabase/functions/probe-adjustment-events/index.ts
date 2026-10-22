@@ -108,8 +108,8 @@ Deno.serve(async (req) => {
       }
       adjustments.push(...(ev?.AdjustmentEventList || []));
       nextToken = json.payload?.NextToken || null;
-      if (nextToken) await new Promise((r) => setTimeout(r, 700));
-    } while (nextToken && pages < 40);
+      if (nextToken) await new Promise((r) => setTimeout(r, 300));
+    } while (nextToken && pages < 250);
 
     // Flatten to exactly what the question needs: type, SKU, qty, posted
     // timestamp and the SIGN as Amazon sent it -- before any abs().
@@ -161,7 +161,11 @@ Deno.serve(async (req) => {
       adjustment_items: flat.length,
       other_event_lists_seen: otherEventCounts,
       by_adjustment_type: byType,
-      items: flat,
+      // summary_only keeps a multi-month sweep's payload small enough to read
+      // back through pg_net without truncation.
+      items: body.summary_only ? [] : flat,
+      clawback_items: flat.filter((f: any) =>
+        String(f.adjustment_type ?? '').toUpperCase().includes('COMPENSATED_CLAWBACK')),
     }, null, 2), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   } catch (e: any) {
     return new Response(JSON.stringify({ error: e?.message || String(e), wrote_nothing: true }), {

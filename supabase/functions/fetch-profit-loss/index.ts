@@ -1558,7 +1558,42 @@ async function fetchMonthEvents(
           const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
           if (amount > 0) entry.free_replacement_refund_items += amount;
           entries.push(stampAdjustmentProvenance(entry, event, item));
-        } else if (amount > 0) {
+        } else if (adjustmentType.includes('COMPENSATED_CLAWBACK')) {
+          // Amazon reclaiming a reimbursement it previously granted. It arrives
+          // NEGATIVE and is stored verbatim -- no abs() -- because the sign is
+          // the fact, and losing it is what produced the whole problem here.
+          //
+          // Before this branch existed, COMPENSATED_CLAWBACK matched nothing
+          // (not LOST, not DAMAGE, not FREE_REPLACEMENT) and fell to the final
+          // `else if (amount > 0)`, which being negative it failed -- so no row
+          // was EVER written. compensated_clawback held 0 rows and $0.00 across
+          // 22 months of data while Amazon was really sending them: the live
+          // API returned 3 of them, totalling -$16.31, for 2026-10-18..22 alone.
+          //
+          // Confirmed against InventoryLab, which lists exactly these as
+          // "Reimbursement_Reversal" at -$7.97 for the window -- our -4.70 on
+          // SKU 1067904498 and -3.27 on 8KN-OIT-P89U.
+          //
+          // NOTE the asymmetry with REVERSAL_REIMBURSEMENT above, which is
+          // deliberate and was measured, not assumed: despite its name that one
+          // arrives POSITIVE (money to the seller, what InventoryLab calls
+          // CustomerReturn), so its Math.abs() is a no-op and it is correctly
+          // income. The clawback is the one that takes money back.
+          const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
+          entry.compensated_clawback += amount;
+          entries.push(stampAdjustmentProvenance(entry, event, item));
+        } else if (amount !== 0) {
+          // Catch-all for every other AdjustmentType, EITHER SIGN.
+          //
+          // This used to read `else if (amount > 0)`, which silently discarded
+          // any unrecognised negative adjustment -- the row was never created,
+          // so nothing downstream could even report it missing. A negative here
+          // now lands in reimbursements as a reduction, which is exactly what
+          // the WAREHOUSE_LOST and WAREHOUSE_DAMAGE branches above already do
+          // with their negatives.
+          //
+          // Still guarded on !== 0 so a genuinely zero-value adjustment does
+          // not create a row carrying nothing.
           const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
           entry.reimbursements += amount;
           entries.push(stampAdjustmentProvenance(entry, event, item));
