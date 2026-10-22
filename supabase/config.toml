@@ -543,3 +543,9 @@ verify_jwt = false
 # a JWT. requireInternalCall() is the guard, and writing needs apply:true.
 [functions.resolve-stuck-pending-orders]
 verify_jwt = false
+
+# READ-ONLY probe returning Amazon's raw AdjustmentEventList. Invoked from a
+# migration with x-internal-secret and no Authorization header, so the gateway
+# must not demand a JWT. It writes nothing anywhere.
+[functions.probe-adjustment-events]
+verify_jwt = false

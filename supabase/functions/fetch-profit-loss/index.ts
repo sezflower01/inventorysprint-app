@@ -633,12 +633,22 @@ async function aggregateFromCache(
   }
 }
 
+import { adjustmentProvenance } from './adjustment-provenance.ts';
+
 interface CacheEntry {
   user_id: string;
   event_type: string;
   event_date: string;
   amazon_order_id: string;
   asin: string;
+  // Adjustment provenance. OPTIONAL and set only on AdjustmentEventList rows,
+  // by stampAdjustmentProvenance below. Omitted everywhere else so no other
+  // event type's payload shape changes. See migration 20261022050000.
+  adjustment_type?: string | null;
+  seller_sku?: string | null;
+  quantity?: number | null;
+  posted_at?: string | null;
+  raw_event?: Record<string, unknown> | null;
   marketplace: string;
   marketplace_id: string | null;
   sales: number;
@@ -1472,6 +1482,37 @@ async function fetchMonthEvents(
     for (const event of events?.ServiceFeeEventList || []) {
       entries.push(processServiceFeeEventToCache(event, userId, serviceFeeIdx++, monthFallbackDate));
     }
+    /**
+     * Record WHERE an adjustment row came from, without touching its money.
+     *
+     * The writer below reads AdjustmentType only to pick a branch and then
+     * throws it away, never reads SellerSKU at all, and truncates PostedDate
+     * to a calendar day. That left financial_events_cache unable to say what
+     * any reimbursement was for, which SKU it belonged to, or what time it
+     * posted -- raw_event was NULL on all 122,737 rows.
+     *
+     * Measured against the live API 2026-10-22: Amazon sends SellerSKU on
+     * EVERY adjustment item and leaves ASIN null on every one, so storing
+     * item.ASIN (as this writer does) can never attribute a reimbursement to
+     * a SKU. seller_sku is the fix.
+     *
+     * raw_event stores the event-level fields plus THIS item, not the whole
+     * event: an event can carry many items, and embedding the full
+     * AdjustmentItemList on every row would duplicate the entire payload N
+     * times for an N-item event. Per-item is lossless for one row and linear
+     * in size.
+     *
+     * Deliberately changes NO amount and NO sign, and does not touch `asin`,
+     * which is part of the upsert key
+     * (user_id, event_type, event_date, amazon_order_id, asin) -- repurposing
+     * it would fork every future row away from its existing one.
+     */
+    const stampAdjustmentProvenance = (
+      entry: CacheEntry,
+      event: any,
+      item: any,
+    ): CacheEntry => Object.assign(entry, adjustmentProvenance(event, item));
+
     let _adjEvtIdx = 0;
     for (const event of events?.AdjustmentEventList || []) {
       _adjEvtIdx++;
@@ -1494,33 +1535,33 @@ async function fetchMonthEvents(
             : `POSTAGE-${eventDate}-${_adjEvtIdx}#${_itemIdx}`;
           const entry = createCacheEntry(userId, 'adjustment', eventDate, orderBase, itemAsin);
           entry.fbm_shipping_label_fee += Math.abs(amount);
-          entries.push(entry);
+          entries.push(stampAdjustmentProvenance(entry, event, item));
         } else if (adjustmentType.includes('LIQUIDATION')) {
           const entry = createCacheEntry(userId, 'liquidation', eventDate, adjOrderId, itemAsin);
           entry.liquidations += amount > 0 ? amount : 0;
-          entries.push(entry);
+          entries.push(stampAdjustmentProvenance(entry, event, item));
         } else if (adjustmentType.includes('REVERSAL_REIMBURSEMENT')) {
           const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
           entry.reversal_reimbursement += Math.abs(amount);
-          entries.push(entry);
+          entries.push(stampAdjustmentProvenance(entry, event, item));
         } else if (adjustmentType.includes('WAREHOUSE_LOST') || adjustmentType.includes('MISSING_FROM_INBOUND') || adjustmentType.includes('LOST')) {
           const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
           if (amount > 0) entry.warehouse_lost += amount;
           else entry.reimbursements += amount;
-          entries.push(entry);
+          entries.push(stampAdjustmentProvenance(entry, event, item));
         } else if (adjustmentType.includes('WAREHOUSE_DAMAGE') || adjustmentType.includes('DAMAGE')) {
           const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
           if (amount > 0) entry.warehouse_damage += amount;
           else entry.reimbursements += amount;
-          entries.push(entry);
+          entries.push(stampAdjustmentProvenance(entry, event, item));
         } else if (adjustmentType.includes('FREE_REPLACEMENT')) {
           const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
           if (amount > 0) entry.free_replacement_refund_items += amount;
-          entries.push(entry);
+          entries.push(stampAdjustmentProvenance(entry, event, item));
         } else if (amount > 0) {
           const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
           entry.reimbursements += amount;
-          entries.push(entry);
+          entries.push(stampAdjustmentProvenance(entry, event, item));
         }
       }
     }
