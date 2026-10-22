@@ -470,6 +470,35 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
     }
   >();
 
+  /**
+   * EARLIEST date_created per SKU and per ASIN -- the "Created" date.
+   *
+   * Separate from the cost maps on purpose, because the two want opposite
+   * ends of the same list. created_listings is a PURCHASE LOG: one row per
+   * buy, many per SKU. Cost wants the MOST RECENT buy. A creation date wants
+   * the FIRST one.
+   *
+   * Reading the date off the newest purchase row is what made an old listing
+   * look new: measured 2026-10-21, 1,088 of 3,963 ASIN+SKU groups showed a
+   * date that was too new, by 192 days on average and 966 days at worst
+   * (B00Z2C8FNK displayed Oct 2026, first recorded Feb 2024). B00O8F3JH4 and
+   * B003L0OOVC both showed Oct 20 when they were first recorded Sep 29 -- a
+   * restock had overwritten the date.
+   *
+   * These are compared as ISO "YYYY-MM-DD" strings, which sort correctly
+   * lexicographically, so no Date parsing is needed to find the minimum. The
+   * loop cannot just take the last row either: it iterates created_at DESC,
+   * and backdated entries mean the oldest created_at is not always the oldest
+   * date_created.
+   */
+  const firstCreatedBySku = new Map<string, string>();
+  const firstCreatedByAsin = new Map<string, string>();
+  const noteFirstCreated = (map: Map<string, string>, key: string | null | undefined, d: string | null | undefined) => {
+    if (!key || !d) return;
+    const prev = map.get(key);
+    if (!prev || d < prev) map.set(key, d);
+  };
+
   // Same override source P&L's resolve_unit_cost_v1 treats as top-priority
   // (after the sale-time snapshot, which doesn't apply to unsold stock).
   // Wiring it in here too means this page's Unit Cost column / Inventory
@@ -566,6 +595,11 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
           date_created: clItem.date_created || null,
           purchase_added_at: clItem.created_at || null,
         };
+
+        // The Created date tracks the EARLIEST buy, independently of the cost
+        // entry below which tracks the latest. Both are needed.
+        noteFirstCreated(firstCreatedBySku, clItem.sku, clItem.date_created);
+        noteFirstCreated(firstCreatedByAsin, clItem.asin, clItem.date_created);
 
         // Most accurate: SKU match
         if (clItem.sku) {
@@ -823,8 +857,15 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
       // and it must sort last and be labelled rather than silently pass as a
       // creation date.
       ...(() => {
+        // The EARLIEST buy for this SKU/ASIN, not this row's own date: these
+        // rows are purchase records and a restock must not restamp the
+        // creation date. Falls back to this row's own value when the maps have
+        // nothing (e.g. this is the only purchase).
         const c = resolveCreatedDate({
-          dateCreated: cl.date_created,
+          dateCreated:
+            firstCreatedBySku.get(cl.sku) ??
+            firstCreatedByAsin.get(cl.asin) ??
+            cl.date_created,
           purchaseAddedAt: cl.created_at,
         });
         return { listing_created_at: c.value, listing_created_basis: c.basis };
@@ -920,9 +961,15 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
       // created_listings pair -- kept first regardless, because it is the
       // right answer the moment that column is populated.
       ...(() => {
+        // dateCreated comes from the EARLIEST-buy maps, never from costEntry
+        // (which deliberately holds the most RECENT buy, for cost). Reading
+        // the date off costEntry is what let a restock make an old listing
+        // look new -- 1,088 groups affected, up to 966 days too new.
         const c = resolveCreatedDate({
           listingCreatedAt: item.listing_created_at,
-          dateCreated: costEntry?.date_created,
+          dateCreated:
+            firstCreatedBySku.get(item.sku) ??
+            firstCreatedByAsin.get(item.asin),
           purchaseAddedAt: costEntry?.purchase_added_at,
         });
         return { listing_created_at: c.value, listing_created_basis: c.basis };
@@ -2838,19 +2885,19 @@ export default function SyncedInventory() {
                           key: 'all' as const,
                           label: 'All',
                           count: createdBasisCounts.all,
-                          title: `Every row (${createdBasisCounts.all}). Real creation dates sort first, then purchase-added, then the ${createdBasisCounts.none} rows with no date at all.`,
+                          title: `Every row (${createdBasisCounts.all}). Dated rows sort first, then undated, then the ${createdBasisCounts.none} with no date at all.`,
                         },
                         {
                           key: 'listing' as const,
                           label: 'Created',
                           count: createdBasisCounts.listing,
-                          title: `Only rows with a genuine listing creation date (${createdBasisCounts.listing}). Hides the ${createdBasisCounts.purchaseAdded} purchase-added and the ${createdBasisCounts.none} with no date.`,
+                          title: `Only rows dated from their earliest purchase record (${createdBasisCounts.listing}) — first recorded here. Hides the ${createdBasisCounts.purchaseAdded} with no dated record and the ${createdBasisCounts.none} with no date at all.`,
                         },
                         {
                           key: 'purchase_added' as const,
                           label: 'Added purchase',
                           count: createdBasisCounts.purchaseAdded,
-                          title: `Only rows with NO listing creation date, showing when the purchase was added instead (${createdBasisCounts.purchaseAdded}). These run ~236 days later than a real creation date, so treat them as "date unknown".`,
+                          title: `Only rows with NO dated purchase record, falling back to the row insert time (${createdBasisCounts.purchaseAdded}). Treat these as "date unknown".`,
                         },
                       ]).map((opt) => (
                         <button
@@ -3349,8 +3396,8 @@ export default function SyncedInventory() {
                                   <span
                                     className="inline-flex flex-col leading-tight"
                                     title={isAdded
-                                      ? 'Added purchase — no listing creation date on record, so this is when the purchase was recorded here. Typically months after the listing was actually created, and sorted after every real creation date.'
-                                      : 'Created — the listing creation date on record.'}
+                                      ? 'Added purchase — no dated purchase record exists, so this is when the row was inserted. Sorted after every dated row.'
+                                      : 'Created — the date of the EARLIEST purchase record for this SKU, i.e. when it was first recorded here. A later restock no longer overwrites it. Amazon does not give us its own listing-open date, so this is the oldest evidence available.'}
                                   >
                                     <span className={isAdded ? 'text-muted-foreground' : undefined}>{shown}</span>
                                     <span className={cn(

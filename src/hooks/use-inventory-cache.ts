@@ -32,8 +32,13 @@ const STORE_NAME = "inventory";
  * Bump this when a cached inventory row gains, loses or changes a field.
  *
  *   1 -> 2  (2026-10-21) added listing_created_basis
+ *   2 -> 3  (2026-10-21) listing_created_at now means the EARLIEST purchase
+ *                        record, not the latest -- same field, different
+ *                        value, so cached rows would still show the old
+ *                        too-new dates. A value change needs a bump just as
+ *                        much as a field addition does.
  */
-const CACHE_SCHEMA_VERSION = 2;
+const CACHE_SCHEMA_VERSION = 3;
 
 /**
  * A cached row is the PROCESSED inventory shape produced by SyncedInventory's
