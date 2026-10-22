@@ -996,6 +996,21 @@ export default function SyncedInventory() {
   const [showGhostsOnly, setShowGhostsOnly] = useState(false);
   const [fulfillmentFilter, setFulfillmentFilter] = useState<'all' | 'fba' | 'fbm'>('all');
   const [createdAgeFilter, setCreatedAgeFilter] = useState<'all' | 'recent' | '1m' | '2m' | '3m' | '4m' | '5m' | '6m' | '9m' | '12m' | '18m' | '24m'>('1m'); // Default applies only to slow-selling mode
+  /**
+   * Which rows the Created column should show, by WHERE their date came from.
+   *
+   *   'all'            everything, real creation dates first (sort already
+   *                    groups them), then purchase-added, then no date at all
+   *   'listing'        only rows with a genuine listing creation date
+   *   'purchase_added' only the rows standing in a purchase-added timestamp,
+   *                    i.e. the worklist of listings with no real date on record
+   *
+   * Defaults to 'all' deliberately: the other two HIDE inventory rows, and a
+   * page that silently omits stock by default is how you miss stock. The sort
+   * already keeps the real dates on top, so 'all' is usable as-is and the
+   * narrower views are opt-in.
+   */
+  const [createdBasisFilter, setCreatedBasisFilter] = useState<'all' | 'listing' | 'purchase_added'>('all');
   const [salesPeriodDays, setSalesPeriodDays] = useState(30);
   const [replenishCoverageMonths, setReplenishCoverageMonths] = useState(1); // 1, 2, or 3 months coverage
   const [roiDialogOpen, setRoiDialogOpen] = useState(false);
@@ -1891,6 +1906,19 @@ export default function SyncedInventory() {
     return showGhostsOnly ? isGhost : !isGhost;
   });
 
+  // Counted off visibleInventory, BEFORE the basis filter, so the numbers on
+  // the buttons stay still while you switch between them.
+  const createdBasisCounts = useMemo(() => {
+    let listing = 0, purchaseAdded = 0, none = 0;
+    for (const item of visibleInventory) {
+      const basis = item.listing_created_basis ?? 'none';
+      if (basis === 'listing') listing++;
+      else if (basis === 'purchase_added') purchaseAdded++;
+      else none++;
+    }
+    return { all: visibleInventory.length, listing, purchaseAdded, none };
+  }, [visibleInventory]);
+
   const filteredInventory = visibleInventory.filter((item) => {
     const trimmedSearch = searchTerm.trim().toLowerCase();
     const matchesSearch =
@@ -1971,7 +1999,15 @@ export default function SyncedInventory() {
     // Phase 7: optionally restrict to rows with a manual cost override
     const matchesOverride = !showOverriddenOnly || item.unit_cost_manual === true;
 
-    return matchesSearch && matchesStock && matchesFulfillment && matchesOverride;
+    // Where the Created date came from. 'listing' keeps only genuine creation
+    // dates; 'purchase_added' isolates the rows that have none, as a worklist.
+    // Rows with no date at all ('none') belong to neither and appear only
+    // under 'all'.
+    const basis = item.listing_created_basis ?? 'none';
+    const matchesCreatedBasis =
+      createdBasisFilter === 'all' ? true : basis === createdBasisFilter;
+
+    return matchesSearch && matchesStock && matchesFulfillment && matchesOverride && matchesCreatedBasis;
   });
 
   // Apply sorting
@@ -2181,7 +2217,7 @@ export default function SyncedInventory() {
   // Reset to page 1 when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchTerm, itemsPerPage, stockFilter, fulfillmentFilter, createdAgeFilter, showOverriddenOnly, showGhostsOnly]);
+  }, [searchTerm, itemsPerPage, stockFilter, fulfillmentFilter, createdAgeFilter, showOverriddenOnly, showGhostsOnly, createdBasisFilter]);
 
   return (
     <>
@@ -2788,6 +2824,54 @@ export default function SyncedInventory() {
                       </select>
                     </div>
                   )}
+                  {/* Created-date source filter.
+                      A segmented control rather than another dropdown because
+                      the COUNTS are the useful part: they say at a glance how
+                      many rows have no real creation date on record. Measured
+                      2026-10-21: 3,691 real, 709 purchase-added, 194 with
+                      nothing at all. */}
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-foreground font-medium">Created:</span>
+                    <div className="inline-flex rounded-md border border-white/30 overflow-hidden">
+                      {([
+                        {
+                          key: 'all' as const,
+                          label: 'All',
+                          count: createdBasisCounts.all,
+                          title: `Every row (${createdBasisCounts.all}). Real creation dates sort first, then purchase-added, then the ${createdBasisCounts.none} rows with no date at all.`,
+                        },
+                        {
+                          key: 'listing' as const,
+                          label: 'Created',
+                          count: createdBasisCounts.listing,
+                          title: `Only rows with a genuine listing creation date (${createdBasisCounts.listing}). Hides the ${createdBasisCounts.purchaseAdded} purchase-added and the ${createdBasisCounts.none} with no date.`,
+                        },
+                        {
+                          key: 'purchase_added' as const,
+                          label: 'Added purchase',
+                          count: createdBasisCounts.purchaseAdded,
+                          title: `Only rows with NO listing creation date, showing when the purchase was added instead (${createdBasisCounts.purchaseAdded}). These run ~236 days later than a real creation date, so treat them as "date unknown".`,
+                        },
+                      ]).map((opt) => (
+                        <button
+                          key={opt.key}
+                          type="button"
+                          onClick={() => setCreatedBasisFilter(opt.key)}
+                          title={opt.title}
+                          aria-pressed={createdBasisFilter === opt.key}
+                          className={cn(
+                            "px-3 py-2 text-sm font-medium transition-colors tabular-nums",
+                            createdBasisFilter === opt.key
+                              ? "bg-primary text-primary-foreground"
+                              : "bg-white/80 text-foreground hover:bg-white",
+                          )}
+                        >
+                          {opt.label}
+                          <span className="ml-1.5 opacity-70 text-xs">{opt.count.toLocaleString()}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <div className="flex items-center gap-2">
                     <span className="text-sm text-foreground font-medium">Fulfillment:</span>
                     <select
