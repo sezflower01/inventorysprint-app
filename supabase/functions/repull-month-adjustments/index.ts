@@ -144,6 +144,8 @@ Deno.serve(async (req) => {
       if (Date.now() - started > 100_000) {
         throw new Error(`TIMEOUT after ${pages} pages -- aborting WITHOUT writing`);
       }
+      let res: Response;
+      retryPage: while (true) {
       const params = new URLSearchParams({ MaxResultsPerPage: '100' });
       if (nextToken) {
         params.set('NextToken', nextToken);
@@ -151,18 +153,30 @@ Deno.serve(async (req) => {
         params.set('PostedAfter', monthStart.toISOString());
         params.set('PostedBefore', postedBefore.toISOString());
       }
-      const res = await fetch(
+      res = await fetch(
         `https://sellingpartnerapi-na.amazon.com/finances/v0/financialEvents?${params}`,
         { headers: { 'x-amz-access-token': accessToken, 'Content-Type': 'application/json' } },
       );
       if (res.status === 429) {
+        // MUST NOT `continue` here. This is a do/while whose condition is
+        // `nextToken && pages < MAX_PAGES`, and on the FIRST page nextToken is
+        // still null -- so `continue` jumped straight to that condition, found
+        // it false, and exited the loop with ZERO items. March came back
+        // "0 fetched rows < 83 stored" for exactly that reason; the guard
+        // refused the write, which is the only thing that stopped a rate limit
+        // from being indistinguishable from "Amazon has no adjustments".
+        //
+        // Retry the SAME page in place instead, so a 429 costs time and not
+        // data.
         rateLimitHits++;
         if (rateLimitHits > 25) throw new Error('too many rate limits -- aborting WITHOUT writing');
         await new Promise((r) => setTimeout(r, 2500));
-        continue;
+        continue retryPage;
       }
       if (!res.ok) {
         throw new Error(`finances ${res.status}: ${(await res.text()).slice(0, 250)} -- aborting WITHOUT writing`);
+      }
+      break retryPage;
       }
       const json = await res.json();
       const ev = json.payload?.FinancialEvents;
@@ -175,6 +189,12 @@ Deno.serve(async (req) => {
     } while (nextToken && pages < MAX_PAGES);
 
     if (nextToken) throw new Error(`paging incomplete at ${MAX_PAGES} pages -- aborting WITHOUT writing`);
+    // Belt and braces alongside the row-count guard below: a month that holds
+    // adjustments cannot legitimately fetch zero items, so treat it as a
+    // failed fetch rather than as a correction.
+    if (items.length === 0 && storedCount > 0) {
+      throw new Error(`fetched ZERO adjustment items but ${storedCount} are stored -- treating as a failed fetch, nothing written`);
+    }
 
     // ---- Build rows with the SHARED router, then dedupe by upsert key. ----
     // Deduping here is mandatory, not tidiness: Postgres refuses an
