@@ -37,6 +37,26 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const INTERNAL_SECRET = Deno.env.get('INTERNAL_SYNC_SECRET') || '';
 
+/**
+ * Write a report row where a dropped pg_net response cannot lose it.
+ *
+ * Deliberately swallows its own errors: failing to record a report must never
+ * turn a successful re-pull into an error, and must never turn a refusal into
+ * a success.
+ */
+async function persistReport(supa: any, report: Record<string, unknown>): Promise<void> {
+  try {
+    await supa.from('repull_reports').insert({
+      req_id: Date.now(),                 // no pg_net id in scope; time is unique enough
+      month: report.month ?? null,
+      applied: report.wrote === true,
+      report,
+    });
+  } catch (e) {
+    console.warn('[repull] could not persist report (non-fatal):', (e as Error)?.message);
+  }
+}
+
 const MONEY_COLUMNS = [
   'sales','refunds','shipping_credits','shipping_credit_refunds','gift_wrap_credits',
   'gift_wrap_credit_refunds','promotional_rebates','promotional_rebate_refunds','other_income',
@@ -305,6 +325,8 @@ Deno.serve(async (req) => {
     // short, not as a correction. Checked here AND again inside the SQL
     // function, because this is the one mistake that would delete real data.
     if (rows.length < storedCount) {
+      await persistReport(supa, { ...report, wrote: false,
+        aborted: `REFUSED: ${rows.length} fetched rows < ${storedCount} stored` });
       return new Response(JSON.stringify({
         ...report, wrote: false,
         aborted: `REFUSED: ${rows.length} fetched rows < ${storedCount} stored -- fetch looks short, nothing written`,
@@ -312,6 +334,13 @@ Deno.serve(async (req) => {
     }
 
     if (!apply) {
+      // Persist the report ourselves. pg_net drops the RESPONSE of long calls
+      // -- June's was discarded twice, with the request absent from both
+      // net.http_request_queue and net._http_response while the worker had
+      // moved on -- and net._http_response is purged in batches anyway. The
+      // function having run is not the same as the caller having seen it, so
+      // the report is written where it cannot be lost.
+      await persistReport(supa, { ...report, wrote: false, dry_run: true });
       return new Response(JSON.stringify({ ...report, wrote: false, dry_run: true }, null, 2),
         { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
@@ -319,8 +348,14 @@ Deno.serve(async (req) => {
     const { data: applied, error: applyErr } = await supa.rpc('repull_month_adjustments_apply', {
       p_user: userId, p_month: month, p_rows: rows, p_min_rows: storedCount,
     });
-    if (applyErr) throw new Error(`apply failed (nothing committed): ${applyErr.message}`);
+    if (applyErr) {
+      // Record the refusal too: an apply that declined is a result, and losing
+      // it to a dropped response would look identical to never having run.
+      await persistReport(supa, { ...report, wrote: false, apply_error: applyErr.message });
+      throw new Error(`apply failed (nothing committed): ${applyErr.message}`);
+    }
 
+    await persistReport(supa, { ...report, wrote: true, applied });
     return new Response(JSON.stringify({ ...report, wrote: true, applied }, null, 2),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   } catch (e: any) {
