@@ -145,6 +145,7 @@ Deno.serve(async (req) => {
         throw new Error(`TIMEOUT after ${pages} pages -- aborting WITHOUT writing`);
       }
       let res: Response;
+      let pageRetries = 0;
       retryPage: while (true) {
       const params = new URLSearchParams({ MaxResultsPerPage: '100' });
       if (nextToken) {
@@ -169,8 +170,27 @@ Deno.serve(async (req) => {
         // Retry the SAME page in place instead, so a 429 costs time and not
         // data.
         rateLimitHits++;
-        if (rateLimitHits > 25) throw new Error('too many rate limits -- aborting WITHOUT writing');
-        await new Promise((r) => setTimeout(r, 2500));
+        pageRetries++;
+        // PROGRESSIVE backoff, and counted PER PAGE rather than per run.
+        //
+        // A flat 2500ms with a global cap of 25 was exhausted by ordinary
+        // contention: March, June and July all died with "too many rate
+        // limits" because I had queued four months close together and they ran
+        // back-to-back against the Finances API, which allows roughly 0.5
+        // requests a second. Twenty-five flat retries is 62 seconds of waiting
+        // spread across a whole month's paging -- not enough when something
+        // else is also hammering the endpoint.
+        //
+        // Backing off 2s, 4s, 6s ... up to 20s per page gives a page its own
+        // budget and lets a busy window pass, while the run-level ceiling
+        // still stops a genuinely throttled account from spinning forever.
+        if (pageRetries > 8) {
+          throw new Error(`rate limited ${pageRetries}x on page ${pages + 1} -- aborting WITHOUT writing`);
+        }
+        if (rateLimitHits > 60) {
+          throw new Error(`rate limited ${rateLimitHits}x overall -- aborting WITHOUT writing`);
+        }
+        await new Promise((r) => setTimeout(r, Math.min(2000 * pageRetries, 20_000)));
         continue retryPage;
       }
       if (!res.ok) {
@@ -185,7 +205,7 @@ Deno.serve(async (req) => {
       }
       nextToken = json.payload?.NextToken || null;
       pages++;
-      if (nextToken) await new Promise((r) => setTimeout(r, 250));
+      if (nextToken) await new Promise((r) => setTimeout(r, 400));
     } while (nextToken && pages < MAX_PAGES);
 
     if (nextToken) throw new Error(`paging incomplete at ${MAX_PAGES} pages -- aborting WITHOUT writing`);
@@ -260,6 +280,24 @@ Deno.serve(async (req) => {
       stored_rows: storedCount,
       stored_signed_total: Math.round(storedSigned * 100) / 100,
       stored_clawback_total: Math.round(storedClawback * 100) / 100,
+      // Per-column amount multisets, so a residual can be explained the way
+      // January's -$1.20 was -- by pairing vanished sums against the
+      // components they split into, and spotting the ones Amazon restated.
+      // Without this the dry run can only report a residual, not account for
+      // it, and accounting for it is a precondition of applying the month.
+      api_amount_multiset: (() => {
+        const out: Record<string, number[]> = {};
+        for (const r of rows) {
+          for (const c of ['reversal_reimbursement','warehouse_lost','warehouse_damage',
+                           'free_replacement_refund_items','compensated_clawback',
+                           'reimbursements','fbm_shipping_label_fee']) {
+            const v = Math.round((Number((r as Record<string, unknown>)[c]) || 0) * 100) / 100;
+            if (v !== 0) (out[c] ??= []).push(v);
+          }
+        }
+        for (const k of Object.keys(out)) out[k].sort((a, b) => a - b);
+        return out;
+      })(),
       elapsed_ms: Date.now() - started,
     };
 
