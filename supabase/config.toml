@@ -549,3 +549,9 @@ verify_jwt = false
 # must not demand a JWT. It writes nothing anywhere.
 [functions.probe-adjustment-events]
 verify_jwt = false
+
+# One-month ADJUSTMENT re-pull. Invoked from a migration with x-internal-secret
+# and no Authorization header, so the gateway must not demand a JWT. Defaults to
+# a dry run; writing requires apply:true.
+[functions.repull-month-adjustments]
+verify_jwt = false

@@ -634,6 +634,7 @@ async function aggregateFromCache(
 }
 
 import { adjustmentProvenance } from './adjustment-provenance.ts';
+import { routeAdjustment, isFbmShippingLabelReason } from './adjustment-router.ts';
 
 interface CacheEntry {
   user_id: string;
@@ -1096,19 +1097,8 @@ function getFinancialEventDate(event: any, fallbackDate?: string): string {
   return String(rawDate).split('T')[0];
 }
 
-function isFbmShippingLabelReason(s: string | undefined | null): boolean {
-  if (!s) return false;
-  const v = String(s).toLowerCase();
-  return (
-    v.includes('shippingservice') ||
-    v.includes('shippinglabel') ||
-    v.includes('buyshipping') ||
-    v.includes('buy shipping') ||
-    v === 'safe-t' ||
-    v.includes('safe-t') ||
-    v.includes('postage')
-  );
-}
+// isFbmShippingLabelReason now lives in adjustment-router.ts so the router and
+// this sync cannot disagree about what counts as a billed-back shipping label.
 
 function processServiceFeeEventToCache(event: any, userId: string, idx: number = 0, fallbackDate?: string): CacheEntry {
   const eventDate = getFinancialEventDate(event, fallbackDate);
@@ -1532,87 +1522,29 @@ async function fetchMonthEvents(
     for (const event of events?.AdjustmentEventList || []) {
       _adjEvtIdx++;
       const eventDate = event.PostedDate?.split('T')[0] || new Date().toISOString().split('T')[0];
-      const adjustmentType = (event.AdjustmentType || '').toUpperCase();
-      const isPostageBilling = isFbmShippingLabelReason(adjustmentType);
       let _itemIdx = 0;
       for (const item of event.AdjustmentItemList || []) {
         _itemIdx++;
         const currency = item.TotalAmount?.CurrencyCode || 'USD';
         const amount = convertToUSD(parseFloat(item.TotalAmount?.CurrencyAmount || 0), currency);
-        // Synthetic unique key so multiple same-day adjustments don't collapse on upsert
+
+        // ONE router, shared with repull-month-adjustments so the backfill
+        // cannot classify differently from this sync. The whole if/else chain
+        // that used to live here is now adjustment-router.ts, which also
+        // documents why its branch order is load-bearing.
+        const route = routeAdjustment(event.AdjustmentType, amount);
+        if (!route) continue; // zero-value adjustment: no row
+
+        const itemAsin = item.ASIN || '';
         const adjOrderId = event.AmazonOrderId && event.AmazonOrderId.length > 0
           ? `${event.AmazonOrderId}#${_itemIdx}`
-          : `ADJ-${eventDate}-${_adjEvtIdx}#${_itemIdx}`;
-        const itemAsin = item.ASIN || '';
-        if (isPostageBilling) {
-          const orderBase = event.AmazonOrderId && event.AmazonOrderId.length > 0
-            ? event.AmazonOrderId
-            : `POSTAGE-${eventDate}-${_adjEvtIdx}#${_itemIdx}`;
-          const entry = createCacheEntry(userId, 'adjustment', eventDate, orderBase, itemAsin);
-          entry.fbm_shipping_label_fee += Math.abs(amount);
-          entries.push(stampAdjustmentProvenance(entry, event, item));
-        } else if (adjustmentType.includes('LIQUIDATION')) {
-          const entry = createCacheEntry(userId, 'liquidation', eventDate, adjOrderId, itemAsin);
-          entry.liquidations += amount > 0 ? amount : 0;
-          entries.push(stampAdjustmentProvenance(entry, event, item));
-        } else if (adjustmentType.includes('REVERSAL_REIMBURSEMENT')) {
-          const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
-          entry.reversal_reimbursement += Math.abs(amount);
-          entries.push(stampAdjustmentProvenance(entry, event, item));
-        } else if (adjustmentType.includes('WAREHOUSE_LOST') || adjustmentType.includes('MISSING_FROM_INBOUND') || adjustmentType.includes('LOST')) {
-          const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
-          if (amount > 0) entry.warehouse_lost += amount;
-          else entry.reimbursements += amount;
-          entries.push(stampAdjustmentProvenance(entry, event, item));
-        } else if (adjustmentType.includes('WAREHOUSE_DAMAGE') || adjustmentType.includes('DAMAGE')) {
-          const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
-          if (amount > 0) entry.warehouse_damage += amount;
-          else entry.reimbursements += amount;
-          entries.push(stampAdjustmentProvenance(entry, event, item));
-        } else if (adjustmentType.includes('FREE_REPLACEMENT')) {
-          const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
-          if (amount > 0) entry.free_replacement_refund_items += amount;
-          entries.push(stampAdjustmentProvenance(entry, event, item));
-        } else if (adjustmentType.includes('COMPENSATED_CLAWBACK')) {
-          // Amazon reclaiming a reimbursement it previously granted. It arrives
-          // NEGATIVE and is stored verbatim -- no abs() -- because the sign is
-          // the fact, and losing it is what produced the whole problem here.
-          //
-          // Before this branch existed, COMPENSATED_CLAWBACK matched nothing
-          // (not LOST, not DAMAGE, not FREE_REPLACEMENT) and fell to the final
-          // `else if (amount > 0)`, which being negative it failed -- so no row
-          // was EVER written. compensated_clawback held 0 rows and $0.00 across
-          // 22 months of data while Amazon was really sending them: the live
-          // API returned 3 of them, totalling -$16.31, for 2026-10-18..22 alone.
-          //
-          // Confirmed against InventoryLab, which lists exactly these as
-          // "Reimbursement_Reversal" at -$7.97 for the window -- our -4.70 on
-          // SKU 1067904498 and -3.27 on 8KN-OIT-P89U.
-          //
-          // NOTE the asymmetry with REVERSAL_REIMBURSEMENT above, which is
-          // deliberate and was measured, not assumed: despite its name that one
-          // arrives POSITIVE (money to the seller, what InventoryLab calls
-          // CustomerReturn), so its Math.abs() is a no-op and it is correctly
-          // income. The clawback is the one that takes money back.
-          const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
-          entry.compensated_clawback += amount;
-          entries.push(stampAdjustmentProvenance(entry, event, item));
-        } else if (amount !== 0) {
-          // Catch-all for every other AdjustmentType, EITHER SIGN.
-          //
-          // This used to read `else if (amount > 0)`, which silently discarded
-          // any unrecognised negative adjustment -- the row was never created,
-          // so nothing downstream could even report it missing. A negative here
-          // now lands in reimbursements as a reduction, which is exactly what
-          // the WAREHOUSE_LOST and WAREHOUSE_DAMAGE branches above already do
-          // with their negatives.
-          //
-          // Still guarded on !== 0 so a genuinely zero-value adjustment does
-          // not create a row carrying nothing.
-          const entry = createCacheEntry(userId, 'adjustment', eventDate, adjOrderId, itemAsin);
-          entry.reimbursements += amount;
-          entries.push(stampAdjustmentProvenance(entry, event, item));
-        }
+          : (route.postage
+              ? `POSTAGE-${eventDate}-${_adjEvtIdx}#${_itemIdx}`
+              : `ADJ-${eventDate}-${_adjEvtIdx}#${_itemIdx}`);
+
+        const entry = createCacheEntry(userId, route.eventType, eventDate, adjOrderId, itemAsin);
+        (entry as unknown as Record<string, number>)[route.column] += route.value;
+        entries.push(stampAdjustmentProvenance(entry, event, item));
       }
     }
     // RemovalShipmentEventList: contains BOTH true removals AND liquidation proceeds.

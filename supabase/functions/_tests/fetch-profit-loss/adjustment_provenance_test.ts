@@ -13,6 +13,7 @@
 // PostedDate carries a full UTC timestamp that the writer was truncating.
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { adjustmentProvenance } from "../../fetch-profit-loss/adjustment-provenance.ts";
+import { routeAdjustment, isFbmShippingLabelReason } from "../../fetch-profit-loss/adjustment-router.ts";
 
 Deno.test("captures a real MISSING_FROM_INBOUND item", () => {
   const event = {
@@ -101,27 +102,16 @@ Deno.test("survives junk input without throwing", () => {
  *   - the final test being `amount > 0`, which dropped negatives silently
  * ------------------------------------------------------------------------- */
 
-type Routed =
-  | { column: "fbm_shipping_label_fee" | "liquidations" | "reversal_reimbursement"
-            | "warehouse_lost" | "warehouse_damage" | "free_replacement_refund_items"
-            | "compensated_clawback" | "reimbursements"; value: number }
-  | { column: "DROPPED"; value: 0 };
-
-/** Mirrors the writer's if/else order exactly. Keep in sync with index.ts. */
-function routeAdjustment(adjustmentTypeRaw: string, amount: number): Routed {
-  const t = adjustmentTypeRaw.toUpperCase();
-  if (t.includes("POSTAGE_BILLING")) return { column: "fbm_shipping_label_fee", value: Math.abs(amount) };
-  if (t.includes("LIQUIDATION")) return { column: "liquidations", value: amount > 0 ? amount : 0 };
-  if (t.includes("REVERSAL_REIMBURSEMENT")) return { column: "reversal_reimbursement", value: Math.abs(amount) };
-  if (t.includes("WAREHOUSE_LOST") || t.includes("MISSING_FROM_INBOUND") || t.includes("LOST"))
-    return amount > 0 ? { column: "warehouse_lost", value: amount } : { column: "reimbursements", value: amount };
-  if (t.includes("WAREHOUSE_DAMAGE") || t.includes("DAMAGE"))
-    return amount > 0 ? { column: "warehouse_damage", value: amount } : { column: "reimbursements", value: amount };
-  if (t.includes("FREE_REPLACEMENT"))
-    return { column: "free_replacement_refund_items", value: amount > 0 ? amount : 0 };
-  if (t.includes("COMPENSATED_CLAWBACK")) return { column: "compensated_clawback", value: amount };
-  if (amount !== 0) return { column: "reimbursements", value: amount };
-  return { column: "DROPPED", value: 0 };
+/**
+ * These now exercise the REAL router that fetch-profit-loss and
+ * repull-month-adjustments both import, not a hand-written mirror of it. The
+ * mirror was the weakness: it could agree with the chain on the day it was
+ * written and drift the moment either side changed, which is exactly the
+ * failure a decision-table test is supposed to catch.
+ */
+function routeAdjustment2(t: string, amount: number): { column: string; value: number } {
+  const r = routeAdjustment(t, amount);
+  return r ? { column: r.column, value: r.value } : { column: "DROPPED", value: 0 };
 }
 
 Deno.test("THE FIX: a real clawback is stored, signed, not dropped", () => {
@@ -133,7 +123,7 @@ Deno.test("THE FIX: a real clawback is stored, signed, not dropped", () => {
   ];
   let total = 0;
   for (const [t, amt] of real) {
-    const r = routeAdjustment(t, amt);
+    const r = routeAdjustment2(t, amt);
     assertEquals(r.column, "compensated_clawback");
     assertEquals(r.value, amt, "stored VERBATIM -- no abs(), the sign is the fact");
     total += r.value;
@@ -144,7 +134,7 @@ Deno.test("THE FIX: a real clawback is stored, signed, not dropped", () => {
 Deno.test("REVERSAL_REIMBURSEMENT is untouched and still income", () => {
   // Measured positive from Amazon despite the name; abs() is a no-op on it.
   for (const amt of [4.70, 15.68, 20.25, 17.05, 19.53, 20.25]) {
-    const r = routeAdjustment("REVERSAL_REIMBURSEMENT", amt);
+    const r = routeAdjustment2("REVERSAL_REIMBURSEMENT", amt);
     assertEquals(r.column, "reversal_reimbursement");
     assertEquals(r.value, amt);
   }
@@ -152,21 +142,52 @@ Deno.test("REVERSAL_REIMBURSEMENT is untouched and still income", () => {
 
 Deno.test("no unrecognised adjustment is dropped for being negative", () => {
   // The old `else if (amount > 0)` discarded these entirely.
-  const r = routeAdjustment("SOME_FUTURE_AMAZON_TYPE", -12.34);
+  const r = routeAdjustment2("SOME_FUTURE_AMAZON_TYPE", -12.34);
   assertEquals(r.column, "reimbursements");
   assertEquals(r.value, -12.34);
 });
 
 Deno.test("a zero-value adjustment still creates no row", () => {
-  assertEquals(routeAdjustment("SOME_FUTURE_AMAZON_TYPE", 0).column, "DROPPED");
+  assertEquals(routeAdjustment2("SOME_FUTURE_AMAZON_TYPE", 0).column, "DROPPED");
 });
 
 Deno.test("clawback is matched BEFORE the catch-all, not by LOST or DAMAGE", () => {
   // Ordering regression: if a broader branch ever moved above it, the clawback
   // would be mis-filed as a warehouse loss.
-  assertEquals(routeAdjustment("COMPENSATED_CLAWBACK", -4.70).column, "compensated_clawback");
+  assertEquals(routeAdjustment2("COMPENSATED_CLAWBACK", -4.70).column, "compensated_clawback");
   // And the real types that SHOULD hit the earlier branches still do.
-  assertEquals(routeAdjustment("MISSING_FROM_INBOUND", 180.69).column, "warehouse_lost");
-  assertEquals(routeAdjustment("WAREHOUSE_DAMAGE", 3.18).column, "warehouse_damage");
-  assertEquals(routeAdjustment("FREE_REPLACEMENT_REFUND_ITEMS", 18.59).column, "free_replacement_refund_items");
+  assertEquals(routeAdjustment2("MISSING_FROM_INBOUND", 180.69).column, "warehouse_lost");
+  assertEquals(routeAdjustment2("WAREHOUSE_DAMAGE", 3.18).column, "warehouse_damage");
+  assertEquals(routeAdjustment2("FREE_REPLACEMENT_REFUND_ITEMS", 18.59).column, "free_replacement_refund_items");
+});
+
+
+Deno.test("POSTAGE routing keeps all six spellings the sync has always matched", () => {
+  // Narrowing this to POSTAGE_BILLING alone would have reclassified SAFE-T and
+  // Buy Shipping charges out of fbm_shipping_label_fee.
+  for (const t of ["POSTAGE_BILLING", "ShippingServices", "shippinglabel",
+                   "BuyShipping", "buy shipping", "SAFE-T", "SAFE-T_REIMBURSEMENT"]) {
+    assertEquals(isFbmShippingLabelReason(t), true, `expected ${t} to match`);
+    const r = routeAdjustment(t, -4.21);
+    assertEquals(r?.column, "fbm_shipping_label_fee");
+    assertEquals(r?.value, 4.21, "stored as a magnitude: the column is a fee");
+    assertEquals(r?.postage, true);
+  }
+  assertEquals(isFbmShippingLabelReason("COMPENSATED_CLAWBACK"), false);
+  assertEquals(isFbmShippingLabelReason(null), false);
+});
+
+Deno.test("LIQUIDATION routes to its own event_type", () => {
+  const r = routeAdjustment("WHOLESALE_LIQUIDATION", 42.5);
+  assertEquals(r?.eventType, "liquidation");
+  assertEquals(r?.column, "liquidations");
+  // a negative liquidation is the brokerage fee, handled elsewhere
+  assertEquals(routeAdjustment("WHOLESALE_LIQUIDATION", -3)?.value, 0);
+});
+
+Deno.test("branch ORDER: reversal is tested before the LOST family", () => {
+  // If the LOST family moved above it, a future Amazon type containing both
+  // would be filed as a warehouse loss.
+  assertEquals(routeAdjustment("REVERSAL_REIMBURSEMENT_LOST", 5)?.column,
+    "reversal_reimbursement");
 });
