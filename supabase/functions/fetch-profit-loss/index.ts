@@ -1396,6 +1396,22 @@ async function fetchMonthEvents(
   let pageCount = 0;
   let consecutiveRateLimits = 0;
   let serviceFeeIdx = 0;
+  // MUST live out here with serviceFeeIdx, not inside the page loop below.
+  //
+  // It was declared inside the do/while, so it reset to 0 on every page and the
+  // synthetic key `ADJ-{date}-{evtIdx}#{itemIdx}` restarted at 1 each time.
+  // Two adjustments posted on the same date but returned on different pages
+  // therefore produced the SAME key and collided on the upsert key
+  // (user_id, event_type, event_date, amazon_order_id, asin).
+  //
+  // Measured on October 2026: Amazon returned 134 adjustment items and we
+  // stored 123 rows, so 11 pairs collided. dedupeCacheEntries sums all 40
+  // money columns, so no money was lost -- but the surviving row keeps only
+  // ONE event's provenance. The Oct 7 clawback was filed under sku 1069116154
+  // at 04:13:33 as REVERSAL_REIMBURSEMENT when Amazon had sent it as sku
+  // OJ-BZSH-BBVU at 16:54:26, COMPENSATED_CLAWBACK. Right amount, wrong
+  // everything else -- invisible until the provenance columns made it legible.
+  let _adjEvtIdx = 0;
   const monthFallbackDate = startDate.toISOString().split('T')[0];
   const maxConsecutiveRateLimits = 10;
   const maxPages = 500; // Safety limit per month
@@ -1513,7 +1529,6 @@ async function fetchMonthEvents(
       item: any,
     ): CacheEntry => Object.assign(entry, adjustmentProvenance(event, item));
 
-    let _adjEvtIdx = 0;
     for (const event of events?.AdjustmentEventList || []) {
       _adjEvtIdx++;
       const eventDate = event.PostedDate?.split('T')[0] || new Date().toISOString().split('T')[0];
