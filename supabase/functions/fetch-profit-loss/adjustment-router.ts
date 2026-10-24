@@ -61,6 +61,20 @@ export interface AdjustmentRoute {
   value: number;
   /** POSTAGE_BILLING uses its own synthetic order-id prefix. */
   postage: boolean;
+  /**
+   * TRUE only for the final unrecognised-type branch.
+   *
+   * This exists because `column === 'reimbursements'` is NOT evidence of an
+   * unrecognised type: a NEGATIVE WAREHOUSE_LOST or WAREHOUSE_DAMAGE is
+   * deliberately routed there too, by a branch that knows exactly what it is
+   * looking at. Conflating the two made a gate fire on two perfectly ordinary
+   * negative rows (2026-05-04 at -6.83 and 2026-06-03 at -5.78) and report an
+   * unmapped AdjustmentType that does not exist.
+   *
+   * Only this flag separates "Amazon sent a type we have never mapped" from
+   * "a mapped type arrived with the opposite sign".
+   */
+  viaCatchAll: boolean;
 }
 
 /**
@@ -81,13 +95,13 @@ export function routeAdjustment(
   // matches six spellings, not just POSTAGE_BILLING, and narrowing it here
   // would have quietly reclassified SAFE-T and Buy Shipping charges.
   if (isFbmShippingLabelReason(t)) {
-    return { eventType: "adjustment", column: "fbm_shipping_label_fee", value: Math.abs(amount), postage: true };
+    return { eventType: "adjustment", column: "fbm_shipping_label_fee", value: Math.abs(amount), postage: true, viaCatchAll: false };
   }
 
   if (t.includes("LIQUIDATION")) {
     // Only proceeds count; a negative here is the brokerage fee, handled by
     // RemovalShipmentEventList instead.
-    return { eventType: "liquidation", column: "liquidations", value: amount > 0 ? amount : 0, postage: false };
+    return { eventType: "liquidation", column: "liquidations", value: amount > 0 ? amount : 0, postage: false, viaCatchAll: false };
   }
 
   // Despite the name this arrives POSITIVE -- money TO the seller, what
@@ -95,23 +109,25 @@ export function routeAdjustment(
   // 6 of them, all positive, +$97.46, matching InventoryLab's CustomerReturn
   // total exactly. abs() is therefore a no-op and it is correctly income.
   if (t.includes("REVERSAL_REIMBURSEMENT")) {
-    return { eventType: "adjustment", column: "reversal_reimbursement", value: Math.abs(amount), postage: false };
+    return { eventType: "adjustment", column: "reversal_reimbursement", value: Math.abs(amount), postage: false, viaCatchAll: false };
   }
 
   if (t.includes("WAREHOUSE_LOST") || t.includes("MISSING_FROM_INBOUND") || t.includes("LOST")) {
     return amount > 0
-      ? { eventType: "adjustment", column: "warehouse_lost", value: amount, postage: false }
-      : { eventType: "adjustment", column: "reimbursements", value: amount, postage: false };
+      ? { eventType: "adjustment", column: "warehouse_lost", value: amount, postage: false, viaCatchAll: false }
+      // Negative LOST/DAMAGE into reimbursements is a KNOWN path, not the catch-all.
+      : { eventType: "adjustment", column: "reimbursements", value: amount, postage: false, viaCatchAll: false };
   }
 
   if (t.includes("WAREHOUSE_DAMAGE") || t.includes("DAMAGE")) {
     return amount > 0
-      ? { eventType: "adjustment", column: "warehouse_damage", value: amount, postage: false }
-      : { eventType: "adjustment", column: "reimbursements", value: amount, postage: false };
+      ? { eventType: "adjustment", column: "warehouse_damage", value: amount, postage: false, viaCatchAll: false }
+      // Negative LOST/DAMAGE into reimbursements is a KNOWN path, not the catch-all.
+      : { eventType: "adjustment", column: "reimbursements", value: amount, postage: false, viaCatchAll: false };
   }
 
   if (t.includes("FREE_REPLACEMENT")) {
-    return { eventType: "adjustment", column: "free_replacement_refund_items", value: amount > 0 ? amount : 0, postage: false };
+    return { eventType: "adjustment", column: "free_replacement_refund_items", value: amount > 0 ? amount : 0, postage: false, viaCatchAll: false };
   }
 
   // Amazon reclaiming a reimbursement. Arrives NEGATIVE and is stored verbatim:
@@ -120,7 +136,7 @@ export function routeAdjustment(
   // ever written -- 0 rows and $0.00 across 22 months while Amazon really was
   // sending them.
   if (t.includes("COMPENSATED_CLAWBACK")) {
-    return { eventType: "adjustment", column: "compensated_clawback", value: amount, postage: false };
+    return { eventType: "adjustment", column: "compensated_clawback", value: amount, postage: false, viaCatchAll: false };
   }
 
   // Everything else, EITHER SIGN. This used to be `amount > 0`, which silently
@@ -128,7 +144,8 @@ export function routeAdjustment(
   // even report them missing. Zero still writes nothing: a row carrying no
   // money is noise.
   if (amount !== 0) {
-    return { eventType: "adjustment", column: "reimbursements", value: amount, postage: false };
+    // THE ONLY genuine catch-all: the type matched nothing above.
+    return { eventType: "adjustment", column: "reimbursements", value: amount, postage: false, viaCatchAll: true };
   }
   return null;
 }

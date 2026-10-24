@@ -241,7 +241,8 @@ Deno.serve(async (req) => {
     // ON CONFLICT DO UPDATE that would touch the same row twice in one
     // statement, so same-key items must be summed before they are sent.
     const byKey = new Map<string, any>();
-    let apiSigned = 0, apiClawback = 0, routedNull = 0, skippedLiquidation = 0;
+    let apiSigned = 0, apiClawback = 0, routedNull = 0, skippedLiquidation = 0, catchAllCount = 0;
+    const catchAllTypes: Record<string, number> = {};
     let evtIdx = 0;
     let lastEvent: any = null;
     let itemIdx = 0;
@@ -264,6 +265,14 @@ Deno.serve(async (req) => {
       // 'liquidation'. Out of scope: this function does not delete liquidation
       // rows, so writing them would make them accumulate on every re-run.
       if (route.eventType !== 'adjustment') { skippedLiquidation++; continue; }
+      // Count the GENUINE catch-all separately. A negative LOST or DAMAGE also
+      // lands in reimbursements, and treating that as an unmapped type was a
+      // false alarm on two ordinary rows.
+      if (route.viaCatchAll) {
+        catchAllCount++;
+        catchAllTypes[String(event.AdjustmentType ?? '(null)')] =
+          (catchAllTypes[String(event.AdjustmentType ?? '(null)')] || 0) + 1;
+      }
       if (route.column === 'compensated_clawback') apiClawback += route.value;
 
       const asin = item.ASIN || '';
@@ -295,6 +304,9 @@ Deno.serve(async (req) => {
       api_rows_after_dedupe: rows.length,
       api_items_routed_to_nothing: routedNull,
       api_items_skipped_liquidation: skippedLiquidation,
+      // The gate the apply decision actually turns on.
+      api_items_via_catchall: catchAllCount,
+      api_catchall_types: catchAllTypes,
       api_signed_total: Math.round(apiSigned * 100) / 100,
       api_clawback_total: Math.round(apiClawback * 100) / 100,
       stored_rows: storedCount,

@@ -191,3 +191,30 @@ Deno.test("branch ORDER: reversal is tested before the LOST family", () => {
   assertEquals(routeAdjustment("REVERSAL_REIMBURSEMENT_LOST", 5)?.column,
     "reversal_reimbursement");
 });
+
+Deno.test("viaCatchAll separates an unmapped type from a negative mapped one", () => {
+  // The false alarm this flag exists to prevent. Both land in reimbursements;
+  // only one is an unrecognised AdjustmentType.
+  const negLost = routeAdjustment("WAREHOUSE_LOST", -6.83);
+  assertEquals(negLost?.column, "reimbursements");
+  assertEquals(negLost?.viaCatchAll, false, "a negative LOST is MAPPED, not a catch-all");
+
+  const negDamage = routeAdjustment("WAREHOUSE_DAMAGE", -5.78);
+  assertEquals(negDamage?.column, "reimbursements");
+  assertEquals(negDamage?.viaCatchAll, false, "a negative DAMAGE is MAPPED too");
+
+  const unknown = routeAdjustment("SOME_TYPE_AMAZON_ADDED_LATER", -5.78);
+  assertEquals(unknown?.column, "reimbursements");
+  assertEquals(unknown?.viaCatchAll, true, "an unrecognised type IS the catch-all");
+});
+
+Deno.test("every mapped branch reports viaCatchAll false", () => {
+  for (const [t, amt] of [
+    ["POSTAGE_BILLING", -4.2], ["WHOLESALE_LIQUIDATION", 10],
+    ["REVERSAL_REIMBURSEMENT", 4.7], ["MISSING_FROM_INBOUND", 5],
+    ["WAREHOUSE_LOST", 5], ["WAREHOUSE_DAMAGE", 5],
+    ["FREE_REPLACEMENT_REFUND_ITEMS", 5], ["COMPENSATED_CLAWBACK", -5],
+  ] as Array<[string, number]>) {
+    assertEquals(routeAdjustment(t, amt)?.viaCatchAll, false, `${t} must not read as catch-all`);
+  }
+});
