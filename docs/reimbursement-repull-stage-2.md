@@ -1,6 +1,22 @@
 # Stage 2: applying the 2026 adjustment re-pull
 
-**Status: NOT STARTED. Awaiting a start date from the operator.**
+**Status: NOT STARTED. All eight pending months measured and gate-clear.
+Proposed start: Sunday 2026-10-26, 15:00 UTC (08:00 Pacific).**
+
+Why that slot:
+
+- **Sunday is the lowest-volume day** — roughly 86 orders against Thursday's
+  ~150 — so the fewest live figures are moving while the P&L is being compared.
+- **15:00 UTC is clear of the unexplained 12:33 UTC pg_cron stall**, which is
+  still not root-caused. No reason to run financial writes near a window where
+  the scheduler froze once.
+- It is before the week's repricing ramps, and the Finances API work is tiny:
+  the three measured runs took 36–47 seconds each with **zero** rate-limit hits.
+
+Budget **45–60 minutes** for all eight: about 8 minutes of fetching, the rest
+verification between months. Oldest first, February through September.
+
+Nothing starts without your word on the date.
 
 This is the procedure, written down for approval before anything runs. Stage 1
 (dry runs) is complete; stage 2 is the part that writes.
@@ -55,22 +71,56 @@ table alone makes it look outstanding.
 
 A month with clawback rows stored has been applied. A month with zero has not.
 
-| Month | Adjustment rows | Clawbacks stored | Dry run | Measured clawbacks |
-| --- | --- | --- | --- | --- |
-| January | 148 | **−$230.38** | n/a | already applied |
-| February | 109 | 0 | done, catch-all 0 | −$227.95 |
-| March | 83 | 0 | done, catch-all 0 | −$182.54 |
-| April | 78 | 0 | done, catch-all 0 | −$193.44 |
-| May | 75 | 0 | **none yet** | unmeasured |
-| June | 61 | 0 | done, catch-all 0 | −$209.69 |
-| July | 79 | 0 | done, catch-all 0 | −$246.44 |
-| August | 156 | 0 | **none yet** | unmeasured |
-| September | 85 | 0 | **none yet** | unmeasured |
-| October | 139 | **−$143.89** | n/a | live sync, forward-only fix working |
+All ten months are now measured. Every dry run reports
+`api_items_via_catchall = 0` with `api_catchall_types = {}`, and every residual
+is independently reproduced by summing the per-column deltas.
 
-**Eight months are outstanding.** Five have a clean dry run; **May, August and
-September still need one** before they can be applied. August is the largest
-month by row count, so its clawback total is not safe to extrapolate.
+| Month | Pages | Items | Catch-all | Clawbacks | Residual | State |
+| --- | --- | --- | --- | --- | --- | --- |
+| January | — | — | — | **−$230.38** | — | **applied** |
+| February | — | — | 0 | −$227.95 | +$0.13 | pending |
+| March | — | — | 0 | −$182.54 | +$0.59 | pending |
+| April | — | — | 0 | −$193.44 | +$2.37 | pending |
+| May | 38 | 103 | 0 | −$187.96 | **$0.00** | pending |
+| June | — | — | 0 | −$209.69 | +$0.13 | pending |
+| July | 59 | 135 | 0 | −$246.44 | +$10.48 | pending |
+| August | 47 | 192 | 0 | −$132.08 | +$25.11 | pending |
+| September | 37 | 112 | 0 | −$213.20 | +$20.14 | pending |
+| October | — | — | — | **−$143.89** | — | live sync |
+
+**Eight months pending, all with a clean gate.** Zero rate-limit hits on all
+three of the final runs.
+
+### The two numbers, which are not the same
+
+- **Clawbacks pending: −$1,593.30.** This is the money Amazon took back that
+  the P&L has never shown.
+- **Net P&L change if all eight are applied: −$1,534.35.** The difference is
+  **+$58.95** of reimbursement restatement — Amazon has posted more
+  reimbursement detail since the original pulls. Each month's residual is
+  attributed to a column:
+  - February +$0.13, March +$0.59, April +$2.37, June +$0.13 — rounding-scale
+  - May **$0.00** — every non-clawback column delta is exactly zero
+  - July +$10.48 — `warehouse_damage` +$8.88, `reversal_reimbursement` +$1.60
+  - August +$25.11 — `reversal_reimbursement` +$16.54,
+    `free_replacement_refund_items` +$8.57
+  - September +$20.14 — `reversal_reimbursement` +$10.82,
+    `warehouse_lost` +$9.32
+
+**Full-year 2026 clawbacks: −$1,967.57** (January −$230.38 applied, the eight
+pending months −$1,593.30, October −$143.89 captured live).
+
+### A correction to a correction
+
+The earlier figures of **−$1,593.30 pending** and **−$1,958.61 full-year** were
+retired as unverified. They were right. The pending total is now measured at
+exactly −$1,593.30, and the full-year difference from −$1,958.61 is +$8.96,
+which is entirely October drifting as the live sync keeps catching new events
+(−$134.93 → −$143.89). Retiring them was over-cautious; the earlier unpersisted
+slices for August (−$132.08) and September (−$213.20) also both verified exactly.
+
+The figures that remain genuinely wrong are the worker-slot outage mechanism and
+the claim that January was unapplied.
 
 ## Per-month procedure
 
