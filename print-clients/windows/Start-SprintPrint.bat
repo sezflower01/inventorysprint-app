@@ -3,7 +3,7 @@ setlocal
 cd /d "%~dp0"
 title SprintPrint
 
-set "LOGDIR=%LOCALAPPDATA%\ArbiProSeller\PrintClient"
+set "LOGDIR=%LOCALAPPDATA%\InventorySprint\PrintClient"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%"
 set "LOGFILE=%LOGDIR%\launcher.log"
 

@@ -1,6 +1,6 @@
 # SprintPrint (Windows)
 
-A lightweight Windows service that receives label print requests from the ArbiProSeller web app and sends ZPL commands directly to thermal printers (Zebra, Rollo, etc.).
+A lightweight Windows service that receives label print requests from the InventorySprint web app and sends ZPL commands directly to thermal printers (Zebra, Rollo, etc.).
 
 ## Requirements (end users)
 
@@ -11,7 +11,7 @@ A lightweight Windows service that receives label print requests from the ArbiPr
 ## Quick start (end user)
 
 1. Get `SprintPrint.exe` and `Start-SprintPrint.bat` from your admin (or build once with the steps below).
-2. Put both files in the same folder, e.g. `C:\ArbiProSeller\`.
+2. Put both files in the same folder, e.g. `C:\InventorySprint\`.
 3. **Double-click `Start-SprintPrint.bat`.** A console window opens and stays visible while the client runs.
 4. Leave that window open while you print. Open the web app → Label Printing → status should turn **connected**.
 5. (Optional) Drop a shortcut into `shell:startup` so it launches automatically on login.
@@ -51,9 +51,9 @@ Double-click `Start-SprintPrint.bat` from the same folder as `SprintPrint.exe`.
 
 It will listen on `http://localhost:7777/print-labels`.
 
-If the window closes or startup fails, the launcher writes details to `%LOCALAPPDATA%\ArbiProSeller\PrintClient\launcher.log`.
+If the window closes or startup fails, the launcher writes details to `%LOCALAPPDATA%\InventorySprint\PrintClient\launcher.log`.
 
-The ArbiProSeller web app will call this endpoint when you click **Direct Thermal Print (Client)**.
+The InventorySprint web app will call this endpoint when you click **Direct Thermal Print (Client)**.
 
 The client looks for a printer whose name contains `Zebra` or `Rollo`. Configure your thermal printer in Windows with one of those names, or adjust `GetDefaultThermalPrinterName()` in `Program.cs`.
 
@@ -151,8 +151,8 @@ For production use, you may want to run this as a Windows Service:
 dotnet publish -c Release -r win-x64 --self-contained /p:PublishSingleFile=true
 
 # Install as Windows Service (run as Administrator)
-sc create ArbiProSellerPrint binPath="C:\path\to\SprintPrint.exe"
-sc start ArbiProSellerPrint
+sc create InventorySprintPrint binPath="C:\path\to\SprintPrint.exe"
+sc start InventorySprintPrint
 ```
 
 ## Security Note

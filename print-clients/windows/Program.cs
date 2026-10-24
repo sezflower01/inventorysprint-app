@@ -10,7 +10,7 @@ using Microsoft.Extensions.Hosting;
 // ---- Always log to a file so silent crashes can be diagnosed ----
 static string LogPath()
 {
-    var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ArbiProSeller", "PrintClient");
+    var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "InventorySprint", "PrintClient");
     Directory.CreateDirectory(folder);
     return Path.Combine(folder, "print-client.log");
 }
@@ -273,9 +273,9 @@ try
         {
             var useGdi = ShouldUseGdi(printerName, "auto");
             if (useGdi)
-                GdiLabelPrinter.Print(printerName, "TEST123456", "ArbiProSeller Test Label", "NEW", "2x1");
+                GdiLabelPrinter.Print(printerName, "TEST123456", "InventorySprint Test Label", "NEW", "2x1");
             else
-                RawPrinterHelper.SendStringToPrinter(printerName, ZplBuilder.BuildLabel("TEST123456", "ArbiProSeller Test Label", "NEW", "2x1", 203));
+                RawPrinterHelper.SendStringToPrinter(printerName, ZplBuilder.BuildLabel("TEST123456", "InventorySprint Test Label", "NEW", "2x1", 203));
             LogLine($"Test print submitted to '{printerName}' via {(useGdi ? "GDI" : "ZPL")}");
             return Results.Ok(new { success = true, printer = printerName, mode = useGdi ? "gdi" : "zpl" });
         }
@@ -328,9 +328,9 @@ try
                     }
                     var useGdi = ShouldUseGdi(printerName, "auto");
                     if (useGdi)
-                        GdiLabelPrinter.Print(printerName, "TEST123456", "ArbiProSeller Test Label", "NEW", "2x1");
+                        GdiLabelPrinter.Print(printerName, "TEST123456", "InventorySprint Test Label", "NEW", "2x1");
                     else
-                        RawPrinterHelper.SendStringToPrinter(printerName, ZplBuilder.BuildLabel("TEST123456", "ArbiProSeller Test Label", "NEW", "2x1", 203));
+                        RawPrinterHelper.SendStringToPrinter(printerName, ZplBuilder.BuildLabel("TEST123456", "InventorySprint Test Label", "NEW", "2x1", 203));
                     MessageBox.Show($"Test label sent to:\n{printerName}\n\nMode: {(useGdi ? "Windows driver (GDI)" : "Raw ZPL")}\n\nIf nothing prints, check the Windows print queue for this printer.", "Test Print", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 catch (Exception ex)
@@ -451,7 +451,7 @@ public static class PrintClientDiagnostics
 
     public static string WriteStartupError(Exception ex)
     {
-        var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ArbiProSeller", "PrintClient");
+        var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "InventorySprint", "PrintClient");
         Directory.CreateDirectory(folder);
         var path = Path.Combine(folder, "startup-error.log");
         File.WriteAllText(path, $"{DateTimeOffset.Now:u}{Environment.NewLine}{ex}{Environment.NewLine}");
@@ -615,7 +615,7 @@ public class RawPrinterHelper
 
             var di = new DOCINFO
             {
-                pDocName = "ArbiProSeller Label",
+                pDocName = "InventorySprint Label",
                 pDataType = "RAW"
             };
 
@@ -677,7 +677,7 @@ public static class GdiLabelPrinter
 
         using var pd = new System.Drawing.Printing.PrintDocument();
         pd.PrinterSettings.PrinterName = printerName;
-        pd.DocumentName = "ArbiProSeller Label";
+        pd.DocumentName = "InventorySprint Label";
 
         var paper = new System.Drawing.Printing.PaperSize("Label", paperWidth, paperHeight);
         pd.DefaultPageSettings.PaperSize = paper;
@@ -829,7 +829,7 @@ public static class ImageLabelPrinter
 
         using var pd = new System.Drawing.Printing.PrintDocument();
         pd.PrinterSettings.PrinterName = printerName;
-        pd.DocumentName = "ArbiProSeller Label";
+        pd.DocumentName = "InventorySprint Label";
 
         var paper = new System.Drawing.Printing.PaperSize("Label", paperWidth, paperHeight);
         pd.DefaultPageSettings.PaperSize = paper;

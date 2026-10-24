@@ -122,6 +122,7 @@ import TermsOfService from "./pages/TermsOfService";
 import AiRepricerProduct from "./pages/AiRepricerProduct";
 import ProductLibraryProduct from "./pages/ProductLibraryProduct";
 import ModuleExplainer from "./pages/ModuleExplainer";
+import OnlineArbitrageSoftware from "./pages/OnlineArbitrageSoftware";
 import Pricing from "./pages/Pricing";
 import NotFound from "./pages/NotFound";
 import SignUp from "./pages/SignUp";
@@ -285,6 +286,7 @@ function App() {
                   <Route path="/products/ai-repricer" element={<AiRepricerProduct />} />
                   <Route path="/products/product-library" element={<ProductLibraryProduct />} />
                   <Route path="/products/modules/:slug" element={<ModuleExplainer />} />
+                  <Route path="/amazon-online-arbitrage-software" element={<OnlineArbitrageSoftware />} />
                   <Route path="/pricing" element={<Pricing />} />
                   
                   <Route path="/signup" element={<SignUp />} />
