@@ -6,11 +6,9 @@
 
 - [Home](/): Overview of InventorySprint's all-in-one Amazon arbitrage platform.
 - [Pricing](/pricing): Plans and the 60-day free autopilot trial.
-- [Download](/download): Download the desktop app for Windows and macOS.
 - [About](/about): Company background and mission.
 - [Contact](/contact): Get in touch with the team.
 - [Support](/support): Help center and support resources.
-- [Buy License](/buy-license): Purchase a license.
 
 ## Products
 

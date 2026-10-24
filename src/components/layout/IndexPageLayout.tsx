@@ -37,7 +37,7 @@ const IndexPageLayout = ({ children, metaTitle, metaDescription }: IndexPageLayo
             static copy is a pre-hydration fallback, not a backstop. */}
         <meta property="og:type" content="website" />
         <meta property="og:url" content="https://inventorysprint.com/" />
-        <meta property="og:title" content="Amazon Repricer & Inventory | InventorySprint" />
+        <meta property="og:title" content="Amazon Arbitrage & Repricer Software | InventorySprint" />
         <meta property="og:description" content="Find profitable products, track suppliers, and automate pricing in one system. Built for Amazon sellers who want to scale faster with real data." />
         <meta property="og:image" content="https://inventorysprint.com/logo-icon.png" />
         <meta property="og:image:width" content="1200" />

@@ -6,27 +6,15 @@
       "permanent": true
     },
     {
-      "source": "/download",
-      "destination": "/signup",
-      "permanent": true
-    },
-    {
-      "source": "/admin",
-      "destination": "/pricing",
-      "permanent": true
-    },
-    {
-      "source": "/buy-license",
-      "destination": "/pricing",
-      "permanent": true
-    },
-    {
       "source": "/products/modules/sales",
       "destination": "/products/modules/sales-report",
       "permanent": true
     }
   ],
   "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
   ]
 }
