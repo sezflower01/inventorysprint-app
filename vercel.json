@@ -11,10 +11,11 @@
       "permanent": true
     }
   ],
-  "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/index.html"
-    }
+  "routes": [
+    { "src": "/download", "status": 410 },
+    { "src": "/admin", "status": 410 },
+    { "src": "/buy-license", "status": 410 },
+    { "handle": "filesystem" },
+    { "src": "/.*", "dest": "/index.html" }
   ]
 }
