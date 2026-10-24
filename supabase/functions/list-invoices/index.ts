@@ -118,7 +118,12 @@ serve(async (req) => {
         const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
         const { data: seqData } = await supabaseClient.rpc("nextval_generated_invoice_seq");
         const seqNum = seqData ?? Date.now();
-        const invoiceNumber = `APS-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}-${String(seqNum).padStart(4, "0")}`;
+        // Prefix is INV-, not a brand initialism. APS- was ArbiProSeller, and
+        // baking a brand into an invoice number is what forced a scrub once
+        // already. The digits come from the nextval_generated_invoice_seq
+        // sequence, so they stay monotonic and continuous across this change --
+        // only the prefix differs, and issued APS- invoices are left alone.
+        const invoiceNumber = `INV-${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}-${String(seqNum).padStart(4, "0")}`;
 
         await supabaseClient.from("generated_invoices").insert({
           user_id: user.id,
