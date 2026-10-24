@@ -122,6 +122,41 @@ slices for August (−$132.08) and September (−$213.20) also both verified exa
 The figures that remain genuinely wrong are the worker-slot outage mechanism and
 the claim that January was unapplied.
 
+## Throttled dry runs must be refreshed
+
+Measured 2026-10-24. Three months were fired too close together, before the
+per-page backoff existed, and recorded rate-limit hits:
+
+| Month | Rate-limit hits | Pages | Items | Verdict |
+| --- | --- | --- | --- | --- |
+| February | **14** | 50 | 144 | refresh before applying |
+| March | **14** | 53 | 113 | refresh before applying |
+| April | **11** | 52 | 116 | refresh before applying |
+| May | 0 | 38 | 103 | clean |
+| June | 0 | 58 | 107 | clean |
+| July | 0 | 59 | 135 | clean |
+| August | 0 | 47 | 192 | clean |
+| September | 0 | 37 | 112 | clean |
+
+A throttled run may have paged incompletely, and an incomplete page set is not
+a basis for replacing a month of financial rows. February, March and April each
+get a fresh dry run immediately before their apply. The explainer now prints
+`!! THROTTLED RUN` whenever `rate_limit_hits > 0`, so this cannot be missed
+again.
+
+## Hard stops before the backup
+
+For each month, the fresh dry run must satisfy **all three** or the month stops
+before `fec_backup_month` is called:
+
+- `rate_limit_hits` = **0**
+- `api_items_via_catchall` = **0**
+- the clawback total **equals the figure already measured** for that month
+
+A clawback total that has moved is not automatically wrong — Amazon restates —
+but it means the figure in the table above is stale, and that gets reported and
+re-approved rather than applied.
+
 ## Per-month procedure
 
 Each month is one pass. **Stop at the first month where anything unexpected
