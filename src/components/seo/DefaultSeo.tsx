@@ -1,5 +1,9 @@
 import { Helmet } from "react-helmet-async";
 
+// Staging hosts that must never be indexed. Mirrors LOVABLE_HOSTS in main.tsx,
+// which still hard-redirects them to the primary domain.
+const NOINDEX_HOSTS = ["repricer.lovable.app"];
+
 /**
  * Site-wide social defaults, rendered once near the root.
  *
@@ -24,16 +28,30 @@ import { Helmet } from "react-helmet-async";
  * Rendered above the routes, so any page-level <Helmet> that sets the same
  * property overrides it: react-helmet-async resolves deeper instances last.
  */
-const DefaultSeo = () => (
-  <Helmet>
-    <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="InventorySprint" />
-    <meta property="og:image" content="https://inventorysprint.com/logo-icon.png" />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:image" content="https://inventorysprint.com/logo-icon.png" />
-  </Helmet>
-);
+const DefaultSeo = () => {
+  // Robots lives here rather than in main.tsx, where it was appended straight
+  // to <head> outside Helmet. A page could not override it there: NotFound
+  // could ask for noindex and the runtime tag would sit beside it saying
+  // index, leaving two conflicting directives on every soft 404. Helmet
+  // resolves deeper instances last, so a page Helmet now wins outright.
+  const host = typeof window !== "undefined" ? window.location.hostname : "";
+  const robots = NOINDEX_HOSTS.includes(host)
+    ? "noindex, follow"
+    : "index, follow, noarchive";
+
+  return (
+    <Helmet>
+      <meta name="robots" content={robots} />
+      <meta name="googlebot" content={robots} />
+      <meta property="og:type" content="website" />
+      <meta property="og:site_name" content="InventorySprint" />
+      <meta property="og:image" content="https://inventorysprint.com/logo-icon.png" />
+      <meta property="og:image:width" content="1200" />
+      <meta property="og:image:height" content="630" />
+      <meta name="twitter:card" content="summary_large_image" />
+      <meta name="twitter:image" content="https://inventorysprint.com/logo-icon.png" />
+    </Helmet>
+  );
+};
 
 export default DefaultSeo;

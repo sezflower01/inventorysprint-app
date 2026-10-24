@@ -103,7 +103,7 @@ const AiRepricerProduct: React.FC = () => {
           <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full border border-primary/30 bg-primary/10 mb-6">
             <Brain className="h-3.5 w-3.5 text-primary" />
             <span className="text-xs font-semibold uppercase tracking-wider text-primary">
-              Powered by Google Gemini 2.5
+              Powered by Google Gemini
             </span>
           </div>
           <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold mb-6 bg-gradient-to-r from-white to-white/70 bg-clip-text text-transparent leading-tight">
@@ -201,11 +201,11 @@ const AiRepricerProduct: React.FC = () => {
               </span>
             </div>
             <h2 className="text-3xl md:text-4xl font-bold mb-3 text-white">
-              Powered by Google Gemini 2.5
+              Powered by Google Gemini
             </h2>
             <p className="text-blue-100/80 max-w-2xl mx-auto leading-relaxed">
-              InventorySprint uses <span className="font-semibold text-white">Gemini 2.5 Flash</span> for fast,
-              large-scale AI review and <span className="font-semibold text-white">Gemini 2.5 Pro</span> for
+              InventorySprint uses <span className="font-semibold text-white">Gemini Flash</span> for fast,
+              large-scale AI review and <span className="font-semibold text-white">Gemini Pro</span> for
               deeper analysis on high-impact pricing decisions. Every recommendation is logged, explainable, and
               measurable.
             </p>
@@ -216,7 +216,7 @@ const AiRepricerProduct: React.FC = () => {
               <div className="flex items-center gap-2 mb-3">
                 <Badge className="border-primary/40 bg-primary/10 text-primary gap-1">
                   <Brain className="h-3 w-3" />
-                  Gemini 2.5 Flash
+                  Gemini Flash
                 </Badge>
                 <span className="text-xs text-blue-700">High volume</span>
               </div>
@@ -231,7 +231,7 @@ const AiRepricerProduct: React.FC = () => {
               <div className="flex items-center gap-2 mb-3">
                 <Badge className="border-violet-500/40 bg-violet-500/10 text-violet-700 gap-1">
                   <Brain className="h-3 w-3" />
-                  Gemini 2.5 Pro
+                  Gemini Pro
                 </Badge>
                 <span className="text-xs text-blue-700">High-impact cases</span>
               </div>

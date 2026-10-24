@@ -390,17 +390,17 @@ export default function AiInsightsCard({ event: e, signalSummary, isAdmin, lates
           //   - Every price decision is made by the deterministic repricer engine.
           //   - Gemini writes a separate observation note on some rows; that
           //     note does NOT alter the decision that already executed.
-          //   - tier 'pro'   → "AI observation (Gemini 2.5 Pro)"  (violet)
-          //   - tier 'flash' → "AI observation (Gemini 2.5 Flash)" (primary)
+          //   - tier 'pro'   → "AI observation (Gemini Pro)"  (violet)
+          //   - tier 'flash' → "AI observation (Gemini Flash)" (primary)
           //   - otherwise    → "Repricer decision"                (neutral)
           const tier = (e.model_tier || "").toLowerCase();
           const isPro = tier === "pro";
           const isFlash = tier === "flash";
           const isAiReviewed = isPro || isFlash;
           const modelLabel = isPro
-            ? "AI observation (Gemini 2.5 Pro)"
+            ? "AI observation (Gemini Pro)"
             : isFlash
-              ? "AI observation (Gemini 2.5 Flash)"
+              ? "AI observation (Gemini Flash)"
               : "Repricer decision";
           const modelBadgeClass = isPro
             ? "border-violet-500/40 bg-violet-500/10 text-violet-700 dark:text-violet-300"

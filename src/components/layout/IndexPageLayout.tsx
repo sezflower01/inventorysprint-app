@@ -71,10 +71,9 @@ const IndexPageLayout = ({ children, metaTitle, metaDescription }: IndexPageLayo
             "@type": "SoftwareApplication",
             "name": "InventorySprint",
             "applicationCategory": "BusinessApplication",
-            "operatingSystem": "Windows",
-            "description": "Database software for Amazon sellers to track and manage product sourcing decisions",
+            "operatingSystem": "Web",
+            "description": "Find deals, track suppliers, and auto-price Amazon FBA listings. Free 60-day trial, no credit card.",
             "url": "https://inventorysprint.com/",
-            "downloadUrl": "https://inventorysprint.com/download",
             "softwareVersion": "2.0",
             "offers": {
               "@type": "Offer",

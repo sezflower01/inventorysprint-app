@@ -177,8 +177,8 @@ export default function AiInsightsLiveState({ items, scheduler, lastUpdatedAt }:
                     if (tier !== "pro" && tier !== "flash") return null;
                     const isPro = tier === "pro";
                     const label = isPro
-                      ? "AI observation (Gemini 2.5 Pro)"
-                      : "AI observation (Gemini 2.5 Flash)";
+                      ? "AI observation (Gemini Pro)"
+                      : "AI observation (Gemini Flash)";
                     return (
                       <div
                         className={cn(

@@ -8,7 +8,7 @@ import { recordUsage } from "@/lib/moduleUsageTracker";
 const USAGE_TRACK_IGNORE = new Set<string>([
   "/", "/login", "/signup", "/signed-in", "/auth/callback",
   "/forgot-password", "/reset-password", "/complete-profile",
-  "/tools", "/pricing", "/about", "/contact", "/download",
+  "/tools", "/pricing", "/about", "/contact",
   "/privacy-policy", "/terms-of-service", "/support",
 ]);
 

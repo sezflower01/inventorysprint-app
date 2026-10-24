@@ -593,7 +593,7 @@ export default function AiActionInsights() {
       </div>
       <div className="flex items-center justify-between flex-wrap gap-2 mb-4">
         <p className="text-xs text-muted-foreground">
-          Gemini 2.5 Flash reads recent decisions and writes an observation note. Gemini 2.5 Pro is used for deeper analysis. These notes do not influence pricing — the deterministic repricer keeps full control. Limited to once every 5 minutes.
+          Gemini Flash reads recent decisions and writes an observation note. Gemini Pro is used for deeper analysis. These notes do not influence pricing — the deterministic repricer keeps full control. Limited to once every 5 minutes.
         </p>
         <Badge
           variant="outline"

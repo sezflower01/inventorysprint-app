@@ -128,7 +128,7 @@ const OnlineArbitrageSoftware = () => {
             "name": "InventorySprint",
             "applicationCategory": "BusinessApplication",
             "applicationSubCategory": "Amazon Online Arbitrage Software",
-            "operatingSystem": "Web, Windows, macOS",
+            "operatingSystem": "Web",
             "offers": {
               "@type": "Offer",
               "price": "0",

@@ -25,26 +25,12 @@ const ensureCanonical = () => {
   document.head.appendChild(link);
 };
 
-const addSearchEngineMetaTag = () => {
-  const onLovable = LOVABLE_HOSTS.includes(window.location.hostname);
+// Robots and googlebot metas used to be appended here, outside Helmet. That
+// made them impossible for a page to override: NotFound could ask for
+// noindex and this tag would still be sitting beside it saying index. They
+// now live in <DefaultSeo>, so Helmet owns them and a deeper page Helmet
+// wins -- which is what lets an unknown path actually be noindexed.
 
-  // On lovable.app: tell crawlers to drop it from the index but follow
-  // links (which carry the canonical to inventorysprint.com). Elsewhere:
-  // index normally.
-  const robotsContent = onLovable ? 'noindex,follow' : 'index,follow,noarchive';
-
-  const metaTag = document.createElement('meta');
-  metaTag.name = 'googlebot';
-  metaTag.content = robotsContent;
-  document.head.appendChild(metaTag);
-
-  const metaTag2 = document.createElement('meta');
-  metaTag2.name = 'robots';
-  metaTag2.content = robotsContent;
-  document.head.appendChild(metaTag2);
-};
-
-addSearchEngineMetaTag();
 ensureCanonical();
 
 // Keep canonical in sync as the SPA navigates between routes.
