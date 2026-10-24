@@ -1,3 +1,18 @@
+// SUPERSEDED -- not routed, and /online-arbitrage-guide now 301s to
+// /amazon-online-arbitrage-software (see vercel.json).
+//
+// This component was never imported into App.tsx, so the canonical it
+// declares has never resolved to anything: the URL fell through the SPA
+// rewrite and rendered NotFound. It was therefore never indexed and there is
+// no link equity to preserve -- the 301 exists for correctness, not rescue.
+//
+// Kept rather than deleted because the 242 lines below are real OA content and
+// the only reason not to run it is overlap: its title and the new landing
+// page's both lead with "Online Arbitrage", which is how two pages end up
+// competing for one query. If it is ever revived it should become a blog post
+// under /blog/ aimed at informational intent, with the 2024 dates refreshed
+// and an internal link to the software page -- not a second commercial page.
+
 import React from "react";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";

@@ -37,32 +37,37 @@
     
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="robots" content="index, follow" />
+    <!-- robots is set at runtime by src/main.tsx (addSearchEngineMetaTag),
+         which emits index,follow,noarchive off lovable.app and noindex,follow
+         on it. A static copy here produced a SECOND, conflicting robots meta
+         on every page ("index, follow" vs "index,follow,noarchive"). Removing
+         it loses nothing: with JS disabled, absent robots means index,follow
+         anyway. -->
     <title>Amazon Repricer & Inventory Software | InventorySprint</title>
-    <meta name="description" content="Find deals, track suppliers, and auto-price Amazon FBA listings. Free 60-day trial — no credit card." />
-    <meta name="keywords" content="amazon repricer software, amazon repricing tool, auto repricer amazon, AI amazon repricer, FBA profit tracker, Amazon FBA software, Amazon seller tools, Amazon sourcing software, FBA sourcing tools, amazon inventory management, inventory tracking software, inventory sprint, amazon inventory, amazon seller software, amazon profit calculator, amazon listing tools" />
-    <meta name="author" content="InventorySprint" />
+    <meta data-rh="true" name="description" content="Find deals, track suppliers, and auto-price Amazon FBA listings. Free 60-day trial — no credit card." />
+    <meta data-rh="true" name="keywords" content="amazon repricer software, amazon repricing tool, auto repricer amazon, AI amazon repricer, FBA profit tracker, Amazon FBA software, Amazon seller tools, Amazon sourcing software, FBA sourcing tools, amazon inventory management, inventory tracking software, inventory sprint, amazon inventory, amazon seller software, amazon profit calculator, amazon listing tools" />
+    <meta data-rh="true" name="author" content="InventorySprint" />
 
     <!-- Open Graph / Facebook -->
-    <meta property="og:type" content="website" />
-    <meta property="og:url" content="https://inventorysprint.com/" />
-    <meta property="og:title" content="Amazon Repricer & Inventory | InventorySprint" />
-    <meta property="og:description" content="Find profitable products, track suppliers, and automate pricing in one system. Built for Amazon sellers who want to scale faster with real data." />
-    <meta property="og:image" content="https://inventorysprint.com/logo-icon.png" />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
-    <meta property="og:site_name" content="InventorySprint" />
+    <meta data-rh="true" property="og:type" content="website" />
+    <meta data-rh="true" property="og:url" content="https://inventorysprint.com/" />
+    <meta data-rh="true" property="og:title" content="Amazon Repricer & Inventory | InventorySprint" />
+    <meta data-rh="true" property="og:description" content="Find profitable products, track suppliers, and automate pricing in one system. Built for Amazon sellers who want to scale faster with real data." />
+    <meta data-rh="true" property="og:image" content="https://inventorysprint.com/logo-icon.png" />
+    <meta data-rh="true" property="og:image:width" content="1200" />
+    <meta data-rh="true" property="og:image:height" content="630" />
+    <meta data-rh="true" property="og:site_name" content="InventorySprint" />
     <meta property="fb:app_id" content="2425421061189553" />
 
     <!-- Twitter -->
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:url" content="https://inventorysprint.com/" />
-    <meta name="twitter:title" content="Amazon Repricer & Inventory | InventorySprint" />
-    <meta name="twitter:description" content="Find profitable products, track suppliers, and automate pricing in one system. Built for Amazon sellers who want to scale faster with real data." />
-    <meta name="twitter:image" content="https://inventorysprint.com/logo-icon.png" />
+    <meta data-rh="true" name="twitter:card" content="summary_large_image" />
+    <meta data-rh="true" name="twitter:url" content="https://inventorysprint.com/" />
+    <meta data-rh="true" name="twitter:title" content="Amazon Repricer & Inventory | InventorySprint" />
+    <meta data-rh="true" name="twitter:description" content="Find profitable products, track suppliers, and automate pricing in one system. Built for Amazon sellers who want to scale faster with real data." />
+    <meta data-rh="true" name="twitter:image" content="https://inventorysprint.com/logo-icon.png" />
 
     <!-- Schema.org markup for Google -->
-    <script type="application/ld+json">
+    <script data-rh="true" type="application/ld+json">
     {
       "@context": "https://schema.org",
       "@type": "SoftwareApplication",
@@ -82,7 +87,7 @@
     }
     </script>
     
-    <link rel="canonical" href="https://inventorysprint.com/" />
+    <link data-rh="true" rel="canonical" href="https://inventorysprint.com/" />
     <!-- Per-route canonical is overridden via react-helmet-async (see IndexPageLayout / each page). -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

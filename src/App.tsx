@@ -123,6 +123,7 @@ import AiRepricerProduct from "./pages/AiRepricerProduct";
 import ProductLibraryProduct from "./pages/ProductLibraryProduct";
 import ModuleExplainer from "./pages/ModuleExplainer";
 import OnlineArbitrageSoftware from "./pages/OnlineArbitrageSoftware";
+import DefaultSeo from "./components/seo/DefaultSeo";
 import Pricing from "./pages/Pricing";
 import NotFound from "./pages/NotFound";
 import SignUp from "./pages/SignUp";
@@ -262,6 +263,7 @@ function App() {
             <SalesSyncProvider>
             <TooltipProvider>
               <Router>
+                <DefaultSeo />
                 <ModuleUsageRouteTracker />
                 <LazyErrorBoundary>
                 <Suspense fallback={<LoadingFallback />}>
