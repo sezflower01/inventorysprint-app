@@ -1,7 +1,6 @@
 import React from "react";
 import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
-import InstructionSection from "@/components/InstructionSection";
 import InsertFormSection from "@/components/InsertFormSection";
 import DraftFeatureSection from "@/components/DraftFeatureSection";
 import RepurchaseDecision from "@/components/RepurchaseDecision";
@@ -30,7 +29,6 @@ const ProductDetails = () => {
             Detailed <span className="bg-gradient-to-r from-brand-700 to-brand-900 bg-clip-text text-transparent">Product Features</span>
           </h1>
         </div>
-        <InstructionSection />
         <InsertFormSection />
         <DraftFeatureSection />
         <RepurchaseDecision />
