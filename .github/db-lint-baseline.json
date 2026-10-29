@@ -31,6 +31,12 @@
       "message": "relation \"_cached\" does not exist",
       "reason": "NOT a broken function -- a plpgsql_check blind spot. The rollup builds six ON COMMIT DROP temp tables and indexes them, and a temp table does not exist while the linter is statically checking the body, so the first statement naming one it did not just create -- CREATE INDEX ON _cached (b) -- cannot be planned. _ub is created earlier and is not flagged because nothing references it until _matched, by which point the check has already stopped on this function. Proven to RUN: 20260903170000 and 20260904160000 both call it inside a DO block, so db push would have aborted if it threw; it rebuilds the rollup in ~0.9s. The temp tables plus their indexes ARE the performance fix -- the previous per-user loop timed out -- so rewriting them away to satisfy the linter would undo the thing this function exists for. Wrapping the CREATE INDEXes in EXECUTE would hide it, but the check stops at the first error per function, so that just surfaces the next temp table and ends with the whole body in dynamic SQL, unchecked. Accepted 2026-09-05.",
       "accepted_on": "2026-09-05"
+    },
+    {
+      "accepted_on": "2026-10-29",
+      "function": "public.repull_residual_explain",
+      "message": "record \"r\" is not assigned yet",
+      "reason": "plpgsql_check cannot determine the tuple structure of a record populated by FOR ... IN EXECUTE, so every field access on it is reported as indeterminate. Both findings are that same limitation, at the two dynamic loops in this function (the per-amount surplus listing and the combined pairs/restated/net block), not a defect: the function runs and its output is what produced the February collision-unpack analysis. It is a diagnostic read by a human, never by the repricer or the P&L. Rewriting the loops to satisfy the linter would mean giving up dynamic column selection, which is the only reason the function can walk seven adjustment columns generically. Accepted 2026-10-29."
     }
   ]
 }
