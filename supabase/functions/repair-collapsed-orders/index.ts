@@ -286,6 +286,26 @@ Deno.serve(async (req) => {
       // explain, so something else is wrong with the row. Those are skipped and
       // recorded rather than written, so one odd row cannot inflate COGS.
       //
+      // ⚠️ CORRECTION, 2026-11-01. The paragraph above calls the money figure
+      // an upper bound, and that is only HALF true. All 8 rows this gate
+      // skipped were examined against GetOrderItems afterwards and every one
+      // was a genuine under-ingest, with Amazon reporting substantially more
+      // (stored 1 -> 6, 1 -> 8, 1 -> 9, 2 -> 7, 2 -> 10, 3 -> 6, 1 -> 3,
+      // 2 -> 4). So the gate produced 8 false skips and 0 true catches.
+      //
+      // The reason: money / sold_price over-states when sold_price was
+      // collapsed, but UNDER-states when Amazon has only posted PART of the
+      // order's money -- an order still settling has less money against it
+      // than units shipped. The two biases run in opposite directions, so the
+      // figure is an estimate with no guaranteed side, not a bound.
+      //
+      // The gate is kept anyway, and deliberately: its job is to refuse to
+      // write a value it cannot explain, and "refuse and record" was the right
+      // behaviour even though the explanation turned out to be benign. The
+      // follow-up is a human-ordered GetOrderItems pass on the skips, which is
+      // exactly what resolved these 8. Do NOT remove the gate on the strength
+      // of this note; remove the claim that the money figure bounds anything.
+      //
       // A tiny tolerance absorbs rounding in the division.
       const moneyImplied = num(row.implied_units);
       if (moneyImplied > 0 && trueQty > moneyImplied + 0.01) {
