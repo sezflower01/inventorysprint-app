@@ -147,6 +147,22 @@ Deno.serve(async (req) => {
     // rows behind an "unverifiable" count instead of repairing them.
     const marketplace = (body.marketplace ?? null) as string | null;
     const dryRun = body.dry_run !== false; // default true
+    // QUANTITY_ONLY (added 2026-11-01, operator-requested). Writes the
+    // quantity-related columns -- quantity and total_cost -- and leaves
+    // revenue alone even where GetOrderItems disagrees with it.
+    //
+    // Why anyone would want that: on the 2026-11-01 examination the revenue
+    // corrections moved in BOTH directions (24.47 -> 22.97 as well as
+    // 15.56 -> 77.80), so some are price restatements rather than collapse
+    // damage, and the operator chose not to accept them wholesale.
+    //
+    // The cost of it, stated so it is not discovered later: a row written this
+    // way is internally INCONSISTENT -- 10 units at a revenue figure for 2 --
+    // so per-order ROI screens will show a loss where they previously showed a
+    // profit. COGS and the P&L are unaffected, because get_monthly_cogs reads
+    // quantity and the P&L takes revenue from financial_events_cache, not from
+    // here. Default false, so nothing changes for other callers.
+    const quantityOnly = body.quantity_only === true;
     const limit = Math.min(Number(body.limit) || DEFAULT_LIMIT, MAX_LIMIT);
     const orderIds: string[] | null = Array.isArray(body.order_ids) && body.order_ids.length
       ? body.order_ids.map(String)
@@ -373,10 +389,28 @@ Deno.serve(async (req) => {
         // revenue already looked right.
         if (unitCost > 0) patch.total_cost = money(unitCost * trueQty);
       }
-      if (revenueWrong) {
+      if (revenueWrong && !quantityOnly) {
         patch.total_sale_amount = truePrincipal;
         patch.item_price = truePrincipal;
         patch.sold_price = money(truePrincipal / Math.max(trueQty, 1));
+      }
+
+      // With quantityOnly set, a row whose ONLY fault is revenue produces an
+      // empty patch. Writing an empty object would be a no-op UPDATE that still
+      // recorded a 'repaired' verdict -- which would drop the row from the
+      // shortlist for good while having fixed nothing. Skip it instead and
+      // record nothing, so it stays eligible.
+      if (Object.keys(patch).length === 0) {
+        rows.push({
+          order_id: row.order_id,
+          asin: row.asin,
+          mp: rowMp,
+          order_date: row.order_date,
+          skipped: 'revenue_only_and_quantity_only_mode',
+          stored_quantity: storedQty,
+          amazon_quantity: trueQty,
+        });
+        continue;
       }
 
       rows.push({
@@ -429,6 +463,7 @@ Deno.serve(async (req) => {
       ok: true,
       checks_recorded: checksRecorded,
       dry_run: dryRun,
+      quantity_only: quantityOnly,
       checked,
       would_repair: dryRun ? repaired : undefined,
       repaired: dryRun ? 0 : repaired,
