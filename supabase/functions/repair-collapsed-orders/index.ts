@@ -62,6 +62,26 @@ const MAX_LIMIT = 200;
 // That matters beyond this function. The Orders API quota is account-wide and
 // shared with sync-sales-orders, so a sweep that overruns it degrades the sales
 // sync for everything else running at the time. Slow is the correct setting.
+// 2100ms, and an experiment on 2026-10-31 says leave it there.
+//
+// Ten dry-run passes over 285 candidates produced 172 throttles against 448
+// checks. The shape is the interesting part: the first three invocations (~150
+// calls) were CLEAN -- 0 throttles -- and then throttling set in and stayed.
+//
+// The obvious reading was that 2100ms (0.476 calls/s) sits too close to
+// getOrderItems' nominal 0.5/s once sync-sales-orders and fetch-live-orders
+// take their share, so this was raised to 3200ms (0.31/s). THAT DID NOT WORK:
+// the very next pass at 3200ms still throttled 23 of 32. Slowing down by a
+// third changed nothing, which rules out our own call RATE as the binding
+// constraint and points at a longer-window quota that the first 150 calls
+// exhausted. A burst bucket that refills slowly behaves exactly like this.
+//
+// So the delay is back at 2100ms: 3200ms bought no fewer throttles and cost a
+// third of the coverage per invocation (110s/3.2s is ~34 orders against ~52).
+// The honest conclusion is that a large sweep has to be spread over TIME, not
+// slowed down within one invocation -- and the design already handles that,
+// because a throttled row is deliberately not recorded and returns on the next
+// run. Do not raise this again on the reasoning above; it has been tried.
 const PER_CALL_DELAY_MS = 2100;
 // And wait for a token rather than giving up and firing anyway -- an 8s cap
 // meant the gate silently stopped gating under exactly the load it exists for.
@@ -361,7 +381,20 @@ Deno.serve(async (req) => {
       throttled,
       revenue_skipped_non_usd: fxSkipped,
       elapsed_ms: Date.now() - started,
-      rows: rows.slice(0, 40),
+      // Was slice(0, 40). That silently truncated the per-order detail while
+      // the COUNTS stayed complete, so a dry run of 50 reported would_repair:
+      // 50 alongside 40 rows -- and anything computing a total from `rows`
+      // understated it with no indication. On 2026-10-31 six dry-run batches
+      // reported would_repair 217 against 189 rows, making a COGS prediction
+      // of 3,411.13 that was short by 28 orders' worth.
+      //
+      // A cap is still right for a browser-facing response, but it has to be
+      // above MAX_LIMIT (200) so a full-size invocation can never be cut off.
+      // If a caller ever needs more than this, the honest fix is smaller
+      // batches, not a bigger window.
+      rows: rows.slice(0, 250),
+      rows_total: rows.length,
+      rows_truncated: rows.length > 250,
     };
     console.log(`[repair] ${JSON.stringify({ ...summary, rows: rows.length })}`);
     return new Response(JSON.stringify(summary), {
