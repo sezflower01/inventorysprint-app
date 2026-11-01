@@ -225,6 +225,9 @@ Deno.serve(async (req) => {
     }
 
     let checked = 0, repaired = 0, unverifiable = 0, alreadyCorrect = 0, fxSkipped = 0, throttled = 0;
+    // Rows where GetOrderItems reported MORE units than the money signal's
+    // upper bound -- skipped and recorded, never written. See the ceiling gate.
+    let exceedsEstimate = 0;
 
     // Final verdicts, written to collapsed_order_checks so the shortlist stops
     // offering the same rows. Without this the sweep re-verified the same 50
@@ -267,6 +270,39 @@ Deno.serve(async (req) => {
       if (!match) { unverifiable++; recordVerdict(row.id, 'asin_not_in_order'); continue; }
 
       const trueQty = num(match.QuantityOrdered) || 1;
+
+      // ── CEILING GATE (added 2026-11-01) ──────────────────────────────
+      //
+      // The shortlist's implied_units comes from Amazon's posted money divided
+      // by our stored unit price, and it is a proven UPPER BOUND: on the rows
+      // validated 2026-10-31 it ran about 16 pct high, because the collapse
+      // overwrote sold_price as well as quantity, so the denominator is too
+      // small. Amazon confirming FEWER units than the money implies is the
+      // normal, expected case and is not suspicious.
+      //
+      // Amazon confirming MORE units than the money implies is NOT expected,
+      // and it is the direction that matters: it would mean the money-based
+      // shortlist and GetOrderItems disagree in a way the known bias cannot
+      // explain, so something else is wrong with the row. Those are skipped and
+      // recorded rather than written, so one odd row cannot inflate COGS.
+      //
+      // A tiny tolerance absorbs rounding in the division.
+      const moneyImplied = num(row.implied_units);
+      if (moneyImplied > 0 && trueQty > moneyImplied + 0.01) {
+        exceedsEstimate++;
+        recordVerdict(row.id, 'exceeds_money_estimate');
+        rows.push({
+          order_id: row.order_id,
+          asin: row.asin,
+          mp: rowMp,
+          order_date: row.order_date,
+          skipped: 'amazon_exceeds_money_estimate',
+          stored_quantity: num(row.quantity),
+          amazon_quantity: trueQty,
+          money_implied: moneyImplied,
+        });
+        continue;
+      }
       const truePrincipal = money(num(match.ItemPrice?.Amount));
       const itemCurrency = String(match.ItemPrice?.CurrencyCode || '').toUpperCase();
       const storedQty = num(row.quantity) || 0;
@@ -379,6 +415,7 @@ Deno.serve(async (req) => {
       already_correct: alreadyCorrect,
       unverifiable,
       throttled,
+      exceeds_money_estimate: exceedsEstimate,
       revenue_skipped_non_usd: fxSkipped,
       elapsed_ms: Date.now() - started,
       // Was slice(0, 40). That silently truncated the per-order detail while
