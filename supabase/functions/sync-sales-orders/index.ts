@@ -10259,6 +10259,19 @@ async function fetchOrderItemsForRefund(accessToken: string, orderId: string): P
     }
 
     const data = await response.json();
+    // ORDER_ITEMS_IDENTITY_ONLY -- deliberately NOT merged by ASIN.
+    //
+    // The sole caller (the refund path, ~line 9692) reads `.ASIN` and `.Title`
+    // from the matched item to identify a refund whose ASIN is unknown. It
+    // never reads QuantityOrdered, QuantityShipped or any money field, and it
+    // builds nothing keyed on (order_id, asin) from them, so a repeated ASIN
+    // line cannot collapse anything here -- both lines carry the same ASIN and
+    // title, which is all that is taken.
+    //
+    // This marker is what order-items-writers_test.ts checks for. If this
+    // function ever starts returning quantities or money to a caller that
+    // stores them, REMOVE the marker and wrap the array in
+    // mergeOrderItemsByAsin instead -- the test will then require it.
     return data.payload?.OrderItems || null;
   } catch (error) {
     console.error(`💸 Error fetching order items for refund ${orderId}:`, error);

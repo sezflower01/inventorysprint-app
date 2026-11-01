@@ -3,6 +3,7 @@ import { getListingUnitCost, getInventoryUnitCost } from "../_shared/cost-contra
 import { logHealthSignal, HealthSignals } from "../_shared/health-signal.ts";
 import { computeBbOwnEstimateFields, makeSellerIdCache } from "../_shared/bbOwnEstimate.ts";
 import { waitForApiToken } from "../_shared/rate-limiter.ts";
+import { mergeOrderItemsByAsin } from "../_shared/order-items.ts";
 import { storedOrderChannel, orderIsFbm, orderChannelKey } from '../_shared/fulfillment-channel.ts';
 let _currentUserId: string | null = null;
 
@@ -1775,8 +1776,37 @@ Deno.serve(async (req) => {
         
         if (response.ok) {
           const data = await response.json();
-          const items = data?.payload?.OrderItems || [];
+          // Merge repeated lines of the SAME ASIN before anything downstream
+          // reads them. sales_orders is unique on (user_id, order_id, asin)
+          // with no order-item column, so two OrderItems for one ASIN resolve
+          // to the same row and the second upsert REPLACES the first's
+          // quantity, revenue and fees instead of adding to them.
+          //
+          // This is the single build site for orderItemsMap, and all three
+          // consumers read from it (the insert loop, the price refresh, and
+          // the enrichment path), so merging here fixes every one of them.
+          // Doing it at the three read sites instead would leave the next
+          // consumer to rediscover the bug -- which is exactly what happened:
+          // mergeOrderItemsByAsin landed in d51b6d5 (2026-09-09) and was wired
+          // into sync-sales-orders only, so this function kept collapsing.
+          //
+          // Measured 2026-10-31 before this fix: 283 orders in 2026 with 582
+          // units missing, understating COGS by $4,760.79. The monthly shape
+          // was 11-20 affected orders through June then 58 / 58 / 63 in Aug /
+          // Sep / Oct -- it got WORSE after the September fix, because that
+          // fix never reached this writer.
+          //
+          // Single-ASIN orders are returned unchanged (the helper returns the
+          // input array untouched when items.length < 2, and otherwise only
+          // folds lines that share an ASIN), so no single-item behaviour moves.
+          const rawItems = data?.payload?.OrderItems || [];
+          const items = mergeOrderItemsByAsin(rawItems);
           orderItemsMap.set(orderId, items);
+          if (items.length !== rawItems.length) {
+            console.log(
+              `[LIVE_ORDERS] 🔧 COLLAPSE_PREVENTED ${orderId}: ${rawItems.length} OrderItems -> ${items.length} after same-ASIN merge`,
+            );
+          }
           console.log(`[LIVE_ORDERS] Fetched ${items.length} items for order ${orderId}`);
         } else {
           // Non-OK response: don't guess pricing; mark for enrichment later.
@@ -3097,7 +3127,27 @@ Deno.serve(async (req) => {
       
       // MULTI-ITEM ORDER DETECTION for enrichment
       const isMultiItemOrder = items.length > 1 || items.reduce((sum: number, i: any) => sum + parseInt(i.QuantityOrdered || '1', 10), 0) > 1;
-      
+
+      // `items` is already merged by ASIN at the orderItemsMap build site, so
+      // one entry per ASIN carries that ASIN's FULL quantity. Before the merge
+      // this line read the first of several lines for the same ASIN and took
+      // its quantity alone -- the collapse, from the reading side.
+      //
+      // One limitation stays, and it predates the collapse bug: this path
+      // enriches a single row per order, so an order spanning genuinely
+      // DIFFERENT ASINs gets only its first ASIN enriched here. That is not
+      // what the merge fixes and it is not silently passed over -- it is
+      // logged below so it shows up in the function logs rather than only in
+      // the data. The insert loop above handles every ASIN correctly; this is
+      // the enrichment-only path for orders already stored.
+      const distinctAsins = new Set(
+        items.map((i: any) => String(i?.ASIN || '').trim()).filter(Boolean),
+      );
+      if (distinctAsins.size > 1) {
+        console.warn(
+          `[LIVE_ORDERS] ⚠️ MULTI_ASIN_ENRICH_PARTIAL ${orderId}: ${distinctAsins.size} distinct ASINs; enriching only ${items[0]?.ASIN}`,
+        );
+      }
       const item = items[0];
       const asin = item.ASIN || 'UNKNOWN';
       const sku = item.SellerSKU || null;
