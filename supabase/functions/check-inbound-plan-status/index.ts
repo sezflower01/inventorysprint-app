@@ -282,10 +282,73 @@ serve(async (req) => {
       });
     }
 
+    // ── PERSIST AMAZON'S SHIPMENT IDS (added 2026-11-02) ──────────────
+    //
+    // Amazon hands these back on every call and nothing ever stored them.
+    // Measured before this change: amazon_shipment_id was set on 1 of 126
+    // drafts, and shipment_purchase_allocations.shipment_id was NULL on all
+    // 628 rows -- so the builder could not tell a draft from a shipment that
+    // had actually been accepted, and the COG gate had no strong signal to
+    // key on.
+    //
+    // The draft is found by inbound_plan_id, which create-inbound-plan already
+    // writes, so no new linkage is needed. Writes are best-effort: this
+    // function's job is to report plan status, and a bookkeeping failure must
+    // not turn a successful status check into an error. Failures are logged.
+    //
+    // Only the FIRST shipment id goes on the draft, because the column is
+    // singular; the full list is on the allocations, which are per purchase
+    // lot. A plan that splits into several shipments therefore keeps all of
+    // them, and the draft's own column is "one of them" rather than "the only
+    // one" -- worth knowing before anyone treats it as complete.
+    let persisted: { drafts: number; allocations: number } | null = null;
+    if (shipmentIds.length > 0 && user?.id) {
+      try {
+        const { data: draftRows, error: draftErr } = await supabase
+          .from("shipment_builder_drafts")
+          .update({
+            amazon_shipment_id: shipmentIds[0],
+            synced_at: new Date().toISOString(),
+          })
+          .eq("user_id", user.id)
+          .eq("inbound_plan_id", inboundPlanId)
+          .select("draft_id");
+
+        if (draftErr) {
+          console.warn(`[inbound-status] could not store shipment id on draft: ${draftErr.message}`);
+        }
+
+        let allocCount = 0;
+        for (const d of draftRows ?? []) {
+          const { data: allocRows, error: allocErr } = await supabase
+            .from("shipment_purchase_allocations")
+            .update({ shipment_id: shipmentIds[0] })
+            .eq("user_id", user.id)
+            .eq("draft_id", (d as any).draft_id)
+            .is("shipment_id", null)
+            .select("id");
+          if (allocErr) {
+            console.warn(`[inbound-status] could not store shipment id on allocations: ${allocErr.message}`);
+          } else {
+            allocCount += (allocRows ?? []).length;
+          }
+        }
+        persisted = { drafts: (draftRows ?? []).length, allocations: allocCount };
+        if (persisted.drafts > 0 || persisted.allocations > 0) {
+          console.log(
+            `[inbound-status] stored shipment ${shipmentIds[0]} on ${persisted.drafts} draft(s) and ${persisted.allocations} allocation(s) for plan ${inboundPlanId}`,
+          );
+        }
+      } catch (e) {
+        console.warn(`[inbound-status] shipment-id persistence failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+
     return new Response(JSON.stringify({
       success: true,
       inboundPlanId,
       status,
+      persisted,
       sourceAddress: planData?.sourceAddress ?? null,
       destinationMarketplaces: planData?.destinationMarketplaces ?? [],
       shipmentIds,
