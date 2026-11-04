@@ -328,3 +328,16 @@ label.apx-field input, label.apx-field select {
 }
 .apx-note.warn { color: #B45309; }
 .apx-ref { font-size: 10px; color: var(--muted); min-height: 12px; font-variant-numeric: tabular-nums; }
+
+/* The forecast's own price box. The field that drives it sits in another card
+   on Create and does not exist at all on Add Purchase, so the number read as
+   something the panel owned rather than something to change. */
+.apx-inline-num {
+  width: 64px; padding: 1px 4px; margin-left: 2px;
+  font: 600 11px var(--font-sans); font-variant-numeric: tabular-nums;
+  text-align: right; color: var(--fg);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 5px;
+}
+.apx-inline-num:focus { outline: 2px solid var(--primary); outline-offset: 1px; }
+.apx-inline-num::-webkit-outer-spin-button,
+.apx-inline-num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }

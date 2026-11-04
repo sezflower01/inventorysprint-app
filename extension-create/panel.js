@@ -169,6 +169,8 @@ const apxEsc = (s) => String(s).replace(/[&<>"]/g, (c) =>
 /** Forecast blocks on screen, keyed by element id, so they can be redrawn
  *  when a later request supplies the figures their warning row needs. */
 const apxLastCalc = {};
+/** The 12-month actual per-unit profit each block was last drawn with. */
+const apxLastActual = {};
 
 /** One labelled row: description, figure, and an optional working-out column. */
 function apxRow(label, value, alt, { total = false, tone = "", hdr = false } = {}) {
@@ -1508,6 +1510,9 @@ function computeAfterReturns({ price, cog, referralFee, fbaFee, closingFee = 0, 
     floorProfit,
     floorRoi: (floorProfit / cog) * 100,
     ...projectBuy({ units, units12m, cog, afterProfit }),
+    // Kept so the block's own price box can recompute without reaching for the
+    // form, which is in a different card on Create and absent on Add Purchase.
+    inputs: { price, cog, referralFee, fbaFee, closingFee, stats, units, units12m },
   };
 }
 
@@ -1550,6 +1555,35 @@ function projectBuy({ units, units12m, cog, afterProfit }) {
  * that gap is the most decision-relevant thing on the screen and it was not
  * displayed anywhere -- the two numbers sat in different cards.
  */
+/**
+ * Re-run a forecast block at a price typed into the block itself.
+ *
+ * The sell price has always driven this forecast, but the field lived in the
+ * Listing details card -- a different card on Create, and not present at all
+ * on Add Purchase -- so the number read as something the panel owned rather
+ * than something to change. The box now sits in the block's own header.
+ *
+ * Only the referral fee moves with price. FBA and closing fees are fixed
+ * per-unit amounts and must not be rescaled -- the same rule feesAtPrice() and
+ * the analyser's computeWebStyleRoi() both follow.
+ */
+function repriceAfterReturns(elId, newPrice) {
+  const prev = apxLastCalc[elId];
+  if (!prev || !prev.inputs) return;
+  const i = prev.inputs;
+  const price = Number(newPrice);
+  if (!(price > 0)) return;
+  const rate = i.price > 0 && i.referralFee > 0
+    ? Math.min(0.45, i.referralFee / i.price) : 0.15;
+  renderAfterReturns(elId, computeAfterReturns({
+    ...i, price, referralFee: price * rate,
+  }), apxLastActual[elId]);
+  const sp = $("apx-sellprice");
+  if (sp && elId === "apx-after-returns" && Number(sp.value) !== price) {
+    sp.value = price.toFixed(2);
+  }
+}
+
 /** Redraw every forecast block already on screen, from the calc it was drawn
  *  with. Needed because the 12-month actuals that drive the warning row arrive
  *  on their own request and may land after the block has rendered. */
@@ -1563,17 +1597,25 @@ function renderAfterReturns(elId, calc, actualPerUnit = null) {
   const el = $(elId);
   if (!el) return;
   apxLastCalc[elId] = calc;
+  apxLastActual[elId] = actualPerUnit;
   if (!calc || !(calc.returned > 0)) { el.textContent = ""; el.className = "apx-status"; el.title = ""; return; }
   const pct = (n) => `${n.toFixed(0)}%`;
   const rateTxt = `${(calc.rate * 100).toFixed(1)}%`;
 
+  // Typing re-renders the block, which would otherwise destroy the box
+  // mid-keystroke, so the caret is captured and restored around the redraw.
+  const act = document.activeElement;
+  const keepFocus = !!(act && act.id === elId + "-price");
+  const caret = keepFocus ? act.selectionStart : null;
+
   let html = `<div class="apx-block-h"><span>If you buy it again</span>` +
-    `<span class="sub">at ${apxMoney(calc.price)} each</span></div>`;
+    `<span class="sub">sell at $<input id="${elId}-price" class="apx-inline-num" ` +
+    `type="number" step="0.01" min="0" value="${calc.price.toFixed(2)}"></span></div>`;
 
   // Show the subtraction, not just its answer. "Before returns $5.61" with no
   // visible sell price or cost above it is a number the seller has to take on
   // trust, which is what made this block unclear.
-  html += apxRow("Sell price", apxMoney(calc.price), "what you typed");
+  html += apxRow("Sell price", apxMoney(calc.price), "edit it above");
   if (calc.fees > 0) {
     const bits = [`referral ${apxMoney(calc.referralFee)}`, `FBA ${apxMoney(calc.fbaFee)}`];
     if (calc.closingFee > 0) bits.push(`closing ${apxMoney(calc.closingFee)}`);
@@ -1638,6 +1680,15 @@ function renderAfterReturns(elId, calc, actualPerUnit = null) {
   el.innerHTML = html;
   el.className = "apx-block";
   el.title = "";
+
+  const box = $(elId + "-price");
+  if (box) {
+    box.addEventListener("input", () => repriceAfterReturns(elId, box.value));
+    if (keepFocus) {
+      box.focus();
+      try { box.setSelectionRange(caret, caret); } catch (_) { /* number inputs may refuse */ }
+    }
+  }
 }
 
 async function countSellers({ asin, marketplace, createdListingId = null, reason = 'recheck' }) {
