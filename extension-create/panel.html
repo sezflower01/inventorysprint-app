@@ -87,8 +87,13 @@
               <label class="apx-field">Units
                 <input id="apx-units" type="number" min="1" value="1" />
               </label>
+              <!-- This field has always driven the whole forecast below, but it
+                   arrives prefilled with Amazon's price, so it read as a
+                   readout rather than something to change. The reference line
+                   says what Amazon is at, so a typed price is visibly yours. -->
               <label class="apx-field">Sell price ($)
                 <input id="apx-sellprice" type="number" step="0.01" min="0" placeholder="0.00" />
+                <span id="apx-price-ref" class="apx-ref"></span>
               </label>
             </div>
             <div class="apx-grid3" style="margin-top:8px">

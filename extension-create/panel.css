@@ -280,3 +280,51 @@ label.apx-field input, label.apx-field select {
 }
 .apx-p-sup-row button:hover { color: var(--fg); }
 .apx-p-sup-row button:disabled { opacity: .4; cursor: default; }
+
+/* ─── Categorised money blocks (2026-11-04) ──────────────────────────────────
+ * Three one-line summaries used to carry these figures: all-time and 12-month
+ * return rates, a forecast at the typed price, and the money actually earned --
+ * each a run-on sentence, in a different card, with nothing saying which window
+ * it covered or whether it was history or a forecast. The seller could not tell
+ * them apart, which is the whole reason they exist.
+ *
+ * So: two labelled blocks. One for what happened, one for what would happen,
+ * windows as COLUMNS so they cannot be confused, and the forecast's before ->
+ * drag -> after shown as a chain instead of hidden in a parenthesis.
+ * .apx-status centres its text, which is wrong for aligned figures -- these set
+ * text-align:left and tabular-nums so the columns line up.
+ */
+.apx-block {
+  margin-top: 8px; padding: 8px; text-align: left;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg-2);
+}
+.apx-block-h {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 8px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 6px;
+}
+.apx-block-h .sub {
+  font-weight: 500; font-size: 10px; letter-spacing: 0; text-transform: none;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.apx-row {
+  display: grid; grid-template-columns: 1fr auto auto; gap: 8px;
+  align-items: baseline; font-size: 11px; padding: 2px 0;
+}
+.apx-row .lbl { color: var(--muted); }
+.apx-row .num { font-variant-numeric: tabular-nums; font-weight: 600; text-align: right; }
+.apx-row .alt { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 10px; text-align: right; }
+.apx-row .num.good { color: #059669; }
+.apx-row .num.bad  { color: #DC2626; }
+.apx-row.total { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 5px; }
+.apx-row.total .lbl { color: var(--fg); font-weight: 600; }
+.apx-row.hdr .lbl, .apx-row.hdr .num, .apx-row.hdr .alt {
+  font-size: 10px; font-weight: 600; color: var(--muted);
+  letter-spacing: 0.04em; text-transform: uppercase;
+}
+.apx-note {
+  font-size: 10px; line-height: 1.45; margin-top: 6px; padding-top: 6px;
+  border-top: 1px solid var(--line); color: var(--muted);
+}
+.apx-note.warn { color: #B45309; }
+.apx-ref { font-size: 10px; color: var(--muted); min-height: 12px; font-variant-numeric: tabular-nums; }

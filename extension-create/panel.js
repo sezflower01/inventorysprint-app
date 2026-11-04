@@ -161,6 +161,22 @@ function generateSKU() {
 }
 
 const $ = (id) => document.getElementById(id);
+
+const apxMoney = (n) => `${Number(n) < 0 ? "-" : ""}$${Math.abs(Number(n) || 0).toFixed(2)}`;
+const apxEsc = (s) => String(s).replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+/** Forecast blocks on screen, keyed by element id, so they can be redrawn
+ *  when a later request supplies the figures their warning row needs. */
+const apxLastCalc = {};
+
+/** One labelled row: description, figure, and an optional working-out column. */
+function apxRow(label, value, alt, { total = false, tone = "", hdr = false } = {}) {
+  return `<div class="apx-row${total ? " total" : ""}${hdr ? " hdr" : ""}">` +
+    `<div class="lbl">${apxEsc(label)}</div>` +
+    `<div class="num${tone ? " " + tone : ""}">${apxEsc(value)}</div>` +
+    `<div class="alt">${alt ? apxEsc(alt) : ""}</div></div>`;
+}
 // ⚠️ THREE THINGS THIS HAS TO HANDLE. It previously did none of them, while
 // the analyzer panel's own bg() has handled all three for a while.
 //
@@ -286,6 +302,8 @@ const state = {
   signedIn: false,
   marketplaces: [],
   primaryMkt: null,
+  returnStats: null,
+  asinHistory: null,
 };
 
 /* ─── Drag — host content.js owns mouse tracking via overlay ─── */
@@ -343,7 +361,11 @@ window.addEventListener("message", (e) => {
       newListing.bypass = false;
       clearSellerCount();
       state.returnStats = null;
+      state.asinHistory = null;
       void loadReturnStats(d.asin, "apx-returns", (st) => { state.returnStats = st; recalcRoi(); });
+      // Needed for the forecast's history-vs-forecast warning. No element on
+      // this tab, so it only populates state.
+      void loadAsinHistory(d.asin, null);
     }
   }
   if (d.type === "SOURCING_SESSION" && d.session) {
@@ -589,8 +611,10 @@ $("apx-fetch").addEventListener("click", async () => {
   setStatus("apx-fetch-status", "");
   renderProduct();
   state.returnStats = null;
+  state.asinHistory = null;
   void loadFeeBasis(asin);
   void loadReturnStats(asin, "apx-returns", (d) => { state.returnStats = d; recalcRoi(); });
+  void loadAsinHistory(asin, null);
   $("apx-form").classList.remove("hidden");
   if (!$("apx-sku").value) $("apx-sku").value = generateSKU();
   if (state.product.price && !$("apx-sellprice").value) $("apx-sellprice").value = Number(state.product.price).toFixed(2);
@@ -753,12 +777,23 @@ function recalcRoi() {
       : "";
   }
   renderFeeBasisWarning();
+  // Say what Amazon is at, so a price the seller typed is visibly theirs rather
+  // than looking like a value the panel fetched and owns.
+  const refEl = $("apx-price-ref");
+  if (refEl) {
+    const amazon = Number(state.product?.price) || 0;
+    refEl.textContent = amazon > 0
+      ? (Math.abs(price - amazon) < 0.005
+          ? `Amazon: $${amazon.toFixed(2)}`
+          : `Amazon: $${amazon.toFixed(2)} · yours ${price > amazon ? "+" : "-"}$${Math.abs(price - amazon).toFixed(2)}`)
+      : "";
+  }
   // Same figures, discounted by how often this product comes back. Recomputed
   // here rather than once on fetch, so it tracks the cost the seller is typing.
   renderAfterReturns("apx-after-returns", computeAfterReturns({
     price, cog, referralFee, fbaFee, closingFee: closing,
     stats: state.returnStats,
-  }));
+  }), actualNetPerUnit());
 }
 
 /**
@@ -1078,6 +1113,81 @@ function clearSellerCount() {
   if (noteEl) { noteEl.textContent = "Press Recheck to count the sellers on this listing."; noteEl.className = "apx-status"; }
 }
 
+/**
+ * "Your return history" — units sold against units that came back, with the
+ * 12-month and all-time windows as COLUMNS. Split out of loadReturnStats so the
+ * rendering can be exercised without a network round trip.
+ */
+function renderReturnStats(el, d) {
+  if (!el || !d) return;
+  const sold = Number(d.units_sold) || 0;
+  const ret = Number(d.units_returned) || 0;
+  const rate = Number(d.return_rate_pct);
+  const sold12 = Number(d.units_sold_12m) || 0;
+  const ret12 = Number(d.units_returned_12m) || 0;
+
+  if (ret === 0) {
+    el.textContent = `No returns — ${sold} unit${sold === 1 ? "" : "s"} sold.`;
+    el.className = "apx-status ok";
+    el.title = "";
+    return;
+  }
+  const approx = rate > 100 ? "~" : "";
+  const rate12 = sold12 > 0 ? (100 * ret12) / sold12 : null;
+  // The rate that DECIDES must be the rate that is SHOWN. computeAfterReturns
+  // switches to the 12-month window once it has 20+ units, so the colour has
+  // to switch with it -- this line used to go red on an all-time rate while
+  // every figure beneath it was computed from a much better recent one.
+  const useRecent = sold12 >= 20 && rate12 != null;
+
+  let html = `<div class="apx-block-h"><span>Your return history</span>` +
+    `<span class="sub">your own orders</span></div>`;
+  html += apxRow("", useRecent ? "last 12 months" : "all time",
+    useRecent ? "all time" : "", { hdr: true });
+  if (useRecent) {
+    html += apxRow("Units sold", String(sold12), String(sold));
+    html += apxRow("Came back", `${ret12} (${rate12.toFixed(1)}%)`, `${ret} (${approx}${isFinite(rate) ? rate : "?"}%)`,
+      { tone: rate12 >= 25 ? "bad" : rate12 < 10 ? "good" : "" });
+  } else {
+    html += apxRow("Units sold", String(sold), "");
+    html += apxRow("Came back", `${ret} (${approx}${isFinite(rate) ? rate : "?"}%)`, "",
+      { tone: rate >= 25 ? "bad" : rate < 10 ? "good" : "" });
+  }
+  if (d.last_return_date) {
+    // formatDateForMarket parses the string instead of building a Date:
+    // new Date("2026-06-18") is UTC midnight, which toLocaleDateString()
+    // renders as the 17th in every timezone west of Greenwich. This panel
+    // showed exactly that off-by-one before.
+    html += apxRow("Last one refunded",
+      formatDateForMarket(d.last_return_date, marketplaceCodeForRow()), "");
+  }
+  const notes = [];
+  if (useRecent) {
+    notes.push(`The ${rate12.toFixed(1)}% recent rate is the one used in the forecast — ` +
+      `it has ${sold12} units behind it, so it beats the all-time figure.`);
+  } else {
+    notes.push(`Under 20 units in the last 12 months, so the all-time rate is used ` +
+      `in the forecast rather than a recent one built on too few sales.`);
+  }
+  if (d.last_return_date) {
+    // Honest label: the view takes max(order_date) over orders that have a
+    // return against them, so for a normally refunded order this is the day
+    // it SOLD, not the day it came back. Calling it "last return" implied a
+    // refund date the data does not hold.
+    notes.push("“Last one refunded” is the date of the most recent sale that was refunded, " +
+      "not the date the refund posted — Amazon's refund dates are not stored per ASIN.");
+  }
+  if (rate > 100) {
+    notes.push("More units came back than the orders held for this ASIN — its earlier sales " +
+      "predate the stored order history, so the all-time rate is approximate.");
+  }
+  html += `<div class="apx-note">${notes.map(apxEsc).join(" ")}</div>`;
+
+  el.innerHTML = html;
+  el.className = "apx-block";
+  el.title = "";
+}
+
 /* ─── Returns on this ASIN (2026-09-27) ─────────────────────────────────────
  * "How many came back" is the number the seller wants before buying more, and
  * it is the one thing Keepa and the Amazon page cannot tell them -- it is
@@ -1108,27 +1218,7 @@ async function loadReturnStats(asin, elId = "apx-returns", onStats = null) {
       return;
     }
     if (onStats) onStats(d);
-    const sold = Number(d.units_sold) || 0;
-    const ret = Number(d.units_returned) || 0;
-    const rate = Number(d.return_rate_pct);
-    const sold12 = Number(d.units_sold_12m) || 0;
-    const ret12 = Number(d.units_returned_12m) || 0;
-
-    if (ret === 0) {
-      el.textContent = `No returns — ${sold} unit${sold === 1 ? "" : "s"} sold.`;
-      el.className = "apx-status ok";
-      return;
-    }
-    const approx = rate > 100 ? "~" : "";
-    const recent = sold12 > 0 ? ` · last 12 months ${ret12}/${sold12}` : "";
-    const last = d.last_return_date ? ` · last return ${new Date(d.last_return_date).toLocaleDateString()}` : "";
-    el.textContent = `Returns: ${ret} of ${sold} sold (${approx}${isFinite(rate) ? rate : "?"}%)${recent}${last}`;
-    // 10% is the line where a return rate starts eating the margin on a
-    // typical arbitrage buy; above 25% it usually decides the purchase.
-    el.className = rate >= 25 ? "apx-status err" : rate >= 10 ? "apx-status" : "apx-status ok";
-    el.title = rate > 100
-      ? "More units came back than the orders we hold for this ASIN — its earlier sales predate the stored order history, so treat the rate as approximate."
-      : "From your own orders (refunded quantity ÷ units sold).";
+    renderReturnStats(el, d);
   } catch (e) {
     el.textContent = `Return history unavailable: ${e.message}`;
     el.className = "apx-status";
@@ -1245,25 +1335,51 @@ function renderPurchaseSellers(data) {
   }
 }
 
-async function loadAsinHistory(asin) {
-  const el = $("apx-asin-history");
-  if (!el) return;
-  el.className = "apx-status";
-  el.textContent = "Checking what this ASIN earned…";
-  el.title = "";
+/**
+ * What this ASIN really earned, over the last 12 months.
+ *
+ * `elId` may be null: the Create tab needs the figure for the forecast's
+ * history-vs-forecast warning but has no element of its own to draw it in, and
+ * writing into the Add Purchase card from there would overwrite a different
+ * ASIN's result. The number is cached on `state` either way.
+ */
+async function loadAsinHistory(asin, elId = "apx-asin-history") {
+  const el = elId ? $(elId) : null;
+  if (elId && !el) return;
+  state.asinHistory = null;
+  if (el) {
+    el.className = "apx-status";
+    el.textContent = "Checking what this ASIN earned…";
+    el.title = "";
+  }
   try {
     const r = await bg("INVSPRNT_GET_ASIN_PROFIT", { asin });
     if (!r?.ok) throw new Error(r?.error || "lookup failed");
-    renderAsinHistory(r.data, r.window);
+    state.asinHistory = r.data || null;
+    if (el) renderAsinHistory(r.data, r.window, elId);
+    // The forecast's warning row depends on this, so redraw once it lands --
+    // both the Create block (via recalcRoi) and Add Purchase's own.
+    recalcRoi();
+    refreshAfterReturnsBlocks();
   } catch (e) {
     // A failed lookup must not read as "this ASIN made nothing".
-    el.className = "apx-status";
-    el.textContent = `Past performance unavailable (${String(e?.message || e).slice(0, 60)})`;
+    if (el) {
+      el.className = "apx-status";
+      el.textContent = `Past performance unavailable (${String(e?.message || e).slice(0, 60)})`;
+    }
   }
 }
 
-function renderAsinHistory(row, window) {
-  const el = $("apx-asin-history");
+/** Net profit per unit actually realised in the last 12 months, or null. */
+function actualNetPerUnit() {
+  const row = state.asinHistory;
+  if (!row || !(Number(row.units_sold) > 0)) return null;
+  const v = Number(row.net_per_unit);
+  return Number.isFinite(v) ? v : null;
+}
+
+function renderAsinHistory(row, window, elId = "apx-asin-history") {
+  const el = $(elId);
   if (!el) return;
   if (!row || !Number(row.units_sold)) {
     el.textContent = "No sales history for this ASIN in the last 12 months.";
@@ -1271,20 +1387,40 @@ function renderAsinHistory(row, window) {
     el.title = "";
     return;
   }
-  const money = (n) => `${Number(n) < 0 ? "-" : ""}$${Math.abs(Number(n) || 0).toFixed(2)}`;
+  const money = apxMoney;
   const net = Number(row.net_profit) || 0;
   const roi = Number(row.net_roi_pct) || 0;
 
-  el.textContent =
-    `Last 12 months: ${row.units_sold} sold · net ${money(net)} · ROI ${roi.toFixed(0)}%` +
-    (Number(row.units_returned) > 0
-      ? ` · ${row.units_returned} returned (${Number(row.return_rate_pct).toFixed(1)}%)`
-      : " · no returns");
+  // The money that actually happened, as a chain down to net -- the same shape
+  // as the forecast block, so the two can be read against each other. All of
+  // this was previously hover-only, which is why the 22c/unit reality sat
+  // invisible underneath a healthy-looking forecast.
+  let html = `<div class="apx-block-h"><span>What it actually earned</span>` +
+    `<span class="sub">${apxEsc(window?.start || "")} → ${apxEsc(window?.end || "")}</span></div>`;
+  html += apxRow("Units sold", String(row.units_sold), `${row.orders} orders`);
+  html += apxRow("Revenue", money(row.revenue), "");
+  html += apxRow("Amazon fees", `-${money(row.fees)}`,
+    Number(row.label_fees) > 0 ? `+ labels ${money(row.label_fees)}` : "");
+  html += apxRow("Cost of goods", `-${money(row.cogs)}`, `${money(row.avg_unit_cost)}/unit`);
+  html += apxRow("Gross", money(row.gross_profit),
+    `${money(row.gross_per_unit)}/unit · ${Number(row.gross_roi_pct).toFixed(0)}% ROI`);
+  if (Number(row.units_returned) > 0) {
+    html += apxRow("Returns", `-${money(row.return_cost)}`,
+      `${row.units_returned} back (${Number(row.return_rate_pct).toFixed(1)}%)`);
+  }
+  html += apxRow("Net earned", money(net), `${money(row.net_per_unit)}/unit · ${roi.toFixed(0)}% ROI`,
+    { total: true, tone: net <= 0 ? "bad" : "good" });
+  html += apxRow("Floor if written off", money(row.net_if_written_off),
+    `${Number(row.roi_if_written_off).toFixed(0)}% ROI`);
 
-  // Red only when it genuinely lost money. A thin margin is amber-worthy but
-  // this panel has two classes, so thin reads as neutral rather than as a
-  // failure -- the number itself is right there to judge.
-  el.className = net <= 0 ? "apx-status err" : "apx-status ok";
+  const notes = ["This is money already banked, not an estimate — the figure to judge any forecast against."];
+  if (Number(row.excluded_zero_rows) > 0) {
+    notes.push(`${row.excluded_zero_rows} order(s) excluded: recorded with no sale price while ` +
+      `charged ${money(row.excluded_zero_fees)} of fees. Counting them would understate this ASIN.`);
+  }
+  html += `<div class="apx-note">${notes.map(apxEsc).join(" ")}</div>`;
+  el.innerHTML = html;
+  el.className = "apx-block";
 
   const parts = [
     `${window?.start || ""} to ${window?.end || ""}`,
@@ -1327,33 +1463,99 @@ function computeAfterReturns({ price, cog, referralFee, fbaFee, closingFee = 0, 
   const refundAdmin = Math.min(5, 0.2 * (Number(referralFee) || 0));
   const lossPerReturn = (Number(fbaFee) || 0) + refundAdmin;
   const afterProfit = profit - rate * lossPerReturn;
+  // The floor, when the unit cannot go back on the shelf: the same fees PLUS
+  // the goods. Opened beauty, food and liquids land here, and it was previously
+  // only in the hover text -- which is where a number nobody reads goes.
+  const lossIfWrittenOff = lossPerReturn + cog;
+  const floorProfit = profit - rate * lossIfWrittenOff;
   return {
     rate,
     window: useRecent ? "last 12 months" : "all time",
     sold,
     returned,
+    price,
+    cog,
+    fees,
+    referralFee: Number(referralFee) || 0,
+    fbaFee: Number(fbaFee) || 0,
+    closingFee: Number(closingFee) || 0,
     profit,
     roi: (profit / cog) * 100,
     afterProfit,
     afterRoi: (afterProfit / cog) * 100,
     lossPerReturn,
+    refundAdmin,
+    floorProfit,
+    floorRoi: (floorProfit / cog) * 100,
   };
 }
 
-function renderAfterReturns(elId, calc) {
+/**
+ * "If you buy it again" — the forecast, at the price in the Sell price box.
+ *
+ * Shown as a chain rather than a sentence: fees, profit before returns, the
+ * expected return drag, the result, and the floor if returns cannot be resold.
+ * The drag row shows its own arithmetic (rate x cost per return) because the
+ * previous single line gave the answer with no way to check it.
+ *
+ * `actualPerUnit` is what this ASIN really earned per unit over the last 12
+ * months. When a forecast promises several times what the history delivered,
+ * that gap is the most decision-relevant thing on the screen and it was not
+ * displayed anywhere -- the two numbers sat in different cards.
+ */
+/** Redraw every forecast block already on screen, from the calc it was drawn
+ *  with. Needed because the 12-month actuals that drive the warning row arrive
+ *  on their own request and may land after the block has rendered. */
+function refreshAfterReturnsBlocks() {
+  for (const id of Object.keys(apxLastCalc)) {
+    if ($(id)) renderAfterReturns(id, apxLastCalc[id], actualNetPerUnit());
+  }
+}
+
+function renderAfterReturns(elId, calc, actualPerUnit = null) {
   const el = $(elId);
   if (!el) return;
-  if (!calc || !(calc.returned > 0)) { el.textContent = ""; return; }
-  const money = (n) => `${n < 0 ? "-" : ""}$${Math.abs(n).toFixed(2)}`;
-  el.textContent =
-    `After returns: ${money(calc.afterProfit)}/unit · ROI ${calc.afterRoi.toFixed(0)}% ` +
-    `(from ${money(calc.profit)} · ${calc.roi.toFixed(0)}%, ${(calc.rate * 100).toFixed(1)}% returned, ${calc.window})`;
-  el.className = calc.afterProfit <= 0 ? "apx-status err" : "apx-status";
-  el.title =
-    `Each return costs ${money(calc.lossPerReturn)} — the FBA fulfilment fee, which Amazon does not refund, ` +
-    `plus the refund administration fee (20% of the referral fee, capped at $5). ` +
-    `Assumes the returned unit is sellable again. For opened beauty, food or liquids it will not be, ` +
-    `and the real figure is lower.`;
+  apxLastCalc[elId] = calc;
+  if (!calc || !(calc.returned > 0)) { el.textContent = ""; el.className = "apx-status"; el.title = ""; return; }
+  const pct = (n) => `${n.toFixed(0)}%`;
+  const rateTxt = `${(calc.rate * 100).toFixed(1)}%`;
+
+  let html = `<div class="apx-block-h"><span>If you buy it again</span>` +
+    `<span class="sub">your price ${apxMoney(calc.price)} · cost ${apxMoney(calc.cog)}</span></div>`;
+
+  if (calc.fees > 0) {
+    const bits = [`referral ${apxMoney(calc.referralFee)}`, `FBA ${apxMoney(calc.fbaFee)}`];
+    if (calc.closingFee > 0) bits.push(`closing ${apxMoney(calc.closingFee)}`);
+    html += apxRow("Amazon fees", `-${apxMoney(calc.fees)}`, bits.join(" + "));
+  }
+  html += apxRow("Before returns", `${apxMoney(calc.profit)}/unit`, pct(calc.roi),
+    { tone: calc.profit <= 0 ? "bad" : "" });
+  html += apxRow("Return drag", `-${apxMoney(calc.rate * calc.lossPerReturn)}/unit`,
+    `${rateTxt} × ${apxMoney(calc.lossPerReturn)} each`);
+  html += apxRow("After returns", `${apxMoney(calc.afterProfit)}/unit`, pct(calc.afterRoi),
+    { total: true, tone: calc.afterProfit <= 0 ? "bad" : "good" });
+  html += apxRow("If unsellable", `${apxMoney(calc.floorProfit)}/unit`, pct(calc.floorRoi),
+    { tone: calc.floorProfit <= 0 ? "bad" : "" });
+
+  // Only worth saying when the gap is big enough to change a decision. Twice
+  // the history, and at least 50c of difference so pennies do not trigger it.
+  const actual = Number(actualPerUnit);
+  if (Number.isFinite(actual) && calc.afterProfit > 0 &&
+      calc.afterProfit - actual > 0.5 && calc.afterProfit > actual * 2) {
+    html += `<div class="apx-note warn">⚠ This ASIN actually earned ` +
+      `${apxEsc(apxMoney(actual))}/unit over the last 12 months, against the ` +
+      `${apxEsc(apxMoney(calc.afterProfit))}/unit forecast above. The forecast uses the price ` +
+      `you typed — check you can really sell at it.</div>`;
+  }
+
+  html += `<div class="apx-note">Return rate from your own orders, ${apxEsc(calc.window)} ` +
+    `(${calc.returned} of ${calc.sold} units). Each return costs the FBA fee Amazon keeps ` +
+    `(${apxEsc(apxMoney(calc.fbaFee))}) plus refund admin (${apxEsc(apxMoney(calc.refundAdmin))}) — ` +
+    `not the refunded price, because the unit comes back.</div>`;
+
+  el.innerHTML = html;
+  el.className = "apx-block";
+  el.title = "";
 }
 
 async function countSellers({ asin, marketplace, createdListingId = null, reason = 'recheck' }) {
@@ -1860,7 +2062,7 @@ function renderReplenish(d, asin = null) {
       // No fees means no honest profit line -- better blank than a number
       // computed from a 15% guess.
       if (!(referralFee > 0) && !(fbaFee > 0)) { renderAfterReturns("apx-p-after", null); return; }
-      renderAfterReturns("apx-p-after", computeAfterReturns({ price, cog, referralFee, fbaFee, stats }));
+      renderAfterReturns("apx-p-after", computeAfterReturns({ price, cog, referralFee, fbaFee, stats }), actualNetPerUnit());
     });
   }
 }
