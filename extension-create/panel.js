@@ -790,9 +790,15 @@ function recalcRoi() {
   }
   // Same figures, discounted by how often this product comes back. Recomputed
   // here rather than once on fetch, so it tracks the cost the seller is typing.
+  // `units` is the purchase lot size already typed into Units, so the buy
+  // projection needs no extra field. Velocity prefers the profit RPC's own
+  // 12-month count so the two blocks cannot disagree about the same window.
   renderAfterReturns("apx-after-returns", computeAfterReturns({
     price, cog, referralFee, fbaFee, closingFee: closing,
     stats: state.returnStats,
+    units,
+    units12m: Number(state.asinHistory?.units_sold)
+      || Number(state.returnStats?.units_sold_12m) || null,
   }), actualNetPerUnit());
 }
 
@@ -1443,7 +1449,8 @@ function renderAsinHistory(row, window, elId = "apx-asin-history") {
   el.title = parts.join("\n");
 }
 
-function computeAfterReturns({ price, cog, referralFee, fbaFee, closingFee = 0, stats }) {
+function computeAfterReturns({ price, cog, referralFee, fbaFee, closingFee = 0, stats,
+                               units = 1, units12m = null }) {
   if (!(price > 0) || !(cog > 0) || !stats) return null;
   const sold12 = Number(stats.units_sold_12m) || 0;
   const ret12 = Number(stats.units_returned_12m) || 0;
@@ -1500,7 +1507,34 @@ function computeAfterReturns({ price, cog, referralFee, fbaFee, closingFee = 0, 
     refundAdmin,
     floorProfit,
     floorRoi: (floorProfit / cog) * 100,
+    ...projectBuy({ units, units12m, cog, afterProfit }),
   };
+}
+
+/**
+ * Per-unit margin is only half the decision. The other half is how long the
+ * money stays on a shelf.
+ *
+ * A 64% ROI reads like a good buy until you notice the ASIN sells 82 units a
+ * year and the purchase is 100 of them -- that is 15 months of capital for one
+ * turn, and it loses to a 25% ROI that clears in six weeks. Amazon's long-term
+ * storage surcharges start at 181 days, so a slow pile also costs more than
+ * this model charges it.
+ *
+ * `perYear` divides the whole return by the time taken, which is conservative:
+ * cash actually comes back gradually as units sell, so a real portfolio does a
+ * little better. It is the right comparison between two candidate buys.
+ */
+function projectBuy({ units, units12m, cog, afterProfit }) {
+  const buyUnits = Math.max(1, Math.round(Number(units) || 1));
+  const velocity = Number(units12m) > 0 ? Number(units12m) : null;
+  const cash = cog * buyUnits;
+  const totalAfter = afterProfit * buyUnits;
+  const monthsToClear = velocity ? (buyUnits / velocity) * 12 : null;
+  const perYear = (monthsToClear > 0 && cash > 0)
+    ? (totalAfter / cash) * (12 / monthsToClear) * 100
+    : null;
+  return { buyUnits, velocity, cash, totalAfter, monthsToClear, perYear };
 }
 
 /**
@@ -1534,37 +1568,72 @@ function renderAfterReturns(elId, calc, actualPerUnit = null) {
   const rateTxt = `${(calc.rate * 100).toFixed(1)}%`;
 
   let html = `<div class="apx-block-h"><span>If you buy it again</span>` +
-    `<span class="sub">your price ${apxMoney(calc.price)} · cost ${apxMoney(calc.cog)}</span></div>`;
+    `<span class="sub">at ${apxMoney(calc.price)} each</span></div>`;
 
+  // Show the subtraction, not just its answer. "Before returns $5.61" with no
+  // visible sell price or cost above it is a number the seller has to take on
+  // trust, which is what made this block unclear.
+  html += apxRow("Sell price", apxMoney(calc.price), "what you typed");
   if (calc.fees > 0) {
     const bits = [`referral ${apxMoney(calc.referralFee)}`, `FBA ${apxMoney(calc.fbaFee)}`];
     if (calc.closingFee > 0) bits.push(`closing ${apxMoney(calc.closingFee)}`);
     html += apxRow("Amazon fees", `-${apxMoney(calc.fees)}`, bits.join(" + "));
   }
-  html += apxRow("Before returns", `${apxMoney(calc.profit)}/unit`, pct(calc.roi),
-    { tone: calc.profit <= 0 ? "bad" : "" });
-  html += apxRow("Return drag", `-${apxMoney(calc.rate * calc.lossPerReturn)}/unit`,
+  html += apxRow("What it cost you", `-${apxMoney(calc.cog)}`, "per unit");
+  html += apxRow("Profit before returns", `${apxMoney(calc.profit)}/unit`, `${pct(calc.roi)} ROI`,
+    { total: true, tone: calc.profit <= 0 ? "bad" : "" });
+  html += apxRow("Cost of returns", `-${apxMoney(calc.rate * calc.lossPerReturn)}/unit`,
     `${rateTxt} × ${apxMoney(calc.lossPerReturn)} each`);
-  html += apxRow("After returns", `${apxMoney(calc.afterProfit)}/unit`, pct(calc.afterRoi),
+  html += apxRow("Profit per unit", `${apxMoney(calc.afterProfit)}/unit`, `${pct(calc.afterRoi)} ROI`,
     { total: true, tone: calc.afterProfit <= 0 ? "bad" : "good" });
-  html += apxRow("If unsellable", `${apxMoney(calc.floorProfit)}/unit`, pct(calc.floorRoi),
+  html += apxRow("Worst case, returns binned", `${apxMoney(calc.floorProfit)}/unit`, `${pct(calc.floorRoi)} ROI`,
     { tone: calc.floorProfit <= 0 ? "bad" : "" });
 
-  // Only worth saying when the gap is big enough to change a decision. Twice
+  // How long the money sits there. Per-unit margin alone cannot answer whether
+  // a given quantity is a sensible buy, which is the question actually being
+  // asked when someone opens this panel.
+  if (calc.velocity && calc.buyUnits >= 2) {
+    const months = calc.monthsToClear;
+    html += `<div class="apx-block-h" style="margin-top:10px"><span>Buying ${calc.buyUnits} units</span>` +
+      `<span class="sub">at your selling rate</span></div>`;
+    html += apxRow("You sold last 12 months", `${calc.velocity} units`, "your own orders");
+    html += apxRow("Time to clear " + calc.buyUnits, `${months < 1 ? "<1" : months.toFixed(1)} months`,
+      `${(calc.velocity / 12).toFixed(1)}/month`, { tone: months > 12 ? "bad" : "" });
+    html += apxRow("Cash tied up", apxMoney(calc.cash), "");
+    html += apxRow("Total profit", `${calc.totalAfter >= 0 ? "+" : ""}${apxMoney(calc.totalAfter)}`,
+      `${pct(calc.afterRoi)} ROI`, { tone: calc.totalAfter <= 0 ? "bad" : "good" });
+    if (calc.perYear != null) {
+      html += apxRow("Return per year", `${calc.perYear.toFixed(0)}%/yr`,
+        "compare buys on this", { total: true, tone: calc.perYear <= 0 ? "bad" : "good" });
+    }
+    // 181 days is where Amazon's long-term storage surcharge starts, and this
+    // model charges no storage at all -- so a slow pile is worse than it looks.
+    if (months > 6) {
+      html += `<div class="apx-note warn">⚠ ${months.toFixed(0)} months of stock. ` +
+        `Amazon's long-term storage surcharge starts at 6 months, and none of the ` +
+        `figures above include storage.</div>`;
+    }
+  } else if (!calc.velocity) {
+    html += `<div class="apx-note warn">⚠ No sales in the last 12 months, so there is ` +
+      `no selling rate to project from. The per-unit figures above assume it sells at all.</div>`;
+  }
+
+  // Only worth saying when the gap is big enough to change a decision: twice
   // the history, and at least 50c of difference so pennies do not trigger it.
   const actual = Number(actualPerUnit);
   if (Number.isFinite(actual) && calc.afterProfit > 0 &&
       calc.afterProfit - actual > 0.5 && calc.afterProfit > actual * 2) {
     html += `<div class="apx-note warn">⚠ This ASIN actually earned ` +
       `${apxEsc(apxMoney(actual))}/unit over the last 12 months, against the ` +
-      `${apxEsc(apxMoney(calc.afterProfit))}/unit forecast above. The forecast uses the price ` +
-      `you typed — check you can really sell at it.</div>`;
+      `${apxEsc(apxMoney(calc.afterProfit))}/unit above. The forecast uses the price you ` +
+      `typed — check you can really sell at it with your own stock live.</div>`;
   }
 
   html += `<div class="apx-note">Return rate from your own orders, ${apxEsc(calc.window)} ` +
     `(${calc.returned} of ${calc.sold} units). Each return costs the FBA fee Amazon keeps ` +
     `(${apxEsc(apxMoney(calc.fbaFee))}) plus refund admin (${apxEsc(apxMoney(calc.refundAdmin))}) — ` +
-    `not the refunded price, because the unit comes back.</div>`;
+    `not the refunded price, because the unit comes back. "Worst case" is the same return ` +
+    `rate with nothing resellable: it forfeits the sale as well as the goods.</div>`;
 
   el.innerHTML = html;
   el.className = "apx-block";
@@ -2075,7 +2144,12 @@ function renderReplenish(d, asin = null) {
       // No fees means no honest profit line -- better blank than a number
       // computed from a 15% guess.
       if (!(referralFee > 0) && !(fbaFee > 0)) { renderAfterReturns("apx-p-after", null); return; }
-      renderAfterReturns("apx-p-after", computeAfterReturns({ price, cog, referralFee, fbaFee, stats }), actualNetPerUnit());
+      renderAfterReturns("apx-p-after", computeAfterReturns({
+        price, cog, referralFee, fbaFee, stats,
+        units: Number(purchase.source?.units) || 1,
+        units12m: Number(state.asinHistory?.units_sold)
+          || Number(stats?.units_sold_12m) || null,
+      }), actualNetPerUnit());
     });
   }
 }
