@@ -409,24 +409,11 @@ const ADMIN_SETTINGS_CARDS: StandaloneCard[] = [
     accent: "from-amber-500/15 to-orange-500/5 border-amber-400/30 text-amber-300",
     badge: "Admin",
   },
-  {
-    title: "Chrome Extension — Amazon Analyzer",
-    desc: "Floating ASIN scanner for Amazon pages: Buy Box, ROI, sellers, Keepa stability. Click to download the .zip.",
-    downloadUrl: "/inventorysprint-extension.zip",
-    downloadFilename: "inventorysprint-extension.zip",
-    Icon: ScanLine,
-    accent: "from-blue-500/15 to-indigo-500/5 border-blue-400/30 text-blue-300",
-    badge: "Admin",
-  },
-  {
-    title: "Chrome Extension — Create Listing",
-    desc: "Floating Create Listing form on Amazon pages: fetch product, validate, create on Amazon, save to Product Library.",
-    downloadUrl: "/inventorysprint-create-listing-extension.zip",
-    downloadFilename: "inventorysprint-create-listing-extension.zip",
-    Icon: FilePlus,
-    accent: "from-emerald-500/15 to-teal-500/5 border-emerald-400/30 text-emerald-300",
-    badge: "Admin",
-  },
+  // The two Chrome extension downloads MOVED OUT of here on 2026-11-04.
+  // They are not admin tooling -- they are how a seller uses the product on
+  // Amazon's pages -- so they now live in the public "Browser Extensions"
+  // category in src/config/moduleCategories.ts, visible at /tools to everyone.
+  // Do not re-add them here; one owner for those two URLs.
   {
     title: "Database Maintenance",
     desc: "Cleanup retention, health alerts, performance snapshot, and VACUUM controls.",

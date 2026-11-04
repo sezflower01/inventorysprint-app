@@ -6,9 +6,11 @@ import {
   Banknote,
   BoxIcon,
   DollarSign,
+  FilePlus,
   LayoutDashboard,
   ListChecks,
   Receipt,
+  ScanLine,
   SearchX,
   ShieldAlert,
   ShieldCheck,
@@ -314,6 +316,46 @@ export const MODULE_CATEGORIES: ModuleCategory[] = [
         icon: Tags,
         color: "from-rose-500 to-red-600",
         ga: "tool_menu_repricer",
+      },
+    ],
+  },
+  {
+    // These two were admin-only, which was wrong: the extensions are how a
+    // seller actually uses the product on Amazon's own pages, so every user
+    // needs them. They were ALSO duplicated in the landing-page banner and in
+    // AdminOnlySettings, with three copies of the same two URLs to keep in
+    // step. This is now the one place in the app that owns them.
+    //
+    // The zips are build artifacts: scripts/build-extension-zips.js runs ahead
+    // of vite build and writes them into public/, so a Vercel deploy always
+    // ships the current source. They are gitignored on purpose -- never commit
+    // a stale copy, it would mask the real one.
+    id: "extensions",
+    label: "Browser Extensions",
+    tagline: "Work directly on Amazon pages",
+    emoji: "🧩",
+    icon: ScanLine,
+    accent: "from-blue-500 to-indigo-700",
+    modules: [
+      {
+        label: "Chrome Extension — Amazon Analyzer",
+        description:
+          "Floating ASIN scanner for Amazon pages: Buy Box, ROI, sellers, Keepa stability. Downloads the .zip.",
+        downloadUrl: "/inventorysprint-extension.zip",
+        downloadFilename: "inventorysprint-extension.zip",
+        icon: ScanLine,
+        color: "from-blue-500 to-indigo-700",
+        ga: "tool_menu_extension_analyzer",
+      },
+      {
+        label: "Chrome Extension — Create Listing",
+        description:
+          "Floating Create Listing form on Amazon pages: fetch product, validate, create on Amazon, save to Product Library.",
+        downloadUrl: "/inventorysprint-create-listing-extension.zip",
+        downloadFilename: "inventorysprint-create-listing-extension.zip",
+        icon: FilePlus,
+        color: "from-emerald-500 to-teal-700",
+        ga: "tool_menu_extension_create",
       },
     ],
   },
