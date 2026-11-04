@@ -1602,15 +1602,21 @@ function renderAfterReturns(elId, calc, actualPerUnit = null) {
   const pct = (n) => `${n.toFixed(0)}%`;
   const rateTxt = `${(calc.rate * 100).toFixed(1)}%`;
 
-  // Typing re-renders the block, which would otherwise destroy the box
-  // mid-keystroke, so the caret is captured and restored around the redraw.
-  const act = document.activeElement;
-  const keepFocus = !!(act && act.id === elId + "-price");
-  const caret = keepFocus ? act.selectionStart : null;
-
-  let html = `<div class="apx-block-h"><span>If you buy it again</span>` +
+  // ⚠️ The price box is rendered ONCE and never re-rendered. The first attempt
+  // rebuilt the whole block on every keystroke and restored the caret with
+  // setSelectionRange -- which silently fails, because an <input type="number">
+  // reports selectionStart as NULL. The caret therefore reset to position 0 on
+  // every character and "19.54" came out as "45.91": typed right to left.
+  //
+  // Capturing the caret more carefully would not fix it either; the robust
+  // answer is not to destroy the element the user is typing into. So the header
+  // is built separately from the figures, and a reprice swaps ONLY the figures.
+  const head = `<div class="apx-block-h"><span>If you buy it again</span>` +
     `<span class="sub">sell at $<input id="${elId}-price" class="apx-inline-num" ` +
-    `type="number" step="0.01" min="0" value="${calc.price.toFixed(2)}"></span></div>`;
+    `type="number" step="0.01" min="0" inputmode="decimal" ` +
+    `value="${calc.price.toFixed(2)}"></span></div>`;
+
+  let html = "";
 
   // Show the subtraction, not just its answer. "Before returns $5.61" with no
   // visible sell price or cost above it is a number the seller has to take on
@@ -1677,18 +1683,23 @@ function renderAfterReturns(elId, calc, actualPerUnit = null) {
     `not the refunded price, because the unit comes back. "Worst case" is the same return ` +
     `rate with nothing resellable: it forfeits the sale as well as the goods.</div>`;
 
-  el.innerHTML = html;
   el.className = "apx-block";
   el.title = "";
 
-  const box = $(elId + "-price");
-  if (box) {
-    box.addEventListener("input", () => repriceAfterReturns(elId, box.value));
-    if (keepFocus) {
-      box.focus();
-      try { box.setSelectionRange(caret, caret); } catch (_) { /* number inputs may refuse */ }
-    }
+  const bodyEl = $(elId + "-body");
+  const boxEl = $(elId + "-price");
+  if (bodyEl && boxEl) {
+    // Live edit: replace the figures only, leaving the box and its caret alone.
+    bodyEl.innerHTML = html;
+    // A price changed from elsewhere (the Listing details field, a new fetch)
+    // still has to reach the box -- but never while it is being typed into.
+    if (document.activeElement !== boxEl) boxEl.value = calc.price.toFixed(2);
+    return;
   }
+
+  el.innerHTML = head + `<div id="${elId}-body">` + html + `</div>`;
+  const box = $(elId + "-price");
+  if (box) box.addEventListener("input", () => repriceAfterReturns(elId, box.value));
 }
 
 async function countSellers({ asin, marketplace, createdListingId = null, reason = 'recheck' }) {
