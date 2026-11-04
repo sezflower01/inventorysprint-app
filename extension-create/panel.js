@@ -1463,10 +1463,23 @@ function computeAfterReturns({ price, cog, referralFee, fbaFee, closingFee = 0, 
   const refundAdmin = Math.min(5, 0.2 * (Number(referralFee) || 0));
   const lossPerReturn = (Number(fbaFee) || 0) + refundAdmin;
   const afterProfit = profit - rate * lossPerReturn;
-  // The floor, when the unit cannot go back on the shelf: the same fees PLUS
-  // the goods. Opened beauty, food and liquids land here, and it was previously
-  // only in the hover text -- which is where a number nobody reads goes.
-  const lossIfWrittenOff = lossPerReturn + cog;
+  // The floor, when the unit cannot go back on the shelf.
+  //
+  // ⚠️ This was WRONG until 2026-11-04 and the seller caught it. It read
+  // `lossPerReturn + cog`, which adds the lost goods to the fee loss but keeps
+  // the margin the unit was credited with. An unsellable return does not merely
+  // cost extra -- it FORFEITS the sale, so the swing is from +profit to
+  // -(cog + fbaFee + refundAdmin), i.e. profit + cog + fbaFee + refundAdmin.
+  //
+  // Checked against 100 units at 19.97 / cost 7.50 / 18.3% returns: refund
+  // -359.46, referral returned +54.00, admin -10.80 against a 561.00 gross is
+  // 244.74, or 2.45/unit. The old formula claimed 3.42 -- a 40% overstatement
+  // of the worst case, in the one number a seller leans on to decide whether a
+  // risky category is survivable.
+  //
+  // Equivalently: price - referralFee + refundAdmin, since Amazon refunds the
+  // referral fee on a return but keeps the FBA fee and the admin charge.
+  const lossIfWrittenOff = lossPerReturn + cog + profit;
   const floorProfit = profit - rate * lossIfWrittenOff;
   return {
     rate,
