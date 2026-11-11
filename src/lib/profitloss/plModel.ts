@@ -120,7 +120,14 @@ export const INCOME_ROWS: RowDef[] = [
   { label: "Shipping Credits", key: "shipping_credits" },
   { label: "Gift Wrap Credits", key: "gift_wrap_credits" },
   { label: "Promotional Rebate Refunds", key: "promotional_rebate_refunds" },
-  { label: "Restocking Fee", key: "restocking_fee" },
+  // Named a CREDIT deliberately. Amazon charges a restocking penalty to the
+  // RETURNING BUYER -- 15%, 20% or 50% of the item price, withheld from their
+  // refund and passed to the seller. Measured 2026-11-11: all 39 events in
+  // history land exactly on one of those three tiers (0 off-tier), and the
+  // `refunds` line equals the full original sale, so this row is the OFFSET
+  // that turns a gross refund into the real cost. Moving it to EXPENSE_ROWS
+  // would double-count it: once by not crediting it, once by charging it.
+  { label: "Restocking Fees Credit (charged to buyer)", key: "restocking_fee" },
   { label: "Other Income", key: "other_income" },
   { label: "Liquidations", key: "liquidations" },
   { label: "Warehouse Lost", key: "warehouse_lost" },

@@ -133,7 +133,6 @@ const CATEGORIES: CategoryDef[] = [
   { key: "re_commerce_grading_charge", sourceKey: "re_commerce_grading_charge", label: "Re-Commerce Grading Charge", kind: "fee" },
   { key: "compensated_clawback", sourceKey: "compensated_clawback", label: "Compensated Clawback", kind: "fee" },
   { key: "hrr_non_apparel", sourceKey: "hrr_non_apparel", label: "HRR Non-Apparel Rollup", kind: "fee" },
-  { key: "restocking_fee", sourceKey: "restocking_fee", label: "Restocking Fee", kind: "fee" },
   // Seller-paid shipping charges from Amazon settlement data.
   // Do not hide these as memo rows: if Amazon posts a ShippingChargeback or
   // Buy Shipping fee, show it as paid/deducted.
@@ -146,6 +145,13 @@ const CATEGORIES: CategoryDef[] = [
   { key: "other_fees", sourceKey: "other_fees", label: "Other Fees", kind: "fee" },
   // Credits
   { key: "shipping_credits", sourceKey: "shipping_credits", label: "Shipping Credits Collected From Buyer", kind: "credit" },
+  // Moved out of the fee list 2026-11-11. It sat under kind:"fee", which
+  // renders as -$X in red, so a restocking penalty Amazon charges the
+  // RETURNING BUYER and hands to the seller was displayed as money the seller
+  // paid. `kind` only drives display here (each section totals its own items),
+  // so this is a presentation fix, not an arithmetic one -- but it was the
+  // visible half of a real sign error: see refundMath.ts and RefundsSection.
+  { key: "restocking_fee", sourceKey: "restocking_fee", label: "Restocking Fees Credit (charged to buyer)", kind: "credit" },
   { key: "reimbursements", sourceKey: "reimbursements", label: "Reimbursements", kind: "credit" },
   { key: "liquidations", sourceKey: "liquidations", label: "Liquidations Revenue", kind: "credit" },
   { key: "warehouse_lost", sourceKey: "warehouse_lost", label: "Warehouse Lost", kind: "credit" },

@@ -37,8 +37,11 @@
  *                   + referralFeesSigned          ← credit (negative) reduces cost
  *                   + adminRetention               ← always positive cost
  *                   + (optional 12-col extras: fba_fees, fba_customer_return_fees,
- *                      restocking_fee, other_fees, digital_services_fee,
+ *                      other_fees, digital_services_fee,
  *                      reversal_reimbursement)
+ *                   − restocking_fee                ← stored positive but IS a
+ *                      credit (buyer-charged penalty passed to the seller), so
+ *                      it is the one extra that is subtracted. See below.
  *
  * Two modes:
  *   `simple` (6-col)  — used by live-sales-core daily-cache producer.
@@ -146,7 +149,25 @@ export function computeNetRefundFromFecRows(
       signedSum +=
         n(r.fba_fees) +
         n(r.fba_customer_return_fees) +
-        n(r.restocking_fee) +
+        // ⚠️ SUBTRACTED, unlike every other term in this block.
+        //
+        // This sum follows the convention documented above: positive = cost.
+        // restocking_fee is the one FEC column stored POSITIVE while being a
+        // CREDIT -- Amazon charges the restocking penalty to the returning
+        // BUYER (15/20/50% of item price), withholds it from their refund and
+        // passes it to the seller. Verified 2026-11-11 against the stored
+        // signs: on 5,254 refund rows `refunds` is positive 4742/0 (cost) and
+        // the credits `referral_fees` (0/4742) and `other_fees` (0/520) are
+        // negative, so the convention holds for everything except this column.
+        //
+        // Adding it charged the seller for money kept, inflating refund cost by
+        // 2x the fee -- $380.66 lifetime on $190.33 of credits. Untested until
+        // now: every case in refundGrossNetDrift.test.ts set it to 0.
+        //
+        // Do NOT flip the stored sign instead: plModel.ts carries
+        // restocking_fee in INCOME_ROWS and needs it positive, so the data is
+        // right and only cost-convention consumers were wrong.
+        -n(r.restocking_fee) +
         n(r.other_fees) +
         n(r.digital_services_fee) +
         n(r.reversal_reimbursement);

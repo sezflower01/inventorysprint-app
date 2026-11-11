@@ -190,7 +190,23 @@ export default function RefundsSection({ rangeStart, rangeEnd, label }: Props) {
     // This is NOT in FEC referral_fees — it's a separate Amazon retention. Always negative.
     const refundAdmin = -Math.min(5.0, Math.abs(refFee) * 0.20);
     const fbaRet = -num(r.fba_customer_return_fees);
-    const restock = -num(r.restocking_fee);
+    // ⚠️ NOT negated, and it is the ONLY column here that is not.
+    //
+    // The blanket -num() above implements the FEC convention stated at the top
+    // of this function: positive = seller paid. restocking_fee is the one
+    // column that breaks it -- it is stored POSITIVE (ingest takes abs()) while
+    // being money the seller RECEIVED. Amazon charges the restocking penalty to
+    // the returning BUYER, withholds it from their refund and passes it on.
+    //
+    // Negating it therefore turned a credit into a displayed cost. Order
+    // 113-8267165-1606605 (sold 32.00, 20% tier): the row showed
+    // -32.00 - 6.40 = -38.40 when the seller was actually out -25.60, so the
+    // error is 2x the fee -- once for not crediting it, once for charging it.
+    //
+    // The stored sign is NOT the bug and must not be "fixed" at ingest:
+    // plModel.ts carries restocking_fee in INCOME_ROWS, which needs it
+    // positive. Only the consumers that assume the cost convention were wrong.
+    const restock = num(r.restocking_fee);
     const other = -(num(r.other_fees) + num(r.digital_services_fee) + num(r.reversal_reimbursement) + num(r.fba_fees));
     const net = product + promo + ship + refFee + refundAdmin + fbaRet + restock + other;
     return { product, promo, ship, refFee, refundAdmin, fbaRet, restock, other, net };
@@ -261,7 +277,7 @@ export default function RefundsSection({ rangeStart, rangeEnd, label }: Props) {
                   <th className="px-3 py-2 text-right" title="FBA fulfilment fee charged on the original sale (NOT reversed on refund — seller eats this)">FBA Fee (sale)</th>
                   <th className="px-3 py-2 text-right" title="Variable closing fee charged on the original sale (NOT reversed on refund)">Var. Closing (sale)</th>
                   <th className="px-3 py-2 text-right" title="FBA customer return / refund admin fee charged at refund time">Return Fee</th>
-                  <th className="px-3 py-2 text-right" title="Restocking fee charged to customer">Restock</th>
+                  <th className="px-3 py-2 text-right" title="Restocking penalty Amazon charges the returning BUYER (15/20/50% of item price) and passes to you — a CREDIT that offsets the gross refund, not a fee you pay">Restock Credit</th>
                   <th className="px-3 py-2 text-right" title="Other reversals / digital services / reimbursements">Other</th>
                   <th className="px-3 py-2 text-right font-semibold">Net</th>
                 </tr>
