@@ -507,6 +507,46 @@ async function fetchSellerNamesLive(
  * single cold seller could add tens of seconds to a panel the user is staring
  * at. A name is a label, not a blocker: show the ID, learn the name, move on.
  */
+/**
+ * Show every competitor, not just the 20 Amazon will hand over.
+ *
+ * SP-API's getItemOffers returns at most 20 offers with no pagination, while
+ * Summary.TotalOfferCount reports the real number -- which is how the panel
+ * came to say "20 live of 71 (Amazon API limit)". The other 51 were never
+ * missing: the Keepa /product response already carries the full offer list,
+ * and we throw it away whenever SP-API answers.
+ *
+ * Measured 2026-08-17 and recorded at the Keepa URL below: offers=20 and
+ * offers=100 return an IDENTICAL list (checked on ASINs with 84, 162, 363 and
+ * 400 offers). The parameter is a billing tier, not a result cap -- so the
+ * full list is ALREADY PAID FOR at the 5 tokens the price history costs.
+ * Merging it in costs nothing extra.
+ *
+ * SP-API wins on any seller both sources know about: it is live this second,
+ * it alone knows IsBuyBoxWinner and IsFulfilledByAmazon for certain, and it
+ * alone can identify the user's own offer. Keepa-only sellers are appended
+ * and flagged `liveVerified: false`, because Keepa returns the union of
+ * offers ever seen and its view can lag -- a seller listed here may have gone
+ * since. That flag is the honest part: these are real competitors, but not
+ * confirmed live this second the way the first 20 are.
+ */
+export function mergeOfferSources(spOffers: any[], keepaOffers: any[]): any[] {
+  const live = Array.isArray(spOffers) ? spOffers : [];
+  const seen = new Set(live.map((o: any) => String(o?.sellerId || '').toUpperCase()).filter(Boolean));
+  const extra = (Array.isArray(keepaOffers) ? keepaOffers : [])
+    .filter((o: any) => {
+      const id = String(o?.sellerId || '').toUpperCase();
+      return id && !seen.has(id) && Number.isFinite(Number(o?.landed));
+    })
+    // A Keepa offer can never be the Buy Box winner here: SP-API already told
+    // us who holds it, and claiming a second winner would break the UI badge
+    // and every "who owns the Buy Box" calculation downstream.
+    .map((o: any) => ({ ...o, isBuyBox: false, liveVerified: false }));
+
+  return [...live.map((o: any) => ({ ...o, liveVerified: true })), ...extra]
+    .sort((a: any, b: any) => Number(a.landed) - Number(b.landed));
+}
+
 async function resolveSellerNamesFast(
   admin: any,
   keepaKey: string,
@@ -774,7 +814,18 @@ Deno.serve(async (req) => {
       try {
         const spLive = await fetchLiveSpApiOffers(admin, KEEPA_KEY, domainId, userRes.user.id, asin, marketplace);
         if (spLive) {
-          liveOffers = { count: spLive.offers.length, list: spLive.offers, totalCount: spLive.totalOfferCount };
+          // Merge rather than replace. The cached Keepa snapshot holds the
+          // FULL competitor list; SP-API holds 20 live ones. Replacing threw
+          // away everyone past Amazon's cap for no reason -- the data was
+          // already fetched and already paid for.
+          const cachedList = Array.isArray((cached.offers as any)?.list) ? (cached.offers as any).list : [];
+          const merged = mergeOfferSources(spLive.offers, cachedList);
+          liveOffers = {
+            count: merged.length,
+            list: merged,
+            liveCount: spLive.offers.length,
+            totalCount: Math.max(spLive.totalOfferCount ?? 0, merged.length),
+          };
           liveBuyBoxPrice = spLive.buyBoxPrice;
         }
       } catch (e) {
@@ -1019,6 +1070,7 @@ Deno.serve(async (req) => {
     // genuinely has nothing — e.g. this ASIN isn't in the user's catalog,
     // or the SP-API pricing rate gate is currently saturated.
     let finalOffers: any[];
+    let keepaBuiltOffers: any[] = [];
     let liveBuyBoxPrice: number | null = null;
     let spLive: Awaited<ReturnType<typeof fetchLiveSpApiOffers>> = null;
     try {
@@ -1027,10 +1079,10 @@ Deno.serve(async (req) => {
       console.warn('[mobile-scan-price-history] SP-API live offers failed, falling back to Keepa offers', (e as Error).message);
     }
 
-    if (spLive) {
-      finalOffers = spLive.offers;
-      liveBuyBoxPrice = spLive.buyBoxPrice;
-    } else {
+    {
+      // Build the Keepa offer list ALWAYS, not only when SP-API fails. It is
+      // the only source that sees past Amazon's 20-offer cap, and the /product
+      // response it comes from has already been paid for.
       // Build live offers from product.offers
       const rawOffers: any[] = Array.isArray(product.offers) ? product.offers : [];
       type Offer = {
@@ -1092,7 +1144,7 @@ Deno.serve(async (req) => {
       const sellerIds = offers.map(o => o.sellerId);
       const nameMap = await resolveSellerNamesFast(admin, KEEPA_KEY, domainId, marketplace, sellerIds);
 
-      finalOffers = offers
+      keepaBuiltOffers = offers
         .map(o => {
           const total = (o.price ?? 0) + (o.shipping ?? 0);
           const meta = nameMap[o.sellerId];
@@ -1108,6 +1160,16 @@ Deno.serve(async (req) => {
         .sort((a, b) => a.landed - b.landed);
     }
 
+    if (spLive) {
+      finalOffers = mergeOfferSources(spLive.offers, keepaBuiltOffers);
+      liveBuyBoxPrice = spLive.buyBoxPrice;
+    } else {
+      // No SP-API answer at all, so every offer here is Keepa's and none of
+      // it is live-verified. Saying so beats implying a freshness we do not
+      // have.
+      finalOffers = keepaBuiltOffers.map((o: any) => ({ ...o, liveVerified: false }));
+    }
+
     const finalFba = finalOffers.filter((o: any) => o.isFBA || o.isAmazon || o.isSelf).map((o: any) => Number(o.landed)).filter((v: number) => Number.isFinite(v) && v > 0);
     const finalFbm = finalOffers.filter((o: any) => !o.isFBA && !o.isAmazon && !o.isSelf).map((o: any) => Number(o.landed)).filter((v: number) => Number.isFinite(v) && v > 0);
     series.buybox = appendCurrentPoint(series.buybox, liveBuyBoxPrice);
@@ -1117,7 +1179,8 @@ Deno.serve(async (req) => {
     const offersPayload = {
       count: finalOffers.length,
       list: finalOffers,
-      totalCount: spLive?.totalOfferCount ?? finalOffers.length,
+      liveCount: spLive ? spLive.offers.length : 0,
+      totalCount: Math.max(spLive?.totalOfferCount ?? 0, finalOffers.length),
     };
 
     // Cache — keyed by cacheDaysKey (the "Since Listed" sentinel for that
