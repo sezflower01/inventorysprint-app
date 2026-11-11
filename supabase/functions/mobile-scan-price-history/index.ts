@@ -289,15 +289,31 @@ function looksLikeAmazonName(name: string | null | undefined): boolean {
   return /^amazon(\.|,|\s|$)/i.test(name.trim());
 }
 
-async function resolveSellerNames(
+type SellerName = { name: string; isAmazon: boolean; rating: number | null; ratingCount: number | null };
+type SellerNameResult = { names: Record<string, SellerName>; missing: string[] };
+
+/** Backoff for a seller Keepa has no record of: 1d, 3d, 7d, then 30d forever.
+ *  Without this a permanent miss is re-queried on every single scan -- measured
+ *  at 5,626 such sellers on 2026-11-11, the oldest asked about since May. */
+export function missBackoffMs(missCount: number): number {
+  const days = missCount <= 1 ? 1 : missCount === 2 ? 3 : missCount === 3 ? 7 : 30;
+  return days * 24 * 60 * 60 * 1000;
+}
+
+/**
+ * Read cached seller names. NEVER calls Keepa -- this is the request path and
+ * it must not block on a third-party API.
+ *
+ * Returns the names it has plus the IDs still worth asking Keepa about, which
+ * the caller resolves in the background so the NEXT scan has them.
+ */
+export async function resolveSellerNamesCached(
   admin: any,
-  keepaKey: string,
-  domainId: number,
   marketplace: string,
   sellerIds: string[],
-): Promise<Record<string, { name: string; isAmazon: boolean; rating: number | null; ratingCount: number | null }>> {
-  const out: Record<string, { name: string; isAmazon: boolean; rating: number | null; ratingCount: number | null }> = {};
-  if (sellerIds.length === 0) return out;
+): Promise<SellerNameResult> {
+  const out: Record<string, SellerName> = {};
+  if (sellerIds.length === 0) return { names: out, missing: [] };
   const unique = Array.from(new Set(sellerIds.filter(Boolean)));
 
   // Amazon shortcut — Amazon retail doesn't carry a third-party feedback rating.
@@ -308,22 +324,15 @@ async function resolveSellerNames(
   // Cache lookup
   const { data: cached } = await admin
     .from('keepa_seller_name_cache')
-    .select('seller_id, business_name, storefront_name, is_amazon, current_rating, current_rating_count, expires_at')
+    .select('seller_id, business_name, storefront_name, is_amazon, current_rating, current_rating_count, expires_at, miss_count, last_attempt_at')
     .in('seller_id', unique)
     .eq('marketplace', marketplace);
   const now = Date.now();
   const fresh = new Set<string>();
   for (const row of (cached || []) as any[]) {
-    const valid = row.expires_at && new Date(row.expires_at).getTime() > now;
     // Populate `out` from EVERY cached row, not just unexpired ones. A
     // business name we already know (even a week stale) is strictly more
-    // useful than the raw seller ID the UI falls back to — and the Keepa
-    // /seller endpoint is a shared per-account token bucket, so a burst of
-    // other lookups can leave it 429'ing for minutes at a time. Below, the
-    // live re-fetch for `missing` (stale or never-cached) IDs will
-    // overwrite this with fresh data when it succeeds; when it 429s/fails,
-    // this stale name is what keeps showing instead of silently reverting
-    // to the seller ID.
+    // useful than the raw seller ID the UI falls back to.
     const nm = row.business_name || row.storefront_name || null;
     out[row.seller_id] = {
       name: nm || row.seller_id,
@@ -334,20 +343,64 @@ async function resolveSellerNames(
       rating: Number.isFinite(row.current_rating) ? row.current_rating : null,
       ratingCount: Number.isFinite(row.current_rating_count) ? row.current_rating_count : null,
     };
-    if (valid) {
-      // Rows written before the rating feature shipped have BOTH rating
-      // fields null (the columns didn't exist yet) — don't count those as
-      // "fresh", or every existing cached seller would show no rating until
-      // its 7-day TTL naturally expires. Force one re-fetch to backfill;
-      // once a row genuinely has (or Keepa confirms it has none) rating
-      // data, it behaves normally again.
+
+    if (!nm) {
+      // ⚠️ A ROW WITH NO NAME IS A MISS: Keepa has no record of this seller.
+      // It used to fall through to the rating test below, which it could never
+      // pass (a miss has both rating columns NULL), so it was re-queried on
+      // EVERY scan and never resolved — 5,626 sellers, the oldest asked about
+      // since 2026-05-02. Misses now back off: 1 day, 3, 7, then 30.
+      const last = row.last_attempt_at ? new Date(row.last_attempt_at).getTime() : 0;
+      const due = last + missBackoffMs(Number(row.miss_count) || 1);
+      if (now < due) fresh.add(row.seller_id);
+      continue;
+    }
+
+    if (row.expires_at && new Date(row.expires_at).getTime() > now) {
+      // Rows written before the rating feature shipped have BOTH rating fields
+      // null because the columns did not exist. Force one re-fetch to backfill.
+      // This test only applies to rows that HAVE a name — conflating it with
+      // the nameless case is what caused the permanent re-query loop above.
       const hasRatingData = row.current_rating != null || row.current_rating_count != null;
       if (hasRatingData) fresh.add(row.seller_id);
     }
   }
 
-  const missing = unique.filter(id => !fresh.has(id) && !AMAZON_SELLER_IDS.has(id));
-  if (missing.length === 0) return out;
+  const missing = unique.filter((id) => !fresh.has(id) && !AMAZON_SELLER_IDS.has(id) && !out[id]?.isAmazon);
+  return { names: out, missing };
+}
+
+/**
+ * Ask Keepa about sellers the cache could not answer for, and write the result
+ * back — including the MISSES, which is what stops them being asked again.
+ *
+ * Runs in the background via EdgeRuntime.waitUntil, so its latency is nobody's
+ * wait. That is why the attempt budget is small: a scan a minute later will
+ * pick up whatever this wrote, and a failure costs the next scan nothing.
+ */
+async function fetchSellerNamesLive(
+  admin: any,
+  keepaKey: string,
+  domainId: number,
+  marketplace: string,
+  missing: string[],
+): Promise<void> {
+  if (missing.length === 0) return;
+  const out: Record<string, SellerName> = {};
+
+  // Current miss counts, so a repeat miss escalates the backoff instead of
+  // resetting to 1 and retrying tomorrow for ever.
+  const missCountById: Record<string, number> = {};
+  {
+    const { data: prior } = await admin
+      .from('keepa_seller_name_cache')
+      .select('seller_id, miss_count')
+      .in('seller_id', missing)
+      .eq('marketplace', marketplace);
+    for (const row of (prior || []) as any[]) {
+      missCountById[row.seller_id] = Number(row.miss_count) || 0;
+    }
+  }
 
   // Batch in groups of 100 (Keepa /seller supports comma-separated)
   const upserts: any[] = [];
@@ -365,13 +418,17 @@ async function resolveSellerNames(
     // ID in the batch fell straight back to displaying its raw ID with no
     // second chance, even though Keepa's /seller endpoint is a shared
     // per-account token bucket that routinely 429s under burst load.
-    const MAX_ATTEMPTS = 3;
+    // Was 3 attempts x 15s timeout + 1.8s backoff = up to ~47s, and it ran
+    // INSIDE the request, so the panel waited for it. This is background
+    // work now, and a tighter budget is strictly better: a failure just
+    // means the next scan retries, while a long one pins an invocation.
+    const MAX_ATTEMPTS = 2;
     let json: any = null;
     let lastErrorMsg = '';
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
         const ctrl = new AbortController();
-        const t = setTimeout(() => ctrl.abort(), 15000);
+        const t = setTimeout(() => ctrl.abort(), 8000);
         const res = await fetch(url.toString(), { signal: ctrl.signal });
         clearTimeout(t);
         if (res.ok) {
@@ -392,6 +449,12 @@ async function resolveSellerNames(
       console.error(`[mobile-scan-price-history] seller lookup exhausted ${MAX_ATTEMPTS} attempts:`, lastErrorMsg);
       continue;
     }
+    // Report what Keepa says is left EVEN THOUGH this path does not gate.
+    // Per keepa-gate-two-lanes an unreported caller makes the shared budget
+    // lie to every other caller, and the repricer is the one that starves.
+    // These calls were previously invisible to the budget entirely.
+    await reportKeepaTokensLeft(admin, json?.tokensLeft, json?.refillRate);
+
     const sellers = json?.sellers || {};
     for (const id of slice) {
       const s = sellers[id];
@@ -405,6 +468,11 @@ async function resolveSellerNames(
       const rating = Number.isFinite(s?.currentRating) ? s.currentRating : null;
       const ratingCount = Number.isFinite(s?.currentRatingCount) ? s.currentRatingCount : null;
       out[id] = { name: display, isAmazon, rating, ratingCount };
+      // A miss is a RESULT and has to be written down, or it stays
+      // indistinguishable from never having asked and gets asked again on the
+      // next scan. miss_count drives the backoff; a later hit resets it to 0.
+      const isMiss = !business && !storefront;
+      const prevMiss = missCountById[id] ?? 0;
       upserts.push({
         seller_id: id,
         marketplace,
@@ -414,6 +482,8 @@ async function resolveSellerNames(
         current_rating: rating,
         current_rating_count: ratingCount,
         fetched_at: new Date().toISOString(),
+        last_attempt_at: new Date().toISOString(),
+        miss_count: isMiss ? prevMiss + 1 : 0,
         expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
       });
     }
@@ -421,8 +491,46 @@ async function resolveSellerNames(
 
   if (upserts.length > 0) {
     await admin.from('keepa_seller_name_cache').upsert(upserts, { onConflict: 'seller_id,marketplace' });
+    const misses = upserts.filter((u) => !u.business_name && !u.storefront_name).length;
+    console.log(
+      '[mobile-scan-price-history] seller names: ' + (upserts.length - misses) +
+      ' resolved, ' + misses + ' recorded as misses',
+    );
   }
-  return out;
+}
+
+/**
+ * Cached names now, missing ones fetched in the background for next time.
+ *
+ * This is the only seller-name entry point the request path should use. All
+ * three call sites in this file previously awaited a live Keepa lookup, so a
+ * single cold seller could add tens of seconds to a panel the user is staring
+ * at. A name is a label, not a blocker: show the ID, learn the name, move on.
+ */
+async function resolveSellerNamesFast(
+  admin: any,
+  keepaKey: string,
+  domainId: number,
+  marketplace: string,
+  sellerIds: string[],
+): Promise<Record<string, SellerName>> {
+  const { names, missing } = await resolveSellerNamesCached(admin, marketplace, sellerIds);
+  if (missing.length === 0) return names;
+
+  const work = fetchSellerNamesLive(admin, keepaKey, domainId, marketplace, missing)
+    .catch((e) => console.warn('[mobile-scan-price-history] background seller lookup failed:', (e as Error).message));
+
+  // Without waitUntil the runtime may kill the task once the response is sent,
+  // so await rather than firing into a void: a lookup that never completes
+  // also never caches, which is exactly the re-query loop this is fixing.
+  const waitUntil = (globalThis as any).EdgeRuntime?.waitUntil;
+  if (typeof waitUntil === 'function') {
+    waitUntil.call((globalThis as any).EdgeRuntime, work);
+    console.log('[mobile-scan-price-history] ' + missing.length + ' seller name(s) queued for background lookup');
+  } else {
+    await work;
+  }
+  return names;
 }
 
 async function fetchLiveSpApiOffers(
@@ -547,10 +655,19 @@ async function fetchLiveSpApiOffers(
     .filter((o: any) => o.sellerId && o.price != null && o.landed != null)
     .sort((a: any, b: any) => a.landed - b.landed);
 
-  // Resolve names for ALL sellers (including self) via Keepa storefront lookup.
-  // No hardcoded names — the UI shows the real storefront name; the YOU badge
-  // (driven by isSelf) is what marks the current user's row.
-  const nameMap = await resolveSellerNames(
+  // Resolve names for ALL sellers (including self). No hardcoded names — the
+  // UI shows the real storefront name; the YOU badge (driven by isSelf) marks
+  // the current user's row.
+  //
+  // CACHE ONLY on the request path. This used to call Keepa inline, which put
+  // up to 3 attempts x 15s of third-party timeout between the user and their
+  // own panel — on top of the /product gate already sleeping up to 15s. A
+  // seller name is not worth a minute of staring at a spinner.
+  //
+  // Anything the cache cannot answer is fetched in the BACKGROUND, so the next
+  // scan of the same ASIN has it. The first view of a brand-new competitor
+  // shows its seller ID; every view after that shows the name.
+  const nameMap = await resolveSellerNamesFast(
     admin,
     keepaKey,
     domainId,
@@ -563,6 +680,7 @@ async function fetchLiveSpApiOffers(
     offer.rating = nameMap[offer.sellerId]?.rating ?? null;
     offer.ratingCount = nameMap[offer.sellerId]?.ratingCount ?? null;
   }
+
 
   const buyBox = offers.find((o: any) => o.isBuyBox);
   const buyBoxPrice = buyBox?.landed ?? summary?.BuyBoxPrices?.find?.((bp: any) => bp.condition === 'New')?.LandedPrice?.Amount ?? null;
@@ -856,7 +974,7 @@ Deno.serve(async (req) => {
     // missing, and any future/unseen Amazon retail account would be missing
     // too). Without this, Amazon winning the Buy Box on those marketplaces
     // reads as "one seller won the Buy Box" — a private-label signal — when
-    // it's actually just Amazon. resolveSellerNames() already solves this
+    // it's actually just Amazon. resolveSellerNamesFast() already solves this
     // exact problem elsewhere in this file via a real Keepa storefront-name
     // lookup + looksLikeAmazonName() fallback; reuse it here instead of
     // trusting the static ID list alone, so Buy Box ownership scoring is
@@ -865,7 +983,7 @@ Deno.serve(async (req) => {
       ...Object.keys(product.stats?.buyBoxStats || {}),
       ...buyBoxSellerIdHistory.filter((_, i) => i % 2 === 1).map(id => String(id)),
     ].filter(Boolean)));
-    const bbSellerNameMap = await resolveSellerNames(admin, KEEPA_KEY, domainId, marketplace, bbSellerIdsForLookup);
+    const bbSellerNameMap = await resolveSellerNamesFast(admin, KEEPA_KEY, domainId, marketplace, bbSellerIdsForLookup);
     const effectiveAmazonSellerIds = new Set([
       ...AMAZON_SELLER_IDS,
       ...bbSellerIdsForLookup.filter(id => bbSellerNameMap[id]?.isAmazon),
@@ -972,7 +1090,7 @@ Deno.serve(async (req) => {
 
       // Resolve seller names
       const sellerIds = offers.map(o => o.sellerId);
-      const nameMap = await resolveSellerNames(admin, KEEPA_KEY, domainId, marketplace, sellerIds);
+      const nameMap = await resolveSellerNamesFast(admin, KEEPA_KEY, domainId, marketplace, sellerIds);
 
       finalOffers = offers
         .map(o => {
