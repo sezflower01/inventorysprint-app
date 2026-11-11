@@ -278,6 +278,23 @@ export async function raiseSpapiAlert(opts: {
 /**
  * Resolve any open alerts for this user when a credential test (or live call)
  * succeeds. Sends a brief "recovered" email so admin knows the issue cleared.
+ *
+ * An all-clear is only sent for an incident that was actually REPORTED.
+ * raiseSpapiAlert inserts the open row BEFORE deciding whether to email, and
+ * deliberately suppresses `network` until it has persisted
+ * NETWORK_SUSTAINED_MINUTES. This function had no matching check, so a blip
+ * produced a lone "connection recovered" email for an incident the seller was
+ * never told about -- which reads as "something broke" and prompts exactly the
+ * reconnect that classifySpapiError's comment warns against.
+ *
+ * Measured 2026-11-11: a 4m56s `Connection reset by peer (os error 104)` on
+ * sellers/v1/marketplaceParticipations opened a row with notify_count = 0, no
+ * alarm email and no error_reports entry, then emailed the all-clear on the
+ * next successful tick. Lifetime, 3 of 7 rows were silent like this.
+ *
+ * notify_count is the discriminator: 0 means nothing was ever sent, so there
+ * is nothing to stand down from. The row is still RESOLVED either way -- only
+ * the email is gated, never the state change.
  */
 export async function resolveSpapiAlerts(opts: {
   userId: string;
@@ -290,7 +307,7 @@ export async function resolveSpapiAlerts(opts: {
 
     const { data: openAlerts } = await admin
       .from("spapi_health_alerts")
-      .select("id, issue_type")
+      .select("id, issue_type, notify_count")
       .eq("user_id", opts.userId)
       .eq("status", "open");
 
@@ -303,10 +320,21 @@ export async function resolveSpapiAlerts(opts: {
       .eq("user_id", opts.userId)
       .eq("status", "open");
 
+    // Only the alerts that actually reached the seller are worth standing down.
+    const reported = openAlerts.filter((a: { notify_count?: number | null }) => (a.notify_count ?? 0) > 0);
+    if (reported.length === 0) {
+      console.log(
+        "[spapi-alert] resolved " + openAlerts.length +
+        " alert(s) silently -- none was ever emailed, so no recovery notice: " +
+        openAlerts.map((a) => a.issue_type).join(", "),
+      );
+      return;
+    }
+
     const resendKey = Deno.env.get("RESEND_API_KEY");
     if (!resendKey) return;
 
-    const issues = openAlerts.map((a) => a.issue_type).join(", ");
+    const issues = reported.map((a) => a.issue_type).join(", ");
     await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
