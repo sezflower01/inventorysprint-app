@@ -102,12 +102,35 @@ async function restInsert(table, row) {
   try { return JSON.parse(text); } catch (_) { return null; }
 }
 
-/** The signed-in user's id, taken from the JWT. No network call. */
-function userIdFromToken(accessToken) {
+/** A claim from the access token. No network call, no verification. */
+function claimFromToken(accessToken, claim) {
   try {
     const payload = JSON.parse(atob(String(accessToken).split('.')[1]));
-    return payload?.sub || null;
+    return payload?.[claim] || null;
   } catch (_) { return null; }
+}
+
+/** The signed-in user's id, taken from the JWT. */
+function userIdFromToken(accessToken) {
+  return claimFromToken(accessToken, 'sub');
+}
+
+/**
+ * The signed-in address, taken from the JWT.
+ *
+ * Shown in the popup deliberately. An earlier version withheld it on the
+ * grounds that a popup has no business displaying an address -- which sounds
+ * careful and is, here, wrong. This project has already had data written into
+ * the wrong account because somebody was signed in as one address while
+ * believing they were another, and nothing on screen contradicted them. The
+ * address is the one piece of information that makes "which account is this
+ * saving into?" answerable at a glance.
+ *
+ * It is read from the token the extension already holds, not fetched, and it
+ * never leaves the popup.
+ */
+function userEmailFromToken(accessToken) {
+  return claimFromToken(accessToken, 'email');
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -131,7 +154,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             ok: true,
             signedIn: !!s,
             userId: s ? userIdFromToken(s.access_token) : null,
+            email: s ? userEmailFromToken(s.access_token) : null,
             appUrl: CFG.APP_URL,
+            signUpUrl: `${CFG.APP_URL}/signup`,
+            signInUrl: `${CFG.APP_URL}/login`,
           });
           break;
         }
@@ -170,5 +196,5 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 // Exported for the lint test only; harmless in the worker.
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { ALLOWED_FETCH_HOSTS, userIdFromToken };
+  module.exports = { ALLOWED_FETCH_HOSTS, userIdFromToken, userEmailFromToken, claimFromToken };
 }
