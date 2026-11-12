@@ -8,37 +8,16 @@ import {
 import { RefreshCw, AlertTriangle, Info, Globe } from "lucide-react";
 import { toast } from "sonner";
 
-// Same row taxonomy MonthlyPLBreakdown.tsx uses (INCOME_ROWS / EXPENSE_ROWS),
-// applied per marketplace instead of per account. Every field here comes
-// from get_monthly_pl_breakdown, which sources financial_events_cache --
-// per-transaction, marketplace-tagged Amazon events. Nothing here is
-// company overhead: Operating Expenses (Salary/Rent/Subscriptions/etc.) and
-// Inventory Damage & Loss (dispositions/write-offs) are deliberately
-// excluded because neither has a marketplace column in this account's data
-// at all -- there's nothing to attribute. CA/MX/BR sell via Remote
-// Fulfillment from the same US-purchased inventory, so there's no separate
-// international operation to carry its own overhead anyway.
-// Mirrors MonthlyPLBreakdown.tsx's INCOME_ROWS/EXPENSE_ROWS (the canonical
-// taxonomy) -- BY HAND, so it can and did fall behind; see compensated_clawback
-// below -- restocking_fee and promotional_rebate_refunds are
-// both credits: a restocking fee is charged to the RETURNING CUSTOMER and
-// kept by the seller (see fetch-profit-loss/index.ts's own comment on
-// processRefundEventToCache), and a promotional-rebate refund is Amazon
-// reversing an over-applied promo back to the seller. Getting either one
-// backwards understates international profit.
-const INCOME_KEYS = ["sales", "reimbursements", "shipping_credits", "gift_wrap_credits", "promotional_rebate_refunds", "restocking_fee", "other_income", "liquidations", "warehouse_lost", "warehouse_damage", "shipping_chargeback_refund"] as const;
-const INCOME_DEDUCTION_KEYS = ["refunds", "shipping_credit_refunds", "gift_wrap_credit_refunds", "promotional_rebates"] as const;
-// compensated_clawback added 2026-10-23. It was missing because when this list
-// was written the key sat in plModel MEMO_ROWS as display-only, so there was
-// nothing to mirror -- note hrr_non_apparel, its old memo-row neighbour, IS
-// here. Clawbacks became a real EXPENSE_ROWS line once fetch-profit-loss began
-// storing them (it had silently dropped every one, 0 rows across 22 months),
-// and without this entry international profit would keep ignoring them.
-//
-// This is exactly the hazard the comment above warns about: the list is a COPY
-// of plModel's taxonomy, so plModel changing does not update it. Any future
-// EXPENSE_ROWS addition has to be mirrored here by hand.
-const AMAZON_FEE_KEYS = ["referral_fees", "variable_closing_fees", "fixed_closing_fees", "fba_fees", "fba_customer_return_fees", "fba_inbound_fees", "fba_inbound_convenience_fee", "fba_storage_fees", "fba_removal_fees", "fba_disposal_fees", "fba_long_term_storage_fees", "digital_services_fee", "other_fees", "liquidations_brokerage_fee", "re_commerce_grading_charge", "hrr_non_apparel", "shipping_chargeback", "compensated_clawback"] as const;
+// Row taxonomy lives in src/lib/profitloss/internationalPanelKeys.ts, pinned
+// against plModel by src/lib/__tests__/internationalPanelTaxonomy.test.ts.
+// Read that file before changing what this panel counts -- it records why each
+// key is on the side it is on, and the one known limit of the figures.
+import {
+  INCOME_KEYS,
+  INCOME_DEDUCTION_KEYS,
+  AMAZON_FEE_KEYS,
+} from "@/lib/profitloss/internationalPanelKeys";
+
 
 interface MarketplaceRow {
   marketplace: string;
@@ -102,10 +81,21 @@ export default function InternationalMarketplaceProfitPanel({ year, marketplaces
         // day and BR to five days earlier, and the totals only looked frozen
         // because international volume is ~1 event/day. Showing the date turns
         // that from an investigation into a glance.
+        //
+        // Scoped to `year`, which it was NOT until 2026-11-11. The filter was
+        // marketplace-only, so the date shown was the newest event of ALL time
+        // regardless of the year on screen. Measured that day: CA holds 661
+        // events in 2025 ending 2025-12-31 and 828 in 2026 ending 2026-11-10 --
+        // so selecting 2025 reported "Data through 2026-11-10" and told the
+        // seller a closed year was current to yesterday. Harmless on the
+        // current year (both answers coincide) and wrong on every other one,
+        // which is exactly the year an accountant looks at.
         const { data: newestRow } = await supabase
           .from("financial_events_cache")
           .select("event_date")
           .eq("marketplace", mp)
+          .gte("event_date", `${year}-01-01`)
+          .lt("event_date", `${year + 1}-01-01`)
           .order("event_date", { ascending: false })
           .limit(1)
           .maybeSingle();
@@ -220,7 +210,14 @@ export default function InternationalMarketplaceProfitPanel({ year, marketplaces
         </p>
         <p className="text-xs text-muted-foreground flex items-start gap-1.5">
           <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-          "Sales" here is net of refunds, shipping/gift-wrap credit refunds, promotional rebates, and restocking fees — the same income definition the P&L uses elsewhere — plus reimbursements, shipping/gift-wrap credits, other income, liquidations, and Amazon-paid warehouse-lost/damage reimbursements. "Amazon Fees" is every Amazon-charged fee line (referral, FBA fulfillment/inbound/storage/removal/disposal, closing, shipping chargebacks, etc.). Marketplace Profit = Sales − COGS − Amazon Fees, exactly.
+          "Sales" here is net of refunds, shipping and gift-wrap credit refunds, and
+          promotional rebates — the same income definition the P&L uses elsewhere — plus
+          reimbursements, shipping and gift-wrap credits, promotional rebate refunds,
+          restocking fee credits, other income, liquidations, Amazon-paid
+          warehouse-lost/damage reimbursements, and shipping chargeback refunds.
+          "Amazon Fees" is every Amazon-charged fee line (referral, FBA
+          fulfillment/inbound/storage/removal/disposal, closing, shipping chargebacks,
+          etc.). Marketplace Profit = Sales − COGS − Amazon Fees, exactly.
         </p>
       </CardContent>
     </Card>
