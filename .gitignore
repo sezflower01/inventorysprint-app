@@ -34,4 +34,16 @@ print-clients/windows/bin/
 print-clients/windows/obj/
 
 .vercel
+
+# `.env*` has been here all along -- but .env was committed BEFORE the rule
+# existed, and a tracked file ignores .gitignore entirely, so the rule looked
+# like it was working while the file went on being published with every push.
+# `git rm --cached .env` is what actually detaches it; the rule only keeps it
+# detached. Everything in it is publishable (anon key, project URL, SP-API
+# solution id), so nothing was exposed -- but a tracked .env is how the first
+# real secret someone adds gets published out of habit.
+#
+# .env.example is the exception: a template with no values, so a fresh
+# checkout knows what to fill in.
 .env*
+!.env.example
