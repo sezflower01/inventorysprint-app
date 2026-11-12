@@ -170,6 +170,85 @@ BEGIN
     END IF;
   END LOOP;
 
+  ------------------------------------------------------------------
+  -- 5. Which auth does each scheduled sync actually present?
+  ------------------------------------------------------------------
+  -- Needed before any gate in these functions is moved or tightened.
+  -- A job's command was copied forward from job to job over many
+  -- migrations, so the headers it sends are a fact about the database,
+  -- not about any file in this repo -- the only way to know is to read it.
+  --
+  -- Three shapes are possible and they are NOT interchangeable:
+  --   x-internal-secret ....... the intended path for a scheduled job
+  --   service_role bearer ..... satisfies the gateway AND most own guards
+  --   anon/publishable bearer . satisfies the gateway and NOTHING else;
+  --                             this is what rotated out from under four
+  --                             jobs before and made them silently dead
+  --
+  -- Every value is masked: only the SHAPE of the header is printed, never
+  -- its contents.
+  RAISE NOTICE '';
+  RAISE NOTICE '--- 5. auth presented by each scheduled sync (values masked) ---';
+  v_any := false;
+  -- Nested block: decoding a base64 JWT payload can raise on a malformed
+  -- token, and a probe that aborts half way through tells you nothing. Any
+  -- failure here degrades this ONE section instead of losing sections 1-4.
+  BEGIN
+  FOR r IN
+    SELECT
+      j.jobname,
+      j.active,
+      (j.command ILIKE '%x-internal-secret%')                       AS has_internal_secret,
+      (j.command ILIKE '%service_role%')                            AS mentions_service_role,
+      (j.command ILIKE '%sync_all_users%')                          AS sends_all_users_flag,
+      (j.command ILIKE '%vault%' OR j.command ILIKE '%decrypted_secret%') AS reads_from_vault,
+      -- role claim of any bearer embedded literally in the command, decoded
+      -- from the JWT payload. Decodes the ROLE only; no token is printed.
+      (
+        SELECT string_agg(DISTINCT claim_role, ',')
+        FROM (
+          SELECT (convert_from(
+                    decode(rpad(translate(split_part(tok, '.', 2), '-_', '+/'),
+                           ((length(split_part(tok, '.', 2)) + 3) / 4) * 4, '='),
+                           'base64'), 'utf8')::jsonb ->> 'role') AS claim_role
+          FROM regexp_matches(j.command, '(ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})', 'g') AS m(arr)
+          CROSS JOIN LATERAL (SELECT arr[1] AS tok) t
+        ) q
+        WHERE claim_role IS NOT NULL
+      )                                                             AS literal_bearer_role
+    FROM cron.job j
+    WHERE j.command ILIKE '%sync-sales-orders%'
+       OR j.command ILIKE '%sync-amazon-inventory%'
+       OR j.command ILIKE '%sync-fbm%'
+       OR j.command ILIKE '%bulk-live-verify%'
+       OR j.command ILIKE '%auto-sync%'
+    ORDER BY j.jobname
+  LOOP
+    v_any := true;
+    RAISE NOTICE '  %', rpad(r.jobname, 36)
+      || 'active=' || r.active
+      || ' internal_secret=' || r.has_internal_secret
+      || ' vault=' || r.reads_from_vault
+      || ' all_users_flag=' || r.sends_all_users_flag
+      || ' literal_bearer_role=' || coalesce(r.literal_bearer_role, 'none');
+    IF r.literal_bearer_role = 'anon' THEN
+      RAISE NOTICE '      *** presents an ANON bearer. That satisfies the gateway and';
+      RAISE NOTICE '          nothing else, and it rotates. Treat as fragile. ***';
+    END IF;
+    IF NOT r.has_internal_secret AND NOT r.reads_from_vault
+       AND coalesce(r.literal_bearer_role, 'none') = 'none' THEN
+      RAISE NOTICE '      *** no recognisable auth in the command at all -- read it by';
+      RAISE NOTICE '          hand before changing any gate this job passes through ***';
+    END IF;
+  END LOOP;
+  IF NOT v_any THEN
+    RAISE NOTICE '  (no matching cron jobs)';
+  END IF;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE '  section 5 could not complete: % (%)', SQLERRM, SQLSTATE;
+    RAISE NOTICE '  Read cron.job.command by hand for the jobs in section 3.';
+  END;
+
   RAISE NOTICE '';
   RAISE NOTICE '================ END ================';
   RAISE NOTICE '';
