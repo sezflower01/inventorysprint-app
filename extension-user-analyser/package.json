@@ -1,0 +1,14 @@
+{
+  "private": true,
+  "type": "commonjs",
+  "name": "inventorysprint-user-analyser",
+  "version": "0.1.0",
+  "description": "Chrome extension: reads the Amazon page the user is already viewing. Self-contained; not part of the root build.",
+  "scripts": {
+    "test": "node --test __tests__/*.test.js",
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
+}
