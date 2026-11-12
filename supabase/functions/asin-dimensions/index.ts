@@ -7,6 +7,7 @@ import {
   acquireKeepaTokensOnly, reportKeepaTokensLeft, recordKeepa429,
   KEEPA_COST, KEEPA_RESERVE,
 } from "../_shared/keepa-rate-gate.ts";
+import { mayUseOperatorCredentials } from "../_shared/operator-credential-guard.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -232,6 +233,28 @@ Deno.serve(async (req) => {
         .eq('marketplace_id', mkt.mpId)
         .eq('is_active', true)
         .maybeSingle();
+      // lwa() falls back to the operator's SPAPI_REFRESH_TOKEN* when handed
+      // null, so a user with no connection would have dimensions fetched on
+      // the operator's Amazon account and quota.
+      //
+      // This one SKIPS the SP-API attempt rather than refusing the request,
+      // which the gating and fee functions do. Dimensions are a property of
+      // the product, not of a seller account, so there is no wrong answer to
+      // give here -- the only harm is spending the operator's SP-API quota,
+      // which competes with the repricer. Leaving `dims` null falls through to
+      // the Keepa path below, so an unconnected user still gets dimensions.
+      let mayUseOperatorSpApi = true;
+      if (!sa?.refresh_token) {
+        const may = await mayUseOperatorCredentials(admin, {
+          userId: String(claims.claims.sub),
+          internal: false, // no x-internal-secret path in this function
+          fn: 'asin-dimensions',
+        });
+        mayUseOperatorSpApi = may.allowed;
+      }
+      if (!mayUseOperatorSpApi) {
+        throw new Error('SKIP_SPAPI_NOT_CONNECTED'); // caught below; Keepa still runs
+      }
       const tok = await lwa(mkt.region, sa?.refresh_token || null);
       const cat = await spGet(
         `/catalog/2022-04-01/items/${asin}`,

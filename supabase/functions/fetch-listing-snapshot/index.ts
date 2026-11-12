@@ -4,6 +4,7 @@ import { getCachedLwaTokenVerbose } from '../_shared/lwa-token-cache.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 import { checkModuleAccess } from "../_shared/module-access-guard.ts";
+import { mayUseOperatorCredentials, amazonNotConnectedResponse } from "../_shared/operator-credential-guard.ts";
 import { waitForApiToken } from "../_shared/rate-limiter.ts";
 
 const corsHeaders = {
@@ -426,6 +427,20 @@ Deno.serve(async (req) => {
       .eq('marketplace_id', marketplaceId)
       .eq('is_active', true)
       .maybeSingle();
+
+    // Without the user's OWN token, getLwaAccessToken falls back to
+    // SPAPI_REFRESH_TOKEN -- the operator's Amazon account -- and this
+    // function then returns the operator's gating (/listings/restrictions),
+    // the operator's fee schedule (getMyFeesEstimate) and, when a SKU is
+    // passed, the operator's FBA stock. Ask first.
+    if (!sellerAuth?.refresh_token) {
+      const may = await mayUseOperatorCredentials(adminClient, {
+        userId: user.id,
+        internal: false, // no internal caller: this function has no x-internal-secret path
+        fn: 'fetch-listing-snapshot',
+      });
+      if (!may.allowed) return amazonNotConnectedResponse(may, corsHeaders);
+    }
 
     const accessToken = await getLwaAccessToken('NA', sellerAuth?.refresh_token || null);
 

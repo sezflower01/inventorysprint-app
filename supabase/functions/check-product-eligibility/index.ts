@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
+import { mayUseOperatorCredentials, amazonNotConnectedResponse } from "../_shared/operator-credential-guard.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -313,6 +314,21 @@ Deno.serve(async (req) => {
       .eq('marketplace_id', marketplaceId)
       .eq('is_active', true)
       .maybeSingle();
+
+    // The comment further down already states the point of using the user's
+    // own token: Amazon must answer "is THIS seller approved?". Without one we
+    // fall back to the operator's seller, which answers for the wrong seller.
+    // isInternal is passed through so the pg_cron caller
+    // (20260928030000_check_unchecked_shipment_asin.sql) keeps working -- it
+    // runs as the operator by design.
+    if (!userAuth?.seller_id) {
+      const may = await mayUseOperatorCredentials(supabase, {
+        userId: user?.id ?? null,
+        internal: isInternal,
+        fn: 'check-product-eligibility',
+      });
+      if (!may.allowed) return amazonNotConnectedResponse(may, corsHeaders);
+    }
 
     const sellerId = userAuth?.seller_id
       || Deno.env.get(`SPAPI_SELLER_ID_${marketplace}`)

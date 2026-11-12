@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
+import { mayUseOperatorCredentials, amazonNotConnectedResponse } from "../_shared/operator-credential-guard.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -96,7 +97,22 @@ Deno.serve(async (req) => {
       refreshToken = userAuth.refresh_token;
       console.log('Using user-specific auth for marketplace:', targetMarketplaceCode);
     } else {
-      // Fall back to global refresh token (admin shared token)
+      // ⚠️ THIS BRANCH WRITES TO AMAZON ON THE OPERATOR'S ACCOUNT.
+      //
+      // The old comment called it "admin shared token", which was accurate and
+      // was the problem: a signed-in user with no Amazon connection would
+      // create a listing in the OPERATOR's Seller Central -- real inventory,
+      // under the operator's SKUs, billed to the operator. Measured
+      // 2026-11-12: of three accounts on this project, two have no SP-API, so
+      // this was reachable.
+      const may = await mayUseOperatorCredentials(supabase, {
+        userId: user.id,
+        internal: false, // the browser is the only caller
+        fn: 'create-amazon-listing',
+      });
+      if (!may.allowed) return amazonNotConnectedResponse(may, corsHeaders);
+
+      // Fall back to the operator's own refresh token.
       refreshToken = Deno.env.get('SPAPI_REFRESH_TOKEN') || null;
       // For EU marketplaces, try EU token
       const euMarkets = ['UK', 'DE', 'FR', 'IT', 'ES', 'NL', 'SE', 'PL', 'TR', 'EG', 'SA', 'AE', 'IN'];

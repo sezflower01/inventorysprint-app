@@ -8,6 +8,7 @@
 // (user, seller, marketplace, asin).
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
 import { waitForApiToken } from "../_shared/rate-limiter.ts";
+import { mayUseOperatorCredentials, amazonNotConnectedResponse } from "../_shared/operator-credential-guard.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -96,6 +97,19 @@ Deno.serve(async (req) => {
       .eq('marketplace_id', marketplaceId)
       .eq('is_active', true)
       .maybeSingle();
+
+    // Gating is per seller account, so answering from the operator's seller_id
+    // tells the user whether the OPERATOR is ungated -- and caches it under
+    // that seller_id as though it were theirs. This is the most misleading
+    // answer in the product: it reads as "you can sell this".
+    if (!userAuth?.seller_id) {
+      const may = await mayUseOperatorCredentials(supabase, {
+        userId: user.id,
+        internal: false, // no x-internal-secret path here
+        fn: 'check-fba-listing-eligibility',
+      });
+      if (!may.allowed) return amazonNotConnectedResponse(may, corsHeaders);
+    }
 
     const sellerId = userAuth?.seller_id
       || Deno.env.get(`SPAPI_SELLER_ID_${marketplace}`)
