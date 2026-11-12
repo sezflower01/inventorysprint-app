@@ -894,9 +894,19 @@ async function handleSyncRequest(req: Request): Promise<Response> {
     const internalHeader = req.headers.get('x-internal-secret');
     const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
     
-    // Check for internal service call (from enrich-pending-orders or other edge functions)
-    // Internal calls pass user_id in body and use service role token
-    const isInternalServiceCall = requestBody.user_id && requestBody.enrich_by_asin === true;
+    // There used to be a third acceptance branch here that treated
+    // `user_id` in the body as proof of an internal call when
+    // `enrich_by_asin` was also set -- no secret, no key, despite the comment
+    // claiming a service-role token was used. It was also redundant: its only
+    // real caller, enrich-pending-orders, builds its client with
+    // SUPABASE_SERVICE_ROLE_KEY, so it already satisfies isServiceRoleCall
+    // below. Removed rather than fixed, because the safest version of a
+    // redundant branch is no branch.
+    //
+    // Confirmed before removing: the browser never sends user_id for this
+    // path. SalesSyncContext.tsx:254 / :587 and SyncedInventory.tsx:1195 send
+    // enrich_by_asin and target_asin only, so they fall through to the JWT
+    // branch and act as themselves.
     
     // Check if Bearer token IS the service role key (internal call from auto-sync)
     const bearerToken = authHeader?.replace('Bearer ', '') || '';
@@ -904,10 +914,7 @@ async function handleSyncRequest(req: Request): Promise<Response> {
     
     let userId: string;
     
-    if (isInternalServiceCall) {
-      userId = requestBody.user_id;
-      console.log(`🔧 INTERNAL_SERVICE_CALL: Processing enrich_by_asin for user ${userId}`);
-    } else if (internalHeader && internalSecret && internalHeader === internalSecret && requestBody.user_id) {
+    if (internalHeader && internalSecret && internalHeader === internalSecret && requestBody.user_id) {
       userId = requestBody.user_id;
       console.log(`🔧 INTERNAL_SECRET_CALL: Processing for user ${userId}`);
     } else if (isServiceRoleCall) {

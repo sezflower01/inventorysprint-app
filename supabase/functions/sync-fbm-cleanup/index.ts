@@ -2,6 +2,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 import { gunzip } from "https://deno.land/x/compress@v0.4.5/gzip/mod.ts";
 import { waitForApiToken } from "../_shared/rate-limiter.ts";
+import { requireInternalCall } from "../_shared/internal-call-auth.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -143,6 +144,19 @@ interface AuthoritativeFbaState {
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
+
+  // Scheduled job only -- there is no user-facing path here, and this function
+  // writes. Its pg_cron job sends x-internal-secret (verified against cron.job
+  // before this check was added, because a check a job cannot satisfy kills
+  // the job while pg_cron still reports success -- the trap in CLAUDE.md).
+  //
+  // verify_jwt stays FALSE in config.toml on purpose: pg_cron sends no
+  // Authorization header, so the platform gateway would reject the call before
+  // this function ran. That is exactly why the check has to live here.
+  {
+    const refusal = requireInternalCall(req, corsHeaders, 'sync-fbm-cleanup');
+    if (refusal) return refusal;
+  }
 
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
