@@ -357,6 +357,28 @@ export const MODULE_CATEGORIES: ModuleCategory[] = [
         color: "from-emerald-500 to-teal-700",
         ga: "tool_menu_extension_create",
       },
+      {
+        // adminOnly while this is a 0.1.0 TEST build. The card sits beside the
+        // other two, but only the admin sees it -- the two non-admin accounts
+        // on this project would otherwise be offered an extension that has not
+        // been through Chrome Web Store review and whose Amazon page parsing
+        // has never run against a real listing. Delete the adminOnly line to
+        // release it; visibleModules() below is the only gate.
+        //
+        // It is listed here deliberately rather than hidden away: unlike the
+        // other two it makes NO Amazon API call and uses no seller
+        // credentials, which is the whole reason it exists, so the description
+        // says so where someone choosing between the three will read it.
+        adminOnly: true,
+        label: "Chrome Extension — User Analyser (test)",
+        description:
+          "Reads the Amazon page you are already viewing — ASIN, price, Buy Box seller, sellers, BSR — each field labelled with its source. No Amazon seller account needed or used; does not check gating.",
+        downloadUrl: "/inventorysprint-user-analyser-extension.zip",
+        downloadFilename: "inventorysprint-user-analyser-extension.zip",
+        icon: ScanLine,
+        color: "from-slate-500 to-slate-700",
+        ga: "tool_menu_extension_user_analyser",
+      },
     ],
   },
 ];

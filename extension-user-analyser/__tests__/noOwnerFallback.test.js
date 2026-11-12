@@ -231,3 +231,29 @@ test('manifest permissions stay minimal and match the stated allowlist', () => {
 test('cosmetic: there is something to lint', () => {
   assert.ok(FILES.length >= 6, `expected the shipped file set, found ${FILES.length}`);
 });
+
+// ── The second packager ───────────────────────────────────────────────────
+//
+// There are now TWO things that zip this folder: build.js here (for a manual
+// upload) and scripts/build-extension-zips.js at the repo root (which writes
+// public/ for the app's download card). The root one keeps its own `ignore`
+// list, so a file added to EXCLUDE_FILES here and not there would leak into a
+// public download -- node_modules alone is ~5 MB of jsdom.
+//
+// This reaches outside the folder, which a shipped file must never do but a
+// test may: it is the only place that can see both lists.
+test('the root zip builder excludes everything build.js excludes', () => {
+  const rootScript = path.join(ROOT, '..', 'scripts', 'build-extension-zips.js');
+  if (!fs.existsSync(rootScript)) {
+    // Not wired in yet -- that is a valid state, not a failure.
+    return;
+  }
+  const src = fs.readFileSync(rootScript, 'utf8');
+  const block = src.slice(src.indexOf('extension-user-analyser'));
+  const missing = [];
+  for (const f of ['__tests__', 'node_modules', 'package.json', 'build.js', 'make-icons.js']) {
+    if (!block.includes(f)) missing.push(f);
+  }
+  assert.deepEqual(missing, [],
+    'scripts/build-extension-zips.js would ship these into public/: ' + missing.join(', '));
+});
