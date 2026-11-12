@@ -80,7 +80,9 @@ BEGIN
   END LOOP;
 
   FOR r IN
-    SELECT module::text AS m, COUNT(*) AS n, MAX(created_at)::date AS last_used
+    -- module_usage keys on `path`, not `module`; it also has a column literally
+    -- named `count`, so the aggregate is spelled out to avoid shadowing it.
+    SELECT path::text AS m, COUNT(*) AS n, MAX(last_used)::date AS last_used
     FROM public.module_usage WHERE user_id::text LIKE 'e697c7c7%'
     GROUP BY 1 ORDER BY 2 DESC
   LOOP
