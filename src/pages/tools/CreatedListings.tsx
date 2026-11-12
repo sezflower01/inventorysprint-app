@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { isAmazonNotConnected, functionErrorMessage, AMAZON_CONNECT_MESSAGE } from "@/lib/amazonConnection";
 import { useAuth } from "@/contexts/AuthContext";
 import { useSubscription } from "@/hooks/use-subscription";
 import { getInventoryCache, setInventoryCache } from "@/hooks/use-inventory-cache";
@@ -2851,8 +2852,20 @@ export default function CreatedListings() {
                       body: { asin: item.asin },
                       headers: { Authorization: `Bearer ${session.access_token}` }
                     });
-                    if (error) { toast.error("Failed to fetch: " + (error.message || "")); return; }
-                    if (data?.error) { toast.error(data.error); return; }
+                    // AMAZON_NOT_CONNECTED can arrive either way here: as a
+                    // 409 (error) or, if a function ever returns 200 with an
+                    // error body, as data.error. isAmazonNotConnected handles
+                    // both shapes, which is why this file needed both checks.
+                    if (error) {
+                      if (await isAmazonNotConnected(error)) { toast.error(AMAZON_CONNECT_MESSAGE); return; }
+                      toast.error("Failed to fetch: " + (await functionErrorMessage(error, error.message || "")));
+                      return;
+                    }
+                    if (data?.error) {
+                      if (await isAmazonNotConnected(data)) { toast.error(AMAZON_CONNECT_MESSAGE); return; }
+                      toast.error(data.error);
+                      return;
+                    }
                     const price = data?.price || item.price || 0;
                     // Calculate fees — same formula as CreateListing
                     const fees = data?.fees || {};

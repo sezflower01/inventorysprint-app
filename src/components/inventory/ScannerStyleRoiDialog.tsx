@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, useCallback } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { supabase } from "@/integrations/supabase/client";
+import { functionErrorMessage } from "@/lib/amazonConnection";
 import { useAuth } from "@/contexts/AuthContext";
 import { Loader2, Package, RefreshCw } from "lucide-react";
 
@@ -176,7 +177,13 @@ export function ScannerStyleRoiDialog({
           body: { asin: A },
           headers: { Authorization: `Bearer ${session.access_token}` },
         });
-        if (error) throw error;
+        if (error) {
+          // This dialog rethrows, so whatever is attached here is what the
+          // outer handler shows. Without this it would be the useless
+          // "non-2xx status code" even though the 409 body says exactly what
+          // to do. See src/lib/amazonConnection.ts.
+          throw new Error(await functionErrorMessage(error, "Could not load fees"));
+        }
         const f = data?.fees;
         if (f) {
           setFees({

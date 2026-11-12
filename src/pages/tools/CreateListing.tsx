@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
+import { isAmazonNotConnected, AMAZON_CONNECT_MESSAGE } from "@/lib/amazonConnection";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -255,6 +256,17 @@ const CreateListing = () => {
 
       if (error) {
         const msg = error.message || "";
+
+        // See src/lib/amazonConnection.ts -- supabase-js hides the 409 body on
+        // error.context, so error.message alone cannot tell us this happened.
+        if (await isAmazonNotConnected(error)) {
+          toast({
+            title: "Amazon account not connected",
+            description: AMAZON_CONNECT_MESSAGE,
+            variant: "destructive",
+          });
+          return;
+        }
 
         if (msg.includes("NOT_FOUND")) {
           toast({

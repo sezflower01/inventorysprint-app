@@ -10,6 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "sonner";
+import { isAmazonNotConnected, functionErrorMessage, AMAZON_CONNECT_MESSAGE } from "@/lib/amazonConnection";
 import { Plus, Calculator, Download, ExternalLink, Trash2, ArrowUpDown, ArrowUp, ArrowDown, Lock } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
@@ -269,6 +270,16 @@ const PersonalHour = () => {
       if (apiError) {
         const msg = apiError.message || "";
 
+        // The guard returns 409 AMAZON_NOT_CONNECTED when this account has no
+        // Amazon connection of its own. supabase-js puts the real body on
+        // error.context, not error.message -- which is always the fixed
+        // "non-2xx status code" string -- so without this the user saw that
+        // instead of being told what to do. See src/lib/amazonConnection.ts.
+        if (await isAmazonNotConnected(apiError)) {
+          toast.error(AMAZON_CONNECT_MESSAGE);
+          return;
+        }
+
         if (msg.includes("NOT_FOUND")) {
           toast.error(`ASIN ${order.asin} not found in the US marketplace. Order was not updated.`);
           return;
@@ -279,7 +290,7 @@ const PersonalHour = () => {
           return;
         }
 
-        toast.error("Failed to update order: " + msg);
+        toast.error("Failed to update order: " + (await functionErrorMessage(apiError, msg)));
         return;
       }
 
@@ -471,6 +482,16 @@ const PersonalHour = () => {
 
       if (apiError) {
         const msg = apiError.message || "";
+
+        // The guard returns 409 AMAZON_NOT_CONNECTED when this account has no
+        // Amazon connection of its own. supabase-js puts the real body on
+        // error.context, not error.message -- which is always the fixed
+        // "non-2xx status code" string -- so without this the user saw that
+        // instead of being told what to do. See src/lib/amazonConnection.ts.
+        if (await isAmazonNotConnected(apiError)) {
+          toast.error(AMAZON_CONNECT_MESSAGE);
+          return;
+        }
 
         if (msg.includes("NOT_FOUND")) {
           toast.error(`ASIN ${newOrderAsin.toUpperCase()} not found in the US marketplace.`);
