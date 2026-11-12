@@ -236,6 +236,7 @@ import { maybeFirePromoTripwire } from '../_shared/promo-tripwire.ts';
 import { computeBbOwnEstimateFields, makeSellerIdCache } from '../_shared/bbOwnEstimate.ts';
 import { computeNetRefundFromFecRows } from '../_shared/refund-math.ts';
 import { getConfirmedSalesOrderRevenueUsd, getMarketplaceCurrency } from '../_shared/salesCurrencyGuard.ts';
+import { mayActOnOperatorCredentials, amazonNotConnectedResponse } from '../_shared/operator-credential-guard.ts';
 
 
 type CostSource = 'listing' | 'inventory' | 'inventory_manual';
@@ -967,7 +968,11 @@ async function handleSyncRequest(req: Request): Promise<Response> {
     // legacy global secrets if no row exists.
     let resolvedClientId: string | null = Deno.env.get('LWA_CLIENT_ID') || null;
     let resolvedClientSecret: string | null = Deno.env.get('LWA_CLIENT_SECRET') || null;
-    let resolvedRefreshToken: string | null = Deno.env.get('SPAPI_REFRESH_TOKEN') || null;
+    // Starts NULL, not at the env value. Previously the operator's token was
+    // the starting point and a per-user row merely overwrote it, so an account
+    // without one silently kept the operator's -- the fallback was the default
+    // rather than the exception.
+    let resolvedRefreshToken: string | null = null;
     try {
       const { data: credRows } = await supabase.rpc('get_spapi_credentials_decrypted', { p_user_id: userId });
       const cred = (credRows as any[])?.[0];
@@ -976,6 +981,48 @@ async function handleSyncRequest(req: Request): Promise<Response> {
       if (cred?.refresh_token) resolvedRefreshToken = cred.refresh_token;
     } catch (e) {
       console.warn('[SPAPI_CREDS] DB lookup failed, using env fallback:', (e as any)?.message);
+    }
+
+    // A user's OWN credentials can live in either of two places, and checking
+    // only one of them would deny everybody in the other.
+    //
+    //   user_spapi_credentials  written ONLY by the manual SP-API Connection
+    //                           page (spapi-credentials), read above via the
+    //                           SECURITY DEFINER decrypt RPC.
+    //   seller_authorizations   written by amazon-oauth-callback -- i.e. by
+    //                           every user who connects the normal way.
+    //
+    // The OAuth callback does not write the first table at all, so a check
+    // that stopped at the RPC would send every OAuth-connected account to the
+    // operator guard and refuse it. That would turn a credential-lending bug
+    // into an onboarding outage, which is not a trade worth making.
+    if (!resolvedRefreshToken) {
+      try {
+        const { data: authRows } = await supabase
+          .from('seller_authorizations')
+          .select('refresh_token')
+          .eq('user_id', userId)
+          .eq('is_active', true)
+          .order('created_at', { ascending: false })
+          .limit(1);
+        const ownAuth = (authRows as any[])?.[0];
+        if (ownAuth?.refresh_token) resolvedRefreshToken = ownAuth.refresh_token;
+      } catch (e: any) {
+        console.warn('[SPAPI_CREDS] seller_authorizations lookup failed:', e?.message);
+      }
+    }
+
+    // No credentials of their own: the operator's may serve this only if the
+    // user being acted for IS the operator.
+    if (!resolvedRefreshToken) {
+      const credDecision = await mayActOnOperatorCredentials(supabase, {
+        actingUserId: userId,
+        fn: 'sync-sales-orders',
+      });
+      if (!credDecision.allowed) {
+        return amazonNotConnectedResponse(credDecision, corsHeaders);
+      }
+      resolvedRefreshToken = Deno.env.get('SPAPI_REFRESH_TOKEN') || null;
     }
 
     const globalRefreshToken = resolvedRefreshToken;

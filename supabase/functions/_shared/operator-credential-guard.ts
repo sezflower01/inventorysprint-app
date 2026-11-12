@@ -165,6 +165,92 @@ export async function mayUseOperatorCredentials(
   return denied("this account has no Amazon connection");
 }
 
+/**
+ * The same question, asked of a FAN-OUT caller -- and the answer is stricter.
+ *
+ * ── WHY A SECOND ENTRY POINT RATHER THAN A FLAG ──────────────────────────
+ *
+ * mayUseOperatorCredentials() treats an internal caller as trusted, and for
+ * the interactive functions that is right: a service-role call there means
+ * "another edge function is doing this on the operator's behalf", with the
+ * operator being the only user in play.
+ *
+ * It is exactly WRONG for the sync family. Those functions are invoked by a
+ * scheduled job that loops over users and names each one in the body, so the
+ * caller is internal on every single iteration -- including the iterations
+ * for accounts that have never connected anything. Passing `internal: true`
+ * there would make the guard return `allowed` for every user in the system,
+ * which is the behaviour being fixed, reached by a different road.
+ *
+ * So this variant does not take `internal` at all. It cannot be passed, so it
+ * cannot be passed by mistake. The only question it asks is:
+ *
+ *      is the user this request is ACTING AS the operator?
+ *
+ * A trusted caller acting for somebody else is still somebody else.
+ *
+ * ── WHAT THIS PREVENTS, CONCRETELY ───────────────────────────────────────
+ *
+ * A new account signs up; the OAuth callback fires a background inventory
+ * sync for it; the account has no credentials of its own yet; the function
+ * falls back to the operator's token and writes the OPERATOR's FBA catalogue
+ * under the new user_id. Every step looks reasonable on its own.
+ */
+export async function mayActOnOperatorCredentials(
+  supabase: RoleLookupClient,
+  opts: { actingUserId: string | null; fn?: string },
+): Promise<OperatorCredentialDecision> {
+  const fn = opts.fn ?? "unknown";
+
+  if (!opts.actingUserId) {
+    console.log(`[operator-credential-guard] ${fn}: denied -- no acting user`);
+    return denied("no acting user");
+  }
+
+  const ownerId = Deno.env.get("SPAPI_OWNER_USER_ID");
+  if (ownerId && ownerId.trim()) {
+    if (ownerId.trim() === opts.actingUserId) {
+      return { allowed: true, reason: "operator_by_env_id" };
+    }
+    console.log(
+      `[operator-credential-guard] ${fn}: denied acting_user=${opts.actingUserId} ` +
+        `(SPAPI_OWNER_USER_ID is set and does not match)`,
+    );
+    return denied("this account has no Amazon connection");
+  }
+
+  // No explicit owner configured: fall back to the admin-role proxy, exactly
+  // as mayUseOperatorCredentials does, so behaviour does not change the day
+  // somebody unsets the variable.
+  const { data, error } = await supabase
+    .from("user_roles")
+    .select("role")
+    .eq("user_id", opts.actingUserId)
+    .eq("role", "admin")
+    .maybeSingle();
+
+  if (error) {
+    console.warn(
+      `[operator-credential-guard] ${fn}: role lookup failed, denying: ${error.message}`,
+    );
+    return denied("could not verify account permissions");
+  }
+
+  if (data) {
+    console.log(
+      `[operator-credential-guard] ${fn}: allowed acting_user=${opts.actingUserId} ` +
+        `by ADMIN ROLE (set SPAPI_OWNER_USER_ID to stop relying on this proxy)`,
+    );
+    return { allowed: true, reason: "operator_by_admin_role" };
+  }
+
+  console.log(
+    `[operator-credential-guard] ${fn}: denied acting_user=${opts.actingUserId} ` +
+      `-- no SP-API connection of their own, and not the operator`,
+  );
+  return denied("this account has no Amazon connection");
+}
+
 function denied(detail: string): OperatorCredentialDecision {
   return {
     allowed: false,

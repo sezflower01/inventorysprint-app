@@ -3,6 +3,7 @@ import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 import { gunzip } from "https://deno.land/x/compress@v0.4.5/gzip/mod.ts";
 import { waitForApiToken } from "../_shared/rate-limiter.ts";
 import { requireInternalCall } from "../_shared/internal-call-auth.ts";
+import { mayActOnOperatorCredentials } from '../_shared/operator-credential-guard.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -204,7 +205,17 @@ Deno.serve(async (req) => {
           .eq('marketplace_id', marketplaceId)
           .eq('is_active', true)
           .maybeSingle();
-        refreshToken = auth?.refresh_token || Deno.env.get('SPAPI_REFRESH_TOKEN') || '';
+        refreshToken = auth?.refresh_token || '';
+        if (!refreshToken) {
+          // requireInternalCall above proves the CALLER is the machine. It
+          // says nothing about the user this iteration is acting for, which
+          // is the question that matters when a fan-out loops over accounts.
+          const credDecision = await mayActOnOperatorCredentials(supabase, {
+            actingUserId: userId,
+            fn: 'sync-fbm-cleanup',
+          });
+          if (credDecision.allowed) refreshToken = Deno.env.get('SPAPI_REFRESH_TOKEN') || '';
+        }
       }
       if (!refreshToken) throw new Error('No SP-API refresh token for user');
 

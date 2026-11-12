@@ -13,6 +13,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { mayActOnOperatorCredentials } from "../_shared/operator-credential-guard.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -392,8 +393,10 @@ serve(async (req) => {
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    // Resolve seller refresh token
-    let refreshToken = Deno.env.get("SPAPI_REFRESH_TOKEN") || null;
+    // Resolve seller refresh token. Starts NULL: the operator's token used to
+    // be the starting value, so an account with no authorisation of its own
+    // quietly billed its label costs against the operator's Amazon account.
+    let refreshToken: string | null = null;
     const marketplaceId = MARKETPLACE_IDS[String(order.marketplace || "US").toUpperCase()] || MARKETPLACE_IDS.US;
     const { data: authRows } = await supabase
       .from("seller_authorizations")
@@ -402,6 +405,15 @@ serve(async (req) => {
       .eq("is_active", true);
     const userAuth = (authRows ?? []).find((row: any) => row.marketplace_id === marketplaceId) || (authRows ?? [])[0];
     if (userAuth?.refresh_token) refreshToken = userAuth.refresh_token;
+
+    if (!refreshToken) {
+      const credDecision = await mayActOnOperatorCredentials(supabase, {
+        actingUserId: user.id,
+        fn: "sync-fbm-label-cost",
+      });
+      if (credDecision.allowed) refreshToken = Deno.env.get("SPAPI_REFRESH_TOKEN") || null;
+    }
+
     if (!refreshToken) {
       return new Response(JSON.stringify({
         success: false, found: false,

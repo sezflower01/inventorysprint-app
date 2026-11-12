@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.49.4';
 import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
+import { mayActOnOperatorCredentials, amazonNotConnectedResponse } from '../_shared/operator-credential-guard.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -312,8 +313,60 @@ Deno.serve(async (req) => {
       console.warn(`[sync-amazon-inventory] per-user cred lookup failed: ${e?.message || e}`);
     }
 
-    // Fallback to global env credentials
-    if (!refreshToken) refreshToken = Deno.env.get('SPAPI_REFRESH_TOKEN') || null;
+    // A user's OWN credentials can live in either of two places, and checking
+    // only one of them would deny everybody in the other.
+    //
+    //   user_spapi_credentials  written ONLY by the manual SP-API Connection
+    //                           page (spapi-credentials), read above via the
+    //                           SECURITY DEFINER decrypt RPC.
+    //   seller_authorizations   written by amazon-oauth-callback -- i.e. by
+    //                           every user who connects the normal way.
+    //
+    // The OAuth callback does not write the first table at all, so a check
+    // that stopped at the RPC would send every OAuth-connected account to the
+    // operator guard and refuse it. That would turn a credential-lending bug
+    // into an onboarding outage, which is not a trade worth making.
+    if (!refreshToken) {
+      try {
+        const { data: authRows } = await supabase
+          .from('seller_authorizations')
+          .select('refresh_token, seller_id, marketplace_id')
+          .eq('user_id', user.id)
+          .eq('is_active', true)
+          .order('created_at', { ascending: false })
+          .limit(1);
+        const ownAuth = (authRows as any[])?.[0];
+        if (ownAuth?.refresh_token) {
+          refreshToken = ownAuth.refresh_token;
+          credSource = 'user_oauth';
+          if (ownAuth.seller_id) sellerId = ownAuth.seller_id;
+          if (ownAuth.marketplace_id) marketplaceId = ownAuth.marketplace_id;
+        }
+      } catch (e: any) {
+        console.warn(`[sync-amazon-inventory] seller_authorizations lookup failed: ${e?.message || e}`);
+      }
+    }
+
+    // Fall back to the operator's own credentials -- but only for the
+    // operator. This is the exact point at which a brand-new account used to
+    // be handed the operator's Amazon connection: the OAuth callback fires a
+    // background sync for a user who has no credentials yet, the lookup above
+    // finds nothing, and what followed was an unconditional env fallback that
+    // then wrote the OPERATOR's FBA catalogue under the new user_id.
+    //
+    // The fan-out variant of the guard is used deliberately: this function is
+    // called internally on every iteration of a scheduled fan-out, so trust
+    // in the CALLER says nothing about the user being acted for.
+    if (!refreshToken) {
+      const credDecision = await mayActOnOperatorCredentials(supabase, {
+        actingUserId: user.id,
+        fn: 'sync-amazon-inventory',
+      });
+      if (!credDecision.allowed) {
+        return amazonNotConnectedResponse(credDecision, corsHeaders);
+      }
+      refreshToken = Deno.env.get('SPAPI_REFRESH_TOKEN') || null;
+    }
     if (!lwaClientId) lwaClientId = Deno.env.get('LWA_CLIENT_ID') || Deno.env.get('SPAPI_LWA_CLIENT_ID') || null;
     if (!lwaClientSecret) lwaClientSecret = Deno.env.get('LWA_CLIENT_SECRET') || Deno.env.get('SPAPI_LWA_CLIENT_SECRET') || null;
     if (!sellerId) sellerId = Deno.env.get('SPAPI_SELLER_ID') || null;

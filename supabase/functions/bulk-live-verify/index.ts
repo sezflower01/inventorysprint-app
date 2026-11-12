@@ -4,6 +4,7 @@ import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 // Stage 2 of revive_ghosts calls the Listings Items API, which shares the
 // listings_api quota with every other caller -- never call it ungated.
 import { waitForApiToken } from "../_shared/rate-limiter.ts";
+import { mayActOnOperatorCredentials, amazonNotConnectedResponse } from '../_shared/operator-credential-guard.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -747,6 +748,19 @@ Deno.serve(async (req) => {
         });
       }
       userId = user.id;
+    }
+
+    // This function reads the live FBA snapshot from ONE Amazon account and
+    // writes the result under `userId`. There is no per-user credential path
+    // at all -- both branches below take the operator's env token directly --
+    // so for anyone but the operator its answers would be confidently wrong
+    // and would then be persisted. Decided once, here, before any work.
+    const credDecision = await mayActOnOperatorCredentials(supabase, {
+      actingUserId: userId,
+      fn: 'bulk-live-verify',
+    });
+    if (!credDecision.allowed) {
+      return amazonNotConnectedResponse(credDecision, corsHeaders);
     }
 
     const marketplaceId = 'ATVPDKIKX0DER'; // US
