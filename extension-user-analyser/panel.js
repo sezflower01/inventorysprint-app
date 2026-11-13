@@ -197,20 +197,84 @@
     }
   }
 
-  // DIFFERENCE 1 of 3 (see panel.html): a button, not a password form. The
-  // panel is injected into amazon.com, and a password field on a third party's
-  // page is the one part of the original not worth copying. Sign-in happens on
-  // our own origin, in a tab the user can see the address bar of.
-  $('apx-signin-btn')?.addEventListener('click', () => {
-    chrome.tabs?.create
-      ? chrome.tabs.create({ url: authUrls.signInUrl })
-      : window.open(authUrls.signInUrl, '_blank', 'noopener');
-  });
+  // ── in-panel sign in / create account ───────────────────────────────────
+  //
+  // One form, two modes. The credentials are read here and handed to the
+  // worker in a single message; nothing is kept afterwards, and the fields
+  // are cleared on success so a password does not sit in a DOM node for the
+  // life of the tab.
+
+  let mode = 'signin';                       // 'signin' | 'signup'
+  const emailEl = () => $('apx-signin-email');
+  const passEl = () => $('apx-signin-password');
+
+  function showAuthError(text) {
+    const box = $('apx-signin-error');
+    if (box) box.textContent = text || '';
+  }
+
+  function applyMode() {
+    const intro = $('apx-signin-intro');
+    const submit = $('apx-signin-btn');
+    const toggle = $('apx-signup-btn');
+    const pass = passEl();
+    showAuthError('');
+    if (mode === 'signup') {
+      if (intro) intro.textContent = 'Create an InventorySprint account. No Amazon connection needed to read product pages.';
+      if (submit) submit.textContent = 'Create account';
+      if (toggle) toggle.textContent = 'I already have an account';
+      // Tells a password manager to offer a NEW password rather than fill an
+      // old one. Getting this wrong is why sign-up forms silently autofill.
+      if (pass) pass.setAttribute('autocomplete', 'new-password');
+    } else {
+      if (intro) intro.textContent = "You're signed out of InventorySprint. Sign in to load product data.";
+      if (submit) submit.textContent = 'Sign in';
+      if (toggle) toggle.textContent = 'Create an account instead';
+      if (pass) pass.setAttribute('autocomplete', 'current-password');
+    }
+  }
+
   $('apx-signup-btn')?.addEventListener('click', () => {
-    chrome.tabs?.create
-      ? chrome.tabs.create({ url: authUrls.signUpUrl })
-      : window.open(authUrls.signUpUrl, '_blank', 'noopener');
+    mode = mode === 'signin' ? 'signup' : 'signin';
+    applyMode();
   });
+
+  $('apx-signin-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const email = (emailEl()?.value || '').trim();
+    const password = passEl()?.value || '';
+    const submit = $('apx-signin-btn');
+
+    if (!email || !password) { showAuthError('Enter your email and password.'); return; }
+
+    showAuthError('');
+    if (submit) { submit.disabled = true; submit.textContent = mode === 'signup' ? 'Creating…' : 'Signing in…'; }
+
+    const type = mode === 'signup' ? 'ISUA_SIGN_UP_PASSWORD' : 'ISUA_SIGN_IN_PASSWORD';
+    chrome.runtime.sendMessage({ type, email, password }, (res) => {
+      if (submit) submit.disabled = false;
+      applyMode();
+
+      if (chrome.runtime.lastError) { showAuthError('The extension worker is not running. Reload the extension.'); return; }
+      if (!res?.ok) { showAuthError(res?.error || 'Could not sign in.'); return; }
+
+      // Clear both fields whatever happened next: nothing is served by
+      // leaving a password in the DOM.
+      if (emailEl()) emailEl().value = '';
+      if (passEl()) passEl().value = '';
+
+      if (res.confirmationRequired) {
+        mode = 'signin';
+        applyMode();
+        showAuthError('Account created. Check your email for the confirmation link, then sign in.');
+        return;
+      }
+      showSignedIn();
+      toHost({ type: 'REREAD' });
+    });
+  });
+
+  applyMode();
 
   // ── header controls, identical behaviour to the original ────────────────
 

@@ -254,11 +254,10 @@ test('panel.html keeps every element id of the original, in the same order', { s
   const newSet = new Set(newIds);
   const oldSet = new Set(oldIds);
 
-  // The only ids allowed to be absent are the two sign-in inputs, which this
-  // extension deliberately does not have.
+  // Now that sign-in happens in the panel, nothing from the original is
+  // missing at all.
   const missing = oldIds.filter((i) => !newSet.has(i));
-  assert.deepEqual(missing.sort(), ['apx-signin-email', 'apx-signin-password'],
-    'the port lost ids the original has (or gained one back)');
+  assert.deepEqual(missing, [], 'the port lost ids the original has');
 
   // Order of the shared ids must match, or sections have moved.
   const sharedOld = oldIds.filter((i) => newSet.has(i));
@@ -266,15 +265,86 @@ test('panel.html keeps every element id of the original, in the same order', { s
   assert.deepEqual(sharedNew, sharedOld, 'shared element ids are in a different order than the original');
 });
 
-test('THE RULE: the panel has no password or email input', { skip }, () => {
+// ── the password rules ───────────────────────────────────────────────────
+//
+// REPLACES "THE RULE: the panel has no password or email input". The panel
+// now signs in and creates accounts in place, because sending someone to a
+// website to come back is not a sign-in flow, it is an interruption.
+//
+// What made the old rule worth having was never "no password field" as such
+// -- it was "Amazon's page cannot read what the user types". The iframe on
+// the chrome-extension:// origin gives that outright: same-origin policy, not
+// politeness. So the blanket ban is replaced by the four narrower promises
+// that actually carry the weight, each of which can fail silently and so each
+// of which gets a test.
+
+test('the only password field is the sign-in one, and it is in the sign-in form', { skip }, () => {
   const html = fs.readFileSync(path.join(ROOT, 'panel.html'), 'utf8');
-  assert.ok(!/type="password"/i.test(html), 'a password field appeared in the panel');
-  // The simulator's notify-email field is a plain notification address, not a
-  // credential, and is the only email input allowed. Match the WHOLE tag: the
-  // id sits before type=, so a forward-only match misses it.
-  const emails = (html.match(/<input[^>]*type="email"[^>]*>/g) || []);
-  assert.equal(emails.length, 1, `expected exactly one email input (the alert address), found ${emails.length}`);
-  assert.ok(/apx-sim-alert-email/.test(emails[0]), `the only email input should be the alert address, got: ${emails[0]}`);
+  const pw = html.match(/<input[^>]*type="password"[^>]*>/g) || [];
+  assert.equal(pw.length, 1, `expected exactly one password input, found ${pw.length}`);
+  assert.ok(/apx-signin-password/.test(pw[0]), `the password input is not the sign-in one: ${pw[0]}`);
+
+  const form = html.slice(html.indexOf('id="apx-signin-form"'), html.indexOf('</form>'));
+  assert.ok(form.includes('apx-signin-password'), 'the password field is outside the sign-in form');
+
+  // Autocomplete matters: without it a manager will not offer to save, and
+  // people reuse a password they cannot store.
+  assert.ok(/autocomplete="current-password"/.test(pw[0]), 'the password field has no autocomplete hint');
+  const em = html.match(/<input[^>]*id="apx-signin-email"[^>]*>/g) || [];
+  assert.equal(em.length, 1, 'the sign-in email field is missing');
+  assert.ok(/autocomplete="username"/.test(em[0]), 'the email field has no autocomplete hint');
+});
+
+test('the password is never written to storage', { skip }, () => {
+  const bg = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
+  for (const m of bg.matchAll(/storage\.local\.set\(([^;]{0,200})/g)) {
+    assert.ok(!/password/i.test(m[1]), `a storage write mentions password: ${m[1].slice(0, 80)}`);
+  }
+  // setSession is the only thing that persists auth, and it must persist
+  // tokens only.
+  const setSession = bg.slice(bg.indexOf('async function setSession'), bg.indexOf('async function clearSession'));
+  assert.ok(!/password/i.test(setSession), 'setSession touches a password');
+});
+
+test('the password is never logged', { skip }, () => {
+  for (const f of ['background.js', 'panel.js']) {
+    const src = fs.readFileSync(path.join(ROOT, f), 'utf8');
+    for (const m of src.matchAll(/console\.\w+\(([^;]{0,200})/g)) {
+      assert.ok(!/password/i.test(m[1]), `${f}: a console call mentions password: ${m[1].slice(0, 80)}`);
+    }
+  }
+});
+
+test('the password is sent to exactly one place: the Supabase auth endpoint', { skip }, () => {
+  const bg = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
+
+  // Every fetch whose body carries the password must target /auth/v1/ on the
+  // configured Supabase host, and nothing else may carry it at all.
+  const carriers = [...bg.matchAll(/fetch\(([\s\S]{0,420}?)\)\s*;/g)]
+    .filter((m) => /JSON\.stringify\(\{\s*email,\s*password\s*\}\)/.test(m[1]));
+
+  assert.ok(carriers.length >= 2, `expected sign-in and sign-up to send credentials, found ${carriers.length}`);
+  for (const c of carriers) {
+    assert.ok(/CFG\.SUPABASE_URL/.test(c[1]), 'credentials are sent to a host other than SUPABASE_URL');
+    assert.ok(/\/auth\/v1\//.test(c[1]), 'credentials are sent to something other than the auth endpoint');
+  }
+
+  // And the panel itself must never make the call -- it hands them to the
+  // worker and nothing else.
+  const panel = fs.readFileSync(path.join(ROOT, 'panel.js'), 'utf8');
+  assert.ok(!/fetch\s*\(/.test(panel), 'panel.js makes a fetch of its own; auth belongs in the worker');
+});
+
+test('sign-up distinguishes "confirm your email" from "you are in"', { skip }, () => {
+  // Conflating these is the classic bug: the panel says signed in, the
+  // account is dormant until the link is clicked, and nothing works.
+  const bg = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
+  const fn = bg.slice(bg.indexOf('async function signUpWithPassword'), bg.indexOf('/**\n * Refresh when'));
+  assert.ok(/confirmationRequired/.test(fn), 'sign-up does not report the confirmation case');
+  assert.ok(/access_token\s*&&\s*data\?\.refresh_token/.test(fn), 'sign-up does not check for a real session before claiming one');
+
+  const panel = fs.readFileSync(path.join(ROOT, 'panel.js'), 'utf8');
+  assert.ok(/confirmationRequired/.test(panel), 'the panel ignores the confirmation case');
 });
 
 // ── 7 ────────────────────────────────────────────────────────────────────

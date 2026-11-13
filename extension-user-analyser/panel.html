@@ -59,19 +59,30 @@
     </header>
 
     <main id="apx-body">
-      <!-- DIFFERENCE 1 of 3. Same card, same slot, same size. A button where
-           the original has two inputs and a submit: the panel never handles a
-           password, and sign-in happens on our own origin. The ids the
-           original's wiring looks for are kept as hidden placeholders so the
-           two files stay diffable and so a future port does not have to
-           rediscover which ids went missing. -->
+      <!-- Sign-in happens HERE, in the panel, exactly as the original does.
+           The two inputs and the submit are the original's markup unchanged.
+           Added to it: a mode switch, so an account can also be created
+           without leaving the page.
+
+           This is safe specifically because the panel is an iframe on the
+           chrome-extension:// origin. Amazon's page scripts cannot read these
+           fields across that boundary -- same-origin policy, not politeness.
+           The same form inside a shadow root injected into the page WOULD be
+           readable by anything else running there, and that is what the
+           earlier objection to it was really about.
+
+           The password goes straight to the worker, which exchanges it for a
+           session. It is never stored, never logged, and goes to exactly one
+           host. Tests pin each of those. -->
       <div id="apx-signin" class="apx-card hidden">
-        <p>You're signed out of InventorySprint. Sign in to load product data.</p>
-        <div id="apx-signin-form" class="apx-signin-form">
+        <p id="apx-signin-intro">You're signed out of InventorySprint. Sign in to load product data.</p>
+        <form id="apx-signin-form" class="apx-signin-form">
+          <input id="apx-signin-email" type="email" placeholder="Email" autocomplete="username" required />
+          <input id="apx-signin-password" type="password" placeholder="Password" autocomplete="current-password" required />
           <div id="apx-signin-error" class="apx-signin-error"></div>
-          <button id="apx-signin-btn" type="button" class="apx-primary">Sign in</button>
-          <button id="apx-signup-btn" type="button" class="apx-strip-link">Create account ↗</button>
-        </div>
+          <button id="apx-signin-btn" type="submit" class="apx-primary">Sign in</button>
+          <button id="apx-signup-btn" type="button" class="apx-strip-link">Create an account instead</button>
+        </form>
       </div>
 
       <div id="apx-content" class="hidden">

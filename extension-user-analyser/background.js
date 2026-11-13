@@ -51,6 +51,120 @@ async function clearSession() {
   try { await chrome.storage.local.remove(SESSION_KEY); } catch (_) { /* ignore */ }
 }
 
+// ── password auth, handled only here ─────────────────────────────────────
+//
+// The panel collects the email and password and hands them straight to this
+// worker; the worker exchanges them for a session and the credentials end
+// there. Rules that keep that true, each one testable:
+//
+//   - the password is never written to storage. Only access_token,
+//     refresh_token and expires_at are persisted, by setSession().
+//   - the password is never logged, not even its length, and never appears
+//     in an error message returned to the panel.
+//   - it is sent to exactly one place: this project's Supabase auth endpoint,
+//     over https. ALLOWED_FETCH_HOSTS and the lint both pin that.
+//   - it is not kept in a variable after the request. The parameter goes out
+//     of scope when the function returns.
+//
+// Why this is reasonable at all, having first argued the opposite: the panel
+// is an IFRAME on the chrome-extension:// origin. Amazon's page scripts
+// cannot read across that boundary -- same-origin policy, not politeness. A
+// field in a shadow root injected into the page would have been a different
+// matter, and that is what the earlier objection was really about.
+
+/** Shape every auth reply the same way so the panel has one thing to read. */
+function authResult(ok, extra) {
+  return { ok, ...extra };
+}
+
+/**
+ * Supabase returns an error body with several possible field names depending
+ * on which layer rejected it. Pick whichever is present, and fall back to
+ * something a person can act on rather than a status code.
+ */
+function authErrorMessage(data, status, fallback) {
+  const m = data?.error_description || data?.msg || data?.message || data?.error;
+  if (typeof m === 'string' && m.trim()) return m;
+  if (status === 400) return fallback;
+  if (status === 429) return 'Too many attempts — wait a minute and try again.';
+  return `Sign-in failed (${status}).`;
+}
+
+async function signInWithPassword(email, password) {
+  if (!email || !password) return authResult(false, { error: 'Enter your email and password.' });
+
+  const res = await fetch(`${CFG.SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+    method: 'POST',
+    headers: { apikey: CFG.SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (_) { data = null; }
+
+  if (!res.ok) {
+    // Deliberately not logging the status alongside the email: a failed-login
+    // log that names the account is a list of valid addresses.
+    return authResult(false, { error: authErrorMessage(data, res.status, 'Invalid email or password.') });
+  }
+  if (!data?.access_token || !data?.refresh_token) {
+    return authResult(false, { error: 'Signed in, but no session came back. Try again.' });
+  }
+
+  await setSession({
+    access_token: data.access_token,
+    refresh_token: data.refresh_token,
+    expires_at: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
+  });
+  return authResult(true, { email: userEmailFromToken(data.access_token) });
+}
+
+/**
+ * Sign-up is NOT in the original extension -- it is new here, because a user
+ * analyser whose first instruction is "go and sign up somewhere else" is not
+ * much of a user analyser.
+ *
+ * Two outcomes, and conflating them is the usual bug: with email confirmation
+ * ON (which this project uses -- see [auth.hook.send_email] in config.toml)
+ * the response carries a user but NO session, and the account does nothing
+ * until the link is clicked. Only when confirmation is off does a session
+ * come back immediately. The panel must say which happened.
+ */
+async function signUpWithPassword(email, password) {
+  if (!email || !password) return authResult(false, { error: 'Enter an email and a password.' });
+  if (String(password).length < 6) {
+    return authResult(false, { error: 'Password must be at least 6 characters.' });
+  }
+
+  const res = await fetch(`${CFG.SUPABASE_URL}/auth/v1/signup`, {
+    method: 'POST',
+    headers: { apikey: CFG.SUPABASE_ANON_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (_) { data = null; }
+
+  if (!res.ok) {
+    return authResult(false, { error: authErrorMessage(data, res.status, 'Could not create the account.') });
+  }
+
+  if (data?.access_token && data?.refresh_token) {
+    await setSession({
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_at: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
+    });
+    return authResult(true, { signedIn: true, email: userEmailFromToken(data.access_token) });
+  }
+
+  // Confirmation required. No session, and saying "signed in" here would send
+  // the user back to a panel that still shows them signed out.
+  return authResult(true, { signedIn: false, confirmationRequired: true });
+}
+
 /**
  * Refresh when the access token is within 5 minutes of expiry.
  *
@@ -148,6 +262,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           await clearSession();
           sendResponse({ ok: true });
           break;
+        case 'ISUA_SIGN_IN_PASSWORD': {
+          const r = await signInWithPassword(msg.email, msg.password);
+          sendResponse(r);
+          break;
+        }
+        case 'ISUA_SIGN_UP_PASSWORD': {
+          const r = await signUpWithPassword(msg.email, msg.password);
+          sendResponse(r);
+          break;
+        }
         case 'ISUA_AUTH_STATE': {
           const s = await ensureFreshSession();
           sendResponse({
