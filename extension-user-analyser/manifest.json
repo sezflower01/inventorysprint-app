@@ -36,7 +36,6 @@
       ],
       "js": [
         "readPage.js",
-        "panelCss.js",
         "content.js"
       ],
       "run_at": "document_idle"
@@ -50,6 +49,20 @@
         "handoff.js"
       ],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "panel.html",
+        "panel.js",
+        "panel.css",
+        "panel-popover.js",
+        "icons/icon48.png"
+      ],
+      "matches": [
+        "https://*.amazon.com/*"
+      ]
     }
   ]
 }

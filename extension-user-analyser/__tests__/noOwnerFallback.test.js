@@ -126,6 +126,23 @@ const ALLOWED_HOSTS = new Set([
   'inventorysprint.com',
   'www.inventorysprint.com',
   'sellercentral.amazon.com',
+  // Google Fonts, from panel.html only, and only as a <link rel=stylesheet>.
+  // The panel is a copy of extension/panel.html, which loads the same pairing
+  // (Inter / Space Grotesk) the web app uses; without them the panel is not
+  // the same panel.
+  //
+  // This is a real cost, not a formality: the panel renders on every product
+  // page a user opens, so each one makes a request to Google. The alternative
+  // is to ship the two woff2 files and drop the external load entirely, which
+  // would be strictly better for a user-facing extension and is worth doing --
+  // it is listed as a follow-up rather than done here, because it means adding
+  // binary assets and changing the stylesheet away from a verbatim copy.
+  //
+  // What stops this from widening: these hosts are reachable for STYLES only.
+  // The separate `fetch()` test below still pins every fetch to the Supabase
+  // host, so no code path can start sending data here.
+  'fonts.googleapis.com',
+  'fonts.gstatic.com',
 ]);
 
 /** Every absolute http(s) URL that appears in a string literal or href. */
@@ -224,8 +241,44 @@ test('manifest permissions stay minimal and match the stated allowlist', () => {
   }
   assert.equal(m.manifest_version, 3);
   assert.equal(m.version, '0.1.0');
-  // A closed shadow root means nothing needs exposing to the page.
-  assert.ok(!('web_accessible_resources' in m), 'nothing should be web-accessible in this build');
+});
+
+// This assertion replaced a stricter one, and the swap is the point of the
+// comment. It used to read:
+//
+//     assert.ok(!('web_accessible_resources' in m))
+//
+// which was correct while the panel lived in a closed shadow root. The panel
+// is now an iframe loading panel.html, so something MUST be exposed, and the
+// honest move is to narrow what "exposed" means rather than delete the test:
+// an exact resource list, and matches confined to the hosts the extension
+// already runs on. A `<all_urls>` match here would let any site on the web
+// load the panel or detect that the extension is installed.
+test('web-accessible resources are an exact list, confined to Amazon', () => {
+  const m = JSON.parse(read(path.join(ROOT, 'manifest.json')));
+  const war = m.web_accessible_resources;
+  assert.ok(Array.isArray(war) && war.length === 1, 'expected exactly one web_accessible_resources entry');
+
+  assert.deepEqual([...war[0].resources].sort(), [
+    'icons/icon48.png',
+    'panel-popover.js',
+    'panel.css',
+    'panel.html',
+    'panel.js',
+  ], 'the exposed resource list changed -- every addition is a new way to probe for this extension');
+
+  assert.deepEqual(war[0].matches, ['https://*.amazon.com/*'],
+    'web-accessible matches must stay confined to the pages the extension already runs on');
+
+  for (const pat of war[0].matches) {
+    assert.ok(!/^<all_urls>$/.test(pat) && !/^https?:\/\/\*\/\*$/.test(pat), `broad match pattern: ${pat}`);
+  }
+
+  // Everything exposed must actually exist, or the panel 404s at run time in a
+  // way that only shows up as an empty iframe.
+  for (const r of war[0].resources) {
+    assert.ok(fs.existsSync(path.join(ROOT, r)), `web_accessible resource missing from disk: ${r}`);
+  }
 });
 
 test('cosmetic: there is something to lint', () => {
