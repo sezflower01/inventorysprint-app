@@ -1,0 +1,188 @@
+// The ONLY module in this extension that talks to api.keepa.com.  // lint-allow:keepa-mention
+//
+// Loaded by the service worker via importScripts, so it runs in the worker and
+// never in a page context. Two consequences, both deliberate:
+//
+//   - the key is never present in the panel, in a content script, or on any
+//     Amazon page. The panel asks the worker for *state* (is there a key, how
+//     many tokens are left) and never for the key itself.
+//   - every outbound request carrying the key leaves from one file, which the
+//     lint can check exhaustively rather than approximately.
+//
+// ── WHOSE KEY, AND WHY IT MATTERS ────────────────────────────────────────
+//
+// Every user supplies their own, the project owner included. Not a
+// convenience: this project already learned, expensively, what happens when
+// one account's credentials answer for everybody. A shared key would also put
+// every user on the owner's token budget, where the repricer and the seller
+// monitor are already contending for 25 tokens a minute -- a handful of
+// extension users would starve live repricing.
+//
+// So: the key lives in chrome.storage.local in that user's browser. It is
+// never sent to our servers, never logged, never written into a zip, and
+// there is no default.
+//
+// ── TOKENS ───────────────────────────────────────────────────────────────
+//
+// Keepa meters tokens, not calls, and refills continuously. Every response
+// carries tokensLeft, tokensConsumed, refillIn and refillRate; the costs this
+// extension can incur are /token (free) and /product (1 token per ASIN).
+// Running out is an ordinary state, not an error, and gets its own message
+// with the refill time -- a blank tile would read as "no data for this
+// product", which is a different and wrong statement.
+//
+// ── THE 200-WITH-AN-ERROR TRAP ───────────────────────────────────────────
+//
+// Keepa signals failure in the BODY of a 200 response. Code that only checks
+// res.ok reads a failure as an empty result. Every call here checks
+// json.error before anything else. The same trap, with /product&offers, has
+// already cost this project a debugging cycle.
+
+(function (root) {
+  'use strict';
+
+  const KEY_STORE = 'isua_keepa_key';
+  const BASE = 'https://api.keepa.com';
+
+  // Keepa's own domain ids. Only the ones this extension can reach.
+  const DOMAIN = { US: 1, UK: 2, DE: 3, FR: 4, JP: 5, CA: 6, IT: 8, ES: 9, MX: 11, BR: 12 };
+
+  async function getKey() {
+    try {
+      const got = await chrome.storage.local.get(KEY_STORE);
+      const k = got?.[KEY_STORE];
+      return typeof k === 'string' && k.trim() ? k.trim() : null;
+    } catch (_) { return null; }
+  }
+
+  async function setKey(key) {
+    const k = String(key || '').trim();
+    if (!k) throw new Error('empty key');
+    await chrome.storage.local.set({ [KEY_STORE]: k });
+  }
+
+  async function clearKey() {
+    try { await chrome.storage.local.remove(KEY_STORE); } catch (_) { /* ignore */ }
+  }
+
+  /**
+   * Last 4 characters only, for showing the user which key is saved without
+   * showing the key. Never log or display anything else derived from it.
+   */
+  function maskKey(key) {
+    if (!key) return null;
+    const s = String(key);
+    return s.length <= 4 ? '••••' : `••••${s.slice(-4)}`;
+  }
+
+  /**
+   * Shape every reply the same way so the panel has one thing to read, and so
+   * a failure can never be mistaken for a zero.
+   */
+  function fail(code, message, extra) {
+    return { ok: false, code, message, ...extra };
+  }
+
+  async function callKeepa(path, params) {
+    const key = await getKey();
+    if (!key) return fail('NO_KEY', 'No API key saved.');
+
+    const qs = new URLSearchParams({ key, ...params });
+    let res;
+    try {
+      res = await fetch(`${BASE}${path}?${qs.toString()}`);
+    } catch (e) {
+      // Offline, DNS, blocked. Not an invalid key -- saying so would send the
+      // user to re-enter a key that is fine.
+      return fail('NETWORK', 'Could not reach the data provider. Check your connection.');
+    }
+
+    const text = await res.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch (_) { json = null; }
+
+    if (res.status === 401 || res.status === 403) {
+      return fail('BAD_KEY', 'That API key was rejected.');
+    }
+    if (res.status === 429) {
+      return fail('EXHAUSTED', 'Out of tokens.', { refillIn: json?.refillIn ?? null });
+    }
+    if (!res.ok) {
+      return fail('HTTP', `Request failed (${res.status}).`);
+    }
+    if (!json) {
+      return fail('HTTP', 'Unreadable response.');
+    }
+    // THE TRAP: a 200 whose body carries an error. Checked before anything
+    // reads a field off this object.
+    if (json.error) {
+      const msg = json.error.message || json.error.type || 'Request rejected.';
+      const isKey = /token|key|subscription/i.test(String(msg));
+      return fail(isKey ? 'BAD_KEY' : 'API', String(msg));
+    }
+
+    return {
+      ok: true,
+      data: json,
+      tokensLeft: Number.isFinite(json.tokensLeft) ? json.tokensLeft : null,
+      tokensConsumed: Number.isFinite(json.tokensConsumed) ? json.tokensConsumed : null,
+      refillIn: Number.isFinite(json.refillIn) ? json.refillIn : null,
+      refillRate: Number.isFinite(json.refillRate) ? json.refillRate : null,
+    };
+  }
+
+  /**
+   * Validate a key WITHOUT saving it, by asking for token status. Costs
+   * nothing, so it can be run on every gate open.
+   *
+   * Takes the candidate key explicitly rather than reading storage: the point
+   * is to check before committing, so an invalid key never gets saved and the
+   * user is never left with a stored key that does not work.
+   */
+  async function validate(candidate) {
+    const k = String(candidate || '').trim();
+    if (!k) return fail('NO_KEY', 'Enter your API key.');
+
+    let res;
+    try {
+      res = await fetch(`${BASE}/token?key=${encodeURIComponent(k)}`);
+    } catch (_) {
+      return fail('NETWORK', 'Could not reach the data provider. Check your connection.');
+    }
+
+    const text = await res.text();
+    let json = null;
+    try { json = text ? JSON.parse(text) : null; } catch (_) { json = null; }
+
+    if (res.status === 401 || res.status === 403) return fail('BAD_KEY', 'That API key was rejected.');
+    if (!res.ok || !json) return fail('HTTP', `Could not check the key (${res.status}).`);
+    if (json.error) return fail('BAD_KEY', String(json.error.message || json.error.type || 'Key rejected.'));
+
+    // A valid key that happens to be at zero is still a VALID key. Saving it
+    // and reporting the empty balance is right; refusing it would be wrong
+    // and would read as "your key is broken".
+    return {
+      ok: true,
+      tokensLeft: Number.isFinite(json.tokensLeft) ? json.tokensLeft : 0,
+      refillIn: Number.isFinite(json.refillIn) ? json.refillIn : null,
+      refillRate: Number.isFinite(json.refillRate) ? json.refillRate : null,
+    };
+  }
+
+  /** One ASIN. 1 token. */
+  async function product(asin, marketplace) {
+    const a = String(asin || '').trim().toUpperCase();
+    if (!/^[A-Z0-9]{10}$/.test(a)) return fail('BAD_ASIN', 'Not a valid ASIN.');
+    const domain = DOMAIN[String(marketplace || 'US').toUpperCase()] || DOMAIN.US;
+    // stats gives the rank and price summaries without asking for offers.
+    // offers is deliberately NOT requested: Keepa requires it to be 0 or >= 20,
+    // and anything between returns a 200 carrying an error that naive code
+    // reads as "no offers".
+    return callKeepa('/product', { asin: a, domain: String(domain), stats: '180' });
+  }
+
+  root.KEEPA = {
+    getKey, setKey, clearKey, maskKey, validate, product,
+    KEY_STORE, DOMAIN, BASE,
+  };
+})(typeof self !== 'undefined' ? self : globalThis);

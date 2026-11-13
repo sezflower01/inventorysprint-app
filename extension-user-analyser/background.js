@@ -21,18 +21,29 @@
 // about the product comes from readPage.js reading the DOM the user is already
 // looking at, inside their own tab.
 
+// The data-provider module is loaded here so that every call carrying a
+// user's API key leaves from one file the lint can check exhaustively.
+// importScripts, not an ESM import: this worker is a classic service worker
+// and switching it to a module would change how every other file in it loads.
+importScripts('keepa.js');
+
 const CFG = {
   SUPABASE_URL: 'https://mstibdszibcheodvnprm.supabase.co',
   // Publishable anon key. Safe to ship -- it grants nothing on its own, every
   // table is behind RLS and every row is scoped to auth.uid(). NEVER add a
-  // service-role key, a Keepa key or an AWS credential to this file.  // lint-allow:keepa-mention
+  // service-role key, a Keepa key or an AWS credential to this file.
   SUPABASE_ANON_KEY:
     'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1zdGliZHN6aWJjaGVvZHZucHJtIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDM4MTA3NTUsImV4cCI6MjA1OTM4Njc1NX0.akgxF2XOOlNk8OTECcLeOSP1DWqRY89dBDW8GkE2pgc',
   APP_URL: 'https://inventorysprint.com',
 };
 
 /** The only hosts this extension may ever fetch. The lint enforces it. */
-const ALLOWED_FETCH_HOSTS = ['mstibdszibcheodvnprm.supabase.co'];
+// What THIS file may fetch. The data provider is deliberately absent: only
+// keepa.js may reach it, and naming the host here would weaken the lint that
+// enforces that, by making it look generally allowed.
+const ALLOWED_FETCH_HOSTS = [
+  'mstibdszibcheodvnprm.supabase.co',
+];
 
 const SESSION_KEY = 'isua_session';
 
@@ -262,6 +273,49 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           await clearSession();
           sendResponse({ ok: true });
           break;
+        // ── data-provider key, held in this browser only ──────────────────
+        //
+        // The panel is told the STATE (is a key saved, does it work, how many
+        // tokens are left) and never the key. There is deliberately no
+        // message that returns it: a reply the panel can read is a reply a
+        // bug can leak.
+        case 'ISUA_PROVIDER_STATE': {
+          const key = await KEEPA.getKey();
+          if (!key) { sendResponse({ ok: true, hasKey: false }); break; }
+          const v = await KEEPA.validate(key);
+          sendResponse({
+            ok: true,
+            hasKey: true,
+            masked: KEEPA.maskKey(key),
+            valid: !!v.ok,
+            code: v.ok ? null : v.code,
+            message: v.ok ? null : v.message,
+            tokensLeft: v.ok ? v.tokensLeft : null,
+            refillIn: v.ok ? v.refillIn : null,
+            refillRate: v.ok ? v.refillRate : null,
+          });
+          break;
+        }
+        // Validated BEFORE it is stored, so an unusable key is never saved
+        // and the user is never left with a stored key that silently fails.
+        case 'ISUA_PROVIDER_SET_KEY': {
+          const v = await KEEPA.validate(msg.key);
+          if (!v.ok) { sendResponse({ ok: false, code: v.code, error: v.message }); break; }
+          await KEEPA.setKey(msg.key);
+          sendResponse({
+            ok: true,
+            masked: KEEPA.maskKey(String(msg.key).trim()),
+            tokensLeft: v.tokensLeft,
+            refillIn: v.refillIn,
+            refillRate: v.refillRate,
+          });
+          break;
+        }
+        case 'ISUA_PROVIDER_CLEAR_KEY': {
+          await KEEPA.clearKey();
+          sendResponse({ ok: true });
+          break;
+        }
         case 'ISUA_SIGN_IN_PASSWORD': {
           const r = await signInWithPassword(msg.email, msg.password);
           sendResponse(r);

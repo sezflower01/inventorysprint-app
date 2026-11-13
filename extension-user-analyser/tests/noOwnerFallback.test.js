@@ -143,6 +143,10 @@ const ALLOWED_HOSTS = new Set([
   // host, so no code path can start sending data here.
   'fonts.googleapis.com',
   'fonts.gstatic.com',
+  // Appears only in keepa.js. The per-file fetch rule below is what actually
+  // confines it; this entry just stops the URL lint flagging the base
+  // constant where it is legitimately declared.
+  'api.keepa.com',
 ]);
 
 /** Every absolute http(s) URL that appears in a string literal or href. */
@@ -166,24 +170,35 @@ test('every absolute URL in shipped code points at an allowed host', () => {
   assert.deepEqual(bad, [], 'URL outside the allowed hosts:\n' + bad.join('\n'));
 });
 
-test('fetch() is only ever called against the Supabase host', () => {
+test('fetch() only ever reaches a host that file is allowed to reach', () => {
+  // Was "only the Supabase host". Widened for 0.2.0, but per FILE rather than
+  // globally: keepa.js may reach the data provider and nothing else may, and
+  // keepa.js may reach nothing else. A single global allowlist would have let
+  // any file call either host, which is the opposite of the point.
   const bad = [];
   for (const f of FILES) {
     const src = read(f);
+    const isProvider = path.basename(f) === 'keepa.js';
     // Each fetch( and the ~200 chars that follow, which is where the URL is.
     for (const m of src.matchAll(/\bfetch\s*\(/g)) {
       const window_ = src.slice(m.index, m.index + 200);
       const urls = urlsIn(window_);
       const viaCfg = /CFG\.SUPABASE_URL/.test(window_);
-      if (viaCfg) continue;
-      if (urls.length === 0) {
-        bad.push(`${rel(f)}: fetch() with no literal URL and no CFG.SUPABASE_URL nearby`);
+      const viaBase = isProvider && window_.includes('BASE');
+      if (viaCfg) {
+        if (isProvider) bad.push(`${rel(f)}: the provider module must not reach our own host`);
         continue;
       }
+      if (viaBase) continue;
+      if (urls.length === 0) {
+        bad.push(`${rel(f)}: fetch() with no literal URL and no known base nearby`);
+        continue;
+      }
+      const allowed = isProvider ? 'api.keepa.com' : 'mstibdszibcheodvnprm.supabase.co';
       for (const u of urls) {
         let host;
         try { host = new URL(u).host; } catch (_) { continue; }
-        if (host !== 'mstibdszibcheodvnprm.supabase.co') bad.push(`${rel(f)}: fetch -> ${host}`);
+        if (host !== allowed) bad.push(`${rel(f)}: fetch -> ${host} (only ${allowed} allowed here)`);
       }
     }
   }
@@ -200,19 +215,84 @@ test('fetch() is only ever called against the Supabase host', () => {
 // marker below. Every exemption is then visible in the source, greppable, and
 // has to be typed on purpose.
 
-test('Keepa is absent from 0.1.0 (delete this test deliberately for 0.2.0)', () => {
+// The "Keepa is absent from 0.1.0" test lived here and has been deleted on
+// purpose, exactly as its own name instructed. 0.2.0 integrates the provider,
+// so a blanket ban on naming it is no longer the rule worth enforcing.
+//
+// What replaces it is narrower and harder to satisfy by accident: the key is
+// the user's, it stays in their browser, and exactly one file may send it
+// anywhere. Each rule below can fail silently in production, which is why
+// each is a test rather than a convention.
+
+test('no API key is baked into anything that ships', () => {
+  // A provider key is a long run of lowercase alphanumerics. The publishable
+  // Supabase JWT is mixed-case and dotted, so it does not match this shape
+  // and does not need an exception.
   const hits = [];
   for (const f of FILES) {
-    const lines = read(f).split(/\r?\n/);
-    lines.forEach((line, i) => {
-      if (!/keepa/i.test(line)) return;
-      if (line.includes(ALLOW.keepa)) return;
-      hits.push(`${rel(f)}:${i + 1}`);
-    });
+    for (const m of read(f).matchAll(/\b[a-z0-9]{40,}\b/g)) {
+      hits.push(`${rel(f)}: ${m[0].slice(0, 12)}… (${m[0].length} chars)`);
+    }
   }
-  assert.deepEqual(hits, [], 'Keepa appears without an explicit allowance at:\n' + hits.join('\n'));
+  assert.deepEqual(hits, [], 'something key-shaped is hardcoded:\n' + hits.join('\n'));
 });
 
+test('only keepa.js may reach the provider at all', () => {
+  const offenders = [];
+  for (const f of FILES) {
+    if (path.basename(f) === 'keepa.js') continue;
+    // The manifest DECLARES the permission; it does not call anything. A
+    // host permission that could not be written down would be unusable.
+    if (path.basename(f) === 'manifest.json') continue;
+    if (/api\.keepa\.com/i.test(read(f))) offenders.push(rel(f));
+  }
+  assert.deepEqual(offenders, [],
+    'the provider host appears outside keepa.js, so the lint can no longer ' +
+    'check every call that carries a key exhaustively: ' + offenders.join(', '));
+});
+
+test('only keepa.js may read the stored key', () => {
+  // Anything that can read it can leak it. The worker answers questions ABOUT
+  // the key (is it there, does it work, how many tokens) and never hands it
+  // over, so nothing else needs the storage name.
+  const offenders = [];
+  for (const f of FILES) {
+    if (path.basename(f) === 'keepa.js') continue;
+    if (/isua_keepa_key/.test(read(f))) offenders.push(rel(f));
+  }
+  assert.deepEqual(offenders, [], 'the key storage name appears in: ' + offenders.join(', '));
+});
+
+test('no message hands the key back to the panel', () => {
+  // The panel must be unable to obtain it even if it asked. A reply the panel
+  // can read is a reply a bug can leak into the page.
+  const bg = read(path.join(ROOT, 'background.js'));
+  const handlers = bg.slice(bg.indexOf("case 'ISUA_PROVIDER_STATE'"), bg.indexOf("case 'ISUA_SIGN_IN_PASSWORD'"));
+  assert.ok(handlers.length > 0, 'the provider handlers have gone');
+  assert.ok(!/sendResponse\([^)]*\bkey\b\s*:/.test(handlers.replace(/\s+/g, ' ')),
+    'a provider handler sends a field called key back to the panel');
+  assert.ok(/masked/.test(handlers), 'the state reply should carry a masked form, not the value');
+});
+
+test('the key is validated before it is stored', () => {
+  // Storing first and checking later leaves a user with a saved key that
+  // silently fails on every call.
+  const bg = read(path.join(ROOT, 'background.js'));
+  const setCase = bg.slice(bg.indexOf("case 'ISUA_PROVIDER_SET_KEY'"), bg.indexOf("case 'ISUA_PROVIDER_CLEAR_KEY'"));
+  const validateAt = setCase.indexOf('validate');
+  const storeAt = setCase.indexOf('setKey');
+  assert.ok(validateAt > -1 && storeAt > -1, 'set-key no longer validates or no longer stores');
+  assert.ok(validateAt < storeAt, 'the key is stored before it is validated');
+});
+
+test('a 200 carrying an error body is treated as a failure', () => {
+  // Keepa signals failure in the body of a 200. Code that only checks res.ok
+  // reads a rejection as an empty result -- a trap this project has already
+  // paid for once.
+  const src = read(path.join(ROOT, 'keepa.js'));
+  const checks = (src.match(/json\.error/g) || []).length;
+  assert.ok(checks >= 2, `expected every call path to check json.error, found ${checks}`);
+});
 
 test('no Amazon cookie, session or auth header is read anywhere', () => {
   const FORBIDDEN = ['chrome.cookies', 'document.cookie', 'x-amz-access-token', 'set-cookie'];
@@ -233,6 +313,10 @@ test('manifest permissions stay minimal and match the stated allowlist', () => {
     'a new permission appeared -- justify it to store review before adding it');
   assert.deepEqual(m.host_permissions.sort(), [
     'https://*.amazon.com/*',
+    // Added in 0.2.0. Each user supplies their own key, so each user's own
+    // requests go here. This is the permission store review will look at
+    // hardest, and it must stay the only addition.
+    'https://api.keepa.com/*',
     'https://mstibdszibcheodvnprm.supabase.co/*',
   ], 'host_permissions changed');
   // No <all_urls>, no http://*/*, no broad wildcard.
@@ -240,7 +324,7 @@ test('manifest permissions stay minimal and match the stated allowlist', () => {
     assert.ok(!/^<all_urls>$/.test(h) && !/^https?:\/\/\*\/\*$/.test(h), `broad host permission: ${h}`);
   }
   assert.equal(m.manifest_version, 3);
-  assert.equal(m.version, '0.1.0');
+  assert.equal(m.version, '0.2.0');
 });
 
 // This assertion replaced a stricter one, and the swap is the point of the

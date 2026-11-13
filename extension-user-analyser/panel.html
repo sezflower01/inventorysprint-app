@@ -74,6 +74,29 @@
            The password goes straight to the worker, which exchanges it for a
            session. It is never stored, never logged, and goes to exactly one
            host. Tests pin each of those. -->
+      <!-- First-run gate. Shown before the sign-in card and before any
+           content, including the fields read free from the page: the rule is
+           that nobody analyses anything without their own API key, and that
+           applies to the project owner too.
+
+           The key is validated before it is stored, so a key that does not
+           work is never saved. It goes to chrome.storage.local in this
+           browser and nowhere else -- not to our servers, not into the zip,
+           and there is no default anywhere in this extension. -->
+      <div id="apx-keepa-gate" class="apx-card hidden">
+        <p id="apx-keepa-intro">Paste your own data-provider API key to start. It stays in this browser.</p>
+        <form id="apx-keepa-form" class="apx-signin-form">
+          <input id="apx-keepa-key" type="password" placeholder="API key" autocomplete="off"
+                 spellcheck="false" autocapitalize="off" required />
+          <div id="apx-keepa-error" class="apx-signin-error"></div>
+          <button id="apx-keepa-save" type="submit" class="apx-primary">Save key</button>
+        </form>
+        <p class="apx-k" id="apx-keepa-note">
+          Each user needs their own paid subscription. The key is checked once
+          before it is saved, and the panel shows how many tokens it has left.
+        </p>
+      </div>
+
       <div id="apx-signin" class="apx-card hidden">
         <p id="apx-signin-intro">You're signed out of InventorySprint. Sign in to load product data.</p>
         <form id="apx-signin-form" class="apx-signin-form">
@@ -334,6 +357,10 @@
 
         <p class="apx-foot">
           <span id="apx-cached"></span>
+          <!-- Where the saved key lives once the gate is past: masked, with
+               its token balance, and a way out. Nothing here is the key. -->
+          <span id="apx-keepa-status" class="apx-k"></span>
+          <button type="button" id="apx-keepa-change" class="apx-strip-link">Change key</button>
         </p>
       </div>
     </main>

@@ -281,15 +281,36 @@ test('panel.html keeps every element id of the original, in the same order', { s
 test('the only password field is the sign-in one, and it is in the sign-in form', { skip }, () => {
   const html = fs.readFileSync(path.join(ROOT, 'panel.html'), 'utf8');
   const pw = html.match(/<input[^>]*type="password"[^>]*>/g) || [];
-  assert.equal(pw.length, 1, `expected exactly one password input, found ${pw.length}`);
-  assert.ok(/apx-signin-password/.test(pw[0]), `the password input is not the sign-in one: ${pw[0]}`);
+  // TWO now: the sign-in password, and the API key. The key uses type=password
+  // so it is masked while typing and kept out of the browser's autofill --
+  // hence autocomplete="off" on it, where the sign-in field wants the opposite.
+  assert.equal(pw.length, 2, `expected exactly two password inputs, found ${pw.length}`);
+  const ids = pw.map((t) => (t.match(/id="([^"]+)"/) || [])[1]).sort();
+  assert.deepEqual(ids, ['apx-keepa-key', 'apx-signin-password'],
+    'an unexpected password field appeared: ' + ids.join(', '));
 
-  const form = html.slice(html.indexOf('id="apx-signin-form"'), html.indexOf('</form>'));
-  assert.ok(form.includes('apx-signin-password'), 'the password field is outside the sign-in form');
+  const keyTag = pw.find((t) => /apx-keepa-key/.test(t));
+  assert.ok(/autocomplete="off"/.test(keyTag), 'the API key field must not be offered to autofill');
+
+  // Two forms exist now (the key gate and sign-in), so "up to the first
+  // </form>" lands in the wrong one. Slice each from its own opening tag to
+  // the next close after it.
+  const formFrom = (id) => {
+    const start = html.indexOf(`id="${id}"`);
+    return start < 0 ? '' : html.slice(start, html.indexOf('</form>', start));
+  };
+  assert.ok(formFrom('apx-signin-form').includes('apx-signin-password'),
+    'the password field is outside the sign-in form');
+  assert.ok(formFrom('apx-keepa-form').includes('apx-keepa-key'),
+    'the API key field is outside the key form');
 
   // Autocomplete matters: without it a manager will not offer to save, and
   // people reuse a password they cannot store.
-  assert.ok(/autocomplete="current-password"/.test(pw[0]), 'the password field has no autocomplete hint');
+  // pw[0] is whichever appears first in the document, which is now the key
+  // field. Select by id rather than by position.
+  const signinTag = pw.find((t) => /apx-signin-password/.test(t));
+  assert.ok(/autocomplete="current-password"/.test(signinTag),
+    'the sign-in password field has no autocomplete hint');
   const em = html.match(/<input[^>]*id="apx-signin-email"[^>]*>/g) || [];
   assert.equal(em.length, 1, 'the sign-in email field is missing');
   assert.ok(/autocomplete="username"/.test(em[0]), 'the email field has no autocomplete hint');

@@ -200,14 +200,30 @@
 
   let authUrls = { signInUrl: 'https://inventorysprint.com/login', signUpUrl: 'https://inventorysprint.com/signup' };
 
-  function showSignedOut() {
-    $('apx-signin')?.classList.remove('hidden');
-    $('apx-content')?.classList.add('hidden');
+  // ── which of the three screens is showing ───────────────────────────────
+  //
+  // Exactly one at a time, and the order is a rule, not a preference: the
+  // API-key gate comes before sign-in, and sign-in before any content.
+  //
+  // The gate also hides the fields read free from the page, which costs
+  // nothing to produce and would work without a key. That is deliberate: the
+  // rule is that nobody analyses anything without their own key, the owner
+  // included. Showing half a panel would invite "why is this bit empty".
+  let hasKey = false;
+
+  function show(which) {
+    const map = {
+      keepa: 'apx-keepa-gate',
+      signin: 'apx-signin',
+      content: 'apx-content',
+    };
+    for (const [name, id] of Object.entries(map)) {
+      $(id)?.classList.toggle('hidden', name !== which);
+    }
   }
-  function showSignedIn() {
-    $('apx-signin')?.classList.add('hidden');
-    $('apx-content')?.classList.remove('hidden');
-  }
+
+  function showSignedOut() { show(hasKey ? 'signin' : 'keepa'); }
+  function showSignedIn() { show(hasKey ? 'content' : 'keepa'); }
 
   function refreshAuth() {
     try {
@@ -334,7 +350,99 @@
     }
   });
 
+  // ── the API-key gate ────────────────────────────────────────────────────
+  //
+  // The panel never sees the key. It asks the worker for state -- saved or
+  // not, valid or not, how many tokens are left -- and the worker is the only
+  // thing that ever holds the value. There is no message that returns it.
+
+  function describeTokens(s) {
+    if (!s || s.tokensLeft == null) return '';
+    if (s.tokensLeft > 0) return `${s.tokensLeft.toLocaleString()} tokens`;
+    // Out of tokens is an ordinary state on a working key, not a fault, and
+    // it must not read as "no data for this product".
+    const mins = s.refillIn != null ? Math.max(1, Math.round(s.refillIn / 60000)) : null;
+    return mins ? `0 tokens — refills in about ${mins} min` : '0 tokens left';
+  }
+
+  function renderKeepaStatus(s) {
+    const el = $('apx-keepa-status');
+    const btn = $('apx-keepa-change');
+    if (!el) return;
+    if (!s?.hasKey) { el.textContent = ''; if (btn) btn.hidden = true; return; }
+    if (btn) btn.hidden = false;
+    const tokens = describeTokens(s);
+    el.textContent = s.valid
+      ? `Key ${s.masked}${tokens ? ' · ' + tokens : ''}`
+      : `Key ${s.masked} · not working`;
+    el.title = s.valid ? '' : (s.message || '');
+  }
+
+  function keepaError(text) {
+    const box = $('apx-keepa-error');
+    if (box) box.textContent = text || '';
+  }
+
+  function refreshKeepa(then) {
+    try {
+      chrome.runtime.sendMessage({ type: 'ISUA_PROVIDER_STATE' }, (res) => {
+        if (chrome.runtime.lastError || !res?.ok) {
+          hasKey = false;
+          show('keepa');
+          keepaError('The extension worker is not running. Reload the extension.');
+          return;
+        }
+        // A saved key that no longer works is NOT a key. Sending the user
+        // back to the gate with the reason is the only honest handling; the
+        // alternative is a panel that silently returns nothing.
+        hasKey = !!res.hasKey && res.valid !== false;
+        renderKeepaStatus(res);
+        if (res.hasKey && res.valid === false) {
+          keepaError(res.message || 'The saved key is no longer working. Paste it again.');
+        }
+        if (typeof then === 'function') then();
+      });
+    } catch {
+      hasKey = false;
+      show('keepa');
+    }
+  }
+
+  $('apx-keepa-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const input = $('apx-keepa-key');
+    const btn = $('apx-keepa-save');
+    const value = input?.value || '';
+    if (!value.trim()) { keepaError('Enter your API key.'); return; }
+
+    keepaError('');
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+
+    chrome.runtime.sendMessage({ type: 'ISUA_PROVIDER_SET_KEY', key: value }, (res) => {
+      if (btn) { btn.disabled = false; btn.textContent = 'Save key'; }
+      if (chrome.runtime.lastError) { keepaError('The extension worker is not running. Reload the extension.'); return; }
+      if (!res?.ok) { keepaError(res?.error || 'That key was not accepted.'); return; }
+
+      // Never leave it in a DOM node once the worker has it.
+      if (input) input.value = '';
+      hasKey = true;
+      renderKeepaStatus({ hasKey: true, valid: true, masked: res.masked, tokensLeft: res.tokensLeft, refillIn: res.refillIn });
+      refreshAuth();
+    });
+  });
+
+  $('apx-keepa-change')?.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'ISUA_PROVIDER_CLEAR_KEY' }, () => {
+      hasKey = false;
+      renderKeepaStatus({ hasKey: false });
+      keepaError('');
+      show('keepa');
+    });
+  });
+
   renderNeedsAmazon();
-  refreshAuth();
+  // The gate decides first; only once a working key exists does auth state
+  // get to choose between the sign-in card and the content.
+  refreshKeepa(() => { if (hasKey) refreshAuth(); else show('keepa'); });
   toHost({ type: 'READY' });
 })();

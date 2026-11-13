@@ -15,7 +15,11 @@ const path = require('node:path');
 const zlib = require('node:zlib');
 
 const ROOT = __dirname;
-const OUT = path.join(ROOT, 'inventorysprint-user-analyser-0.1.0.zip');
+// Derived from the manifest, not hardcoded. It was hardcoded at 0.1.0, and
+// the first version bump produced a 0.2.0 extension inside a file named
+// 0.1.0 -- the kind of mismatch that gets the wrong build uploaded.
+const MANIFEST_VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8')).version;
+const OUT = path.join(ROOT, `inventorysprint-user-analyser-${MANIFEST_VERSION}.zip`);
 
 /**
  * Everything that ships. Tests, deps and the icon generator do not.
