@@ -12,16 +12,26 @@
 //              readPage.js in the content script and posted in. Free, works
 //              for everybody, no account needed.
 //
-//   the user's own backend data (NOT YET WIRED -- next step) fees, ROI,
-//              profit, max cost, margin, eligibility, confidence.
+//   the user's OWN Seller Central session (NOT YET WIRED -- next step)
+//              gating, FBA fees, dimensions; and from fees, everything
+//              arithmetic: profit, ROI, max cost, margin.
 //
-// Until the second source is wired, every field that depends on it renders as
-// "Connect Amazon" in place. That is deliberate and it is also the correct
-// end state for a user with no Amazon connection: the tile keeps its size and
-// position and shows no number, no colour and no verdict. A blank or a zero
-// would both read as information. The one thing this panel must never do is
-// show a figure computed from somebody else's seller account -- which is the
-// bug the whole user-analyser effort exists to avoid.
+//              Their browser is already signed in to Seller Central, so the
+//              answers are theirs and are correct for their account. No
+//              InventorySprint-to-Amazon connection is involved, which is the
+//              whole reason this extension exists apart from the Analyzer:
+//              the Analyzer asks the SERVER, holding one seller's SP-API
+//              credentials, and that is precisely how one account's catalogue
+//              once ended up written under another's.
+//
+//   rank data  est/mo sales and price history. Neither can come from Seller
+//              Central at all; they are rank-derived. Planned for 0.2.0.
+//
+// Until those are wired, each dependent field reads "Not checked yet" in
+// place: the tile keeps its size and position and shows no number, no colour
+// and no verdict. A blank or a zero would both read as information. The one
+// thing this panel must never do is show a figure computed from somebody
+// else's seller account.
 
 (function () {
   'use strict';
@@ -58,36 +68,51 @@
   // the thing being judged, so a stale colour cannot imply a verdict.
   const VERDICT_CLASSES = ['apx-good', 'apx-bad', 'apx-warn', 'apx-sa-good', 'apx-sa-bad', 'apx-sa-warn'];
 
-  function setUnavailable(el, text) {
+  // NOT "Connect Amazon". That message was wrong about this product: nothing
+  // here requires an InventorySprint-to-Amazon connection. Gating and fees are
+  // meant to come from the user's OWN Seller Central session, already signed in
+  // in this browser -- which is the reason this extension exists apart from the
+  // Analyzer. Until that call is wired these fields are simply not read yet,
+  // and the label should say that and nothing more.
+  const NOT_READ = 'Not checked yet';
+
+  function setUnavailable(el, text, why) {
     if (!el) return;
     el.textContent = text;
     el.classList.remove(...VERDICT_CLASSES);
     el.classList.add('apx-sa-unknown');
-    el.title = 'Connect your Amazon account in InventorySprint to see this';
+    el.title = why || 'Not read yet — this comes from your own Seller Central session.';
   }
 
   function renderNeedsAmazon() {
-    for (const id of NEEDS_AMAZON) setUnavailable($(id), 'Connect Amazon');
-    for (const id of NEEDS_AMAZON_CHIPS) setUnavailable($(id), 'Connect Amazon');
+    for (const id of NEEDS_AMAZON) setUnavailable($(id), NOT_READ);
+    for (const id of NEEDS_AMAZON_CHIPS) setUnavailable($(id), NOT_READ);
     for (const id of VERDICT_PILLS) setUnavailable($(id), '—');
+
+    // Est/mo is the one field no Seller Central call can answer -- it is an
+    // estimate derived from sales-rank history, so it waits on the rank-data
+    // provider planned for 0.2.0, not on the Seller Central wiring. Saying so
+    // stops it looking like a bug when everything around it fills in.
+    setUnavailable($('apx-sa-sales'), NOT_READ, 'Sales estimates need sales-rank history, which this version does not have.');
 
     // The decision strip must not imply a decision.
     const emoji = $('apx-fd-emoji');
-    if (emoji) emoji.textContent = '🔌';
+    if (emoji) emoji.textContent = '⏳';
     const action = $('apx-dm-action');
-    if (action) action.textContent = 'Connect Amazon for a decision';
+    if (action) action.textContent = 'No decision yet';
     setUnavailable($('apx-fd-confidence'), '—');
     const why = $('apx-dm-why');
     if (why) {
       why.textContent =
-        'Fees, ROI and eligibility are computed from your own Amazon account. '
-        + 'Connect it in InventorySprint and this panel fills in. '
-        + 'Everything above that was read from this page is already shown.';
+        'Gating and fees are read from your own Amazon Seller Central session, '
+        + 'in this browser — no account connection is needed. That call is not '
+        + 'wired up yet, so nothing below is a verdict. Everything above was '
+        + 'read from this page and is already correct.';
     }
     const fd = $('apx-final-decision');
     if (fd) { fd.className = 'apx-final-decision unknown'; }
 
-    setUnavailable($('apx-history-verdict'), 'Connect Amazon');
+    setUnavailable($('apx-history-verdict'), NOT_READ, 'Price history needs sales-rank history, which this version does not have.');
     const alerts = $('apx-sa-alerts');
     if (alerts) { alerts.textContent = '—'; alerts.title = ''; }
   }
@@ -137,10 +162,10 @@
 
     // Offer-derived prices come from the seller's own API in the original.
     // Here only the Buy Box owner is known, from the page.
-    setUnavailable($('apx-fba'), 'Connect Amazon');
-    setUnavailable($('apx-fbm'), 'Connect Amazon');
-    setUnavailable($('apx-amz'), 'Connect Amazon');
-    setUnavailable($('apx-swing'), 'Connect Amazon');
+    setUnavailable($('apx-fba'), NOT_READ);
+    setUnavailable($('apx-fbm'), NOT_READ);
+    setUnavailable($('apx-amz'), NOT_READ);
+    setUnavailable($('apx-swing'), NOT_READ);
 
     const list = $('apx-sellers-list');
     if (list) {
@@ -157,7 +182,7 @@
 
     // Dimensions are an SP-API catalogue field in the original.
     for (const id of ['apx-dims-pkg', 'apx-dims-pkg-wt', 'apx-dims-item', 'apx-dims-item-wt']) {
-      setUnavailable($(id), 'Connect Amazon');
+      setUnavailable($(id), NOT_READ);
     }
     const dsrc = $('apx-dims-source');
     if (dsrc) dsrc.textContent = '—';

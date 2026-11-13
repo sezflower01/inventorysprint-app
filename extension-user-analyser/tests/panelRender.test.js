@@ -180,7 +180,7 @@ test('the gating row carries no verdict, no number and no colour', { skip }, () 
     // The eligibility chip in the decision table is backend-derived, so it
     // must say so and must not be coloured either.
     const chip = $('apx-sa-eligible');
-    assert.equal(chip.textContent.trim(), 'Connect Amazon', `${f}: eligibility chip showed something else`);
+    assert.equal(chip.textContent.trim(), 'Not checked yet', `${f}: eligibility chip showed something else`);
     assert.ok(chip.classList.contains('apx-sa-unknown'), `${f}: eligibility chip is not in the unknown state`);
   }
 });
@@ -192,7 +192,7 @@ test('no money field ever shows a number we could not compute', { skip }, () => 
   for (const id of ['apx-fees', 'apx-profit', 'apx-roi-out', 'apx-sa-maxcost', 'apx-sa-margin', 'apx-sa-sales']) {
     const el = $(id);
     assert.ok(el, `${id} is missing from the markup`);
-    assert.equal(el.textContent.trim(), 'Connect Amazon', `${id} showed something other than the connect state`);
+    assert.equal(el.textContent.trim(), 'Not checked yet', `${id} showed something other than the not-read state`);
     assert.ok(!/\d/.test(el.textContent), `${id} rendered a digit`);
     for (const c of ['apx-good', 'apx-bad', 'apx-warn']) {
       assert.ok(!el.classList.contains(c), `${id} carries the verdict class ${c}`);
