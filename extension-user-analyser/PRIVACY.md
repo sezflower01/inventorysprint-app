@@ -1,7 +1,7 @@
 # Privacy — InventorySprint User Analyser 0.1.0
 
 Written to be checkable against the code, not reassuring. Every claim below is
-enforced by `__tests__/noOwnerFallback.test.js`, which fails the build if it
+enforced by `tests/noOwnerFallback.test.js`, which fails the build if it
 stops being true.
 
 ## What leaves your browser

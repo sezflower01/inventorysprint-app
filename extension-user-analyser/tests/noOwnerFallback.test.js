@@ -37,7 +37,7 @@ const path = require('node:path');
 // package-lock.json, and failed on 50 npmjs.org URLs that never leave this
 // folder. Importing it means a file added to the zip is linted automatically,
 // which is the direction that matters.
-const { collect, ROOT } = require('../build.js');
+const { collect, ROOT, EXCLUDE_DIRS, EXCLUDE_FILES } = require('../build.js');
 
 const FILES = collect().map((rel) => path.join(ROOT, rel)).filter((f) => /\.(js|html|json|css)$/.test(f));
 const read = (f) => fs.readFileSync(f, 'utf8');
@@ -303,10 +303,22 @@ test('the root zip builder excludes everything build.js excludes', () => {
   }
   const src = fs.readFileSync(rootScript, 'utf8');
   const block = src.slice(src.indexOf('extension-user-analyser'));
-  const missing = [];
-  for (const f of ['__tests__', 'node_modules', 'package.json', 'build.js', 'make-icons.js']) {
-    if (!block.includes(f)) missing.push(f);
-  }
+
+  // Derived from build.js's own sets, not retyped. A hardcoded list here was
+  // a THIRD copy of the same thing, and it went stale the moment __tests__
+  // was renamed -- the test then reported the root builder as broken when the
+  // only wrong list was its own. Reading the real sets removes that failure
+  // mode entirely.
+  //
+  // Only entries that exist on disk are checked: EXCLUDE_DIRS carries '.git'
+  // and 'dist' defensively, and demanding the root builder name a directory
+  // that was never there would fail for no reason.
+  const expected = [...EXCLUDE_DIRS, ...EXCLUDE_FILES]
+    .filter((name) => fs.existsSync(path.join(ROOT, name)));
+
+  const missing = expected.filter((name) => !block.includes(path.basename(name)));
+
   assert.deepEqual(missing, [],
     'scripts/build-extension-zips.js would ship these into public/: ' + missing.join(', '));
+  assert.ok(expected.length >= 5, `only ${expected.length} exclusions checked -- the sets look wrong`);
 });

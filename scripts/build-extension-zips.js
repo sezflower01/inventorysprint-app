@@ -61,7 +61,7 @@ async function main() {
       src: path.join(root, "extension-user-analyser"),
       out: path.join(root, "public", "inventorysprint-user-analyser-extension.zip"),
       ignore: [
-        "__tests__/**",
+        "tests/**",
         "node_modules/**",
         "package.json",
         "package-lock.json",

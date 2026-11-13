@@ -27,7 +27,7 @@ end to end.
 
 ```bash
 npm install     # jsdom, for the parser tests — this folder only
-npm test        # node --test over __tests__/
+npm test        # node --test over tests/
 npm run build   # writes inventorysprint-user-analyser-0.1.0.zip
 ```
 
@@ -52,10 +52,10 @@ ends in a default and no inference from a neighbouring field.
 
 ## Two things to know before trusting it
 
-**1. The fixtures are synthetic.** `__tests__/fixtures/` is hand-written HTML,
+**1. The fixtures are synthetic.** `tests/fixtures/` is hand-written HTML,
 not captured Amazon pages. It proves the parser's logic; it does not prove the
 parser survives Amazon's real markup, which is malformed in places, has many
-A/B variants and changes without notice. See `__tests__/fixtures/README.md` for
+A/B variants and changes without notice. See `tests/fixtures/README.md` for
 how to check against real captures.
 
 **2. There was no selector library to inherit.** Verified 2026-11-12: neither
@@ -75,7 +75,7 @@ one-line change in `manifest.json`.
 
 ## The lint is the real safety net
 
-`__tests__/noOwnerFallback.test.js` fails if any shipped file:
+`tests/noOwnerFallback.test.js` fails if any shipped file:
 
 - names `fetch-listing-snapshot`, `asin-dimensions` or
   `check-fba-listing-eligibility` (the three that fall back to the owner's

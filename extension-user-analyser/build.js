@@ -21,14 +21,14 @@ const OUT = path.join(ROOT, 'inventorysprint-user-analyser-0.1.0.zip');
  * Everything that ships. Tests, deps and the icon generator do not.
  *
  * ⚠️ This list is the SINGLE definition of "what ships", and
- * __tests__/noOwnerFallback.test.js imports it rather than keeping its own
+ * tests/noOwnerFallback.test.js imports it rather than keeping its own
  * copy. It had its own copy for one run, and the two promptly disagreed: the
  * lint read package-lock.json -- 50 npmjs.org URLs, none of which ship -- and
  * failed on every one. A lint that disagrees with the packager about what is
  * being shipped is checking the wrong thing in both directions: noise on files
  * that never reach a user, and silence on files that do.
  */
-const EXCLUDE_DIRS = new Set(['node_modules', '__tests__', '.git', 'dist']);
+const EXCLUDE_DIRS = new Set(['node_modules', 'tests', '.git', 'dist']);
 const EXCLUDE_FILES = new Set(['build.js', 'package.json', 'package-lock.json', '.gitignore', 'README.md', 'icons/make-icons.js']);
 
 function collect(dir = ROOT, out = []) {

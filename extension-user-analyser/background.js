@@ -12,7 +12,7 @@
 // and one other account already holds personalhour:view, so it could reach
 // that path today.
 //
-// __tests__/noOwnerFallback.test.js FAILS if any file in this extension so
+// tests/noOwnerFallback.test.js FAILS if any file in this extension so
 // much as names one of those functions, or fetches a host outside
 // ALLOWED_FETCH_HOSTS. That lint is the enforcement; this comment is only the
 // reason.
