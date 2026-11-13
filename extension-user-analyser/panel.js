@@ -39,6 +39,24 @@
   const $ = (id) => document.getElementById(id);
   const toHost = (msg) => parent.postMessage({ source: 'isua-panel', ...msg }, '*');
 
+  // WHY A REPLY CAN BE UNRECOGNISED, AND WHY IT IS NOT THE USER'S PROBLEM
+  //
+  // Chrome does not restart a registered service worker when its file changes
+  // on disk -- only the reload button on chrome://extensions does. Refreshing
+  // the Amazon tab reloads THIS file from disk while leaving an older worker
+  // answering it, so the panel can be newer than the code it talks to. The
+  // symptom is a reply naming a message the worker has never heard of, which
+  // is the ONLY thing that reply can mean. Cost a confused report on
+  // 2026-11-13, where it surfaced raw as "unknown message: ISUA_PROVIDER_SET_KEY".
+  const WORKER_DOWN = 'The extension worker is not running. Reload the extension.';
+  const WORKER_STALE = 'The extension changed on disk. Reload it on chrome://extensions, then refresh this page.';
+
+  function workerFault(res) {
+    if (chrome.runtime.lastError) return WORKER_DOWN;
+    if (typeof res?.error === 'string' && res.error.startsWith('unknown message')) return WORKER_STALE;
+    return null;
+  }
+
   // ── version, from the manifest ──────────────────────────────────────────
   //
   // extension/panel.html hardcodes "v1.5.1" while its manifest says 1.6.0.
@@ -296,7 +314,8 @@
       if (submit) submit.disabled = false;
       applyMode();
 
-      if (chrome.runtime.lastError) { showAuthError('The extension worker is not running. Reload the extension.'); return; }
+      const fault = workerFault(res);
+      if (fault) { showAuthError(fault); return; }
       if (!res?.ok) { showAuthError(res?.error || 'Could not sign in.'); return; }
 
       // Clear both fields whatever happened next: nothing is served by
@@ -389,7 +408,7 @@
         if (chrome.runtime.lastError || !res?.ok) {
           hasKey = false;
           show('keepa');
-          keepaError('The extension worker is not running. Reload the extension.');
+          keepaError(workerFault(res) || WORKER_DOWN);
           return;
         }
         // A saved key that no longer works is NOT a key. Sending the user
@@ -420,7 +439,8 @@
 
     chrome.runtime.sendMessage({ type: 'ISUA_PROVIDER_SET_KEY', key: value }, (res) => {
       if (btn) { btn.disabled = false; btn.textContent = 'Save key'; }
-      if (chrome.runtime.lastError) { keepaError('The extension worker is not running. Reload the extension.'); return; }
+      const fault = workerFault(res);
+      if (fault) { keepaError(fault); return; }
       if (!res?.ok) { keepaError(res?.error || 'That key was not accepted.'); return; }
 
       // Never leave it in a DOM node once the worker has it.
