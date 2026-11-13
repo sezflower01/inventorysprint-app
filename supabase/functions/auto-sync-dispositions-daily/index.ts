@@ -4,10 +4,11 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
+import { isInternalCaller } from "../_shared/require-internal.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-internal-secret',
 };
 
 const INTER_CALL_DELAY_MS = 800;
@@ -15,6 +16,24 @@ const DEFAULT_DAYS_BACK = 7; // daily run only needs to look back a week (with o
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
+
+  // Cron-only endpoint. It fans out over every row in seller_authorizations
+  // with the service-role key and has no user-facing path at all, yet it had
+  // no caller check of any kind -- not the internal secret, not a user
+  // lookup. Any caller the gateway admitted could start a full fan-out, and
+  // the gateway admits the publishable key from the browser bundle.
+  //
+  // The scheduled job presents x-internal-secret as of migration
+  // 20261112230000. That migration must be applied before this guard ships,
+  // or this job stops: it runs daily, so the gap would not be visible for a
+  // day.
+  if (!isInternalCaller(req)) {
+    console.warn('[auto-sync-dispositions-daily] refused a non-internal caller');
+    return new Response(JSON.stringify({ error: 'Forbidden' }), {
+      status: 403,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
 
   const startedAt = Date.now();
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!;

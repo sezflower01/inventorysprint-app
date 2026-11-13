@@ -31,6 +31,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { withCronLock } from "../_shared/cron-lock.ts";
+import { isInternalCaller } from "../_shared/require-internal.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -41,6 +42,26 @@ const LOOKBACK_DAYS = 75; // pull last 75 days every run — well inside the 90d
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
+
+  // Cron-only endpoint, same shape as auto-sync-dispositions-daily: it lists
+  // every user in seller_authorizations and pulls 75 days of settlement
+  // reports for each, with the service-role key.
+  //
+  // It already READ INTERNAL_SYNC_SECRET from the environment, but only to
+  // check it was configured and to FORWARD it to the per-user function. It
+  // never compared it to an incoming header, so the secret in the env was
+  // doing no gatekeeping here at all -- an easy thing to misread as a guard.
+  //
+  // The scheduled job presents x-internal-secret as of migration
+  // 20261112230000. That must be applied before this ships, or this job
+  // stops -- and it runs weekly, so the gap would not be visible for a week.
+  if (!isInternalCaller(req)) {
+    console.warn('[auto-sync-settlements-weekly] refused a non-internal caller');
+    return new Response(JSON.stringify({ error: 'Forbidden' }), {
+      status: 403,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
 
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;

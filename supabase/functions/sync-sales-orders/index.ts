@@ -237,6 +237,7 @@ import { computeBbOwnEstimateFields, makeSellerIdCache } from '../_shared/bbOwnE
 import { computeNetRefundFromFecRows } from '../_shared/refund-math.ts';
 import { getConfirmedSalesOrderRevenueUsd, getMarketplaceCurrency } from '../_shared/salesCurrencyGuard.ts';
 import { mayActOnOperatorCredentials, amazonNotConnectedResponse } from '../_shared/operator-credential-guard.ts';
+import { isInternalCaller } from '../_shared/require-internal.ts';
 
 
 type CostSource = 'listing' | 'inventory' | 'inventory_manual';
@@ -658,6 +659,35 @@ async function handleSyncRequest(req: Request): Promise<Response> {
     // AUTOMATED SYNC (cron job) - minimal processing for all users
     // ================================================================
     if (isAutomatedCall) {
+      // This branch is reached BEFORE this function authenticates anything.
+      // The auth block (Authorization / INTERNAL_SYNC_SECRET / getUser) is
+      // ~230 lines further down, and this branch returns from inside itself,
+      // so it never reaches it. It then reads seller_authorizations with the
+      // service-role client and syncs every user in it.
+      //
+      // Until this guard, that meant any caller the gateway admitted could
+      // start a sync for every account -- and the gateway admits the
+      // publishable key, which is in the browser bundle. No data was returned
+      // to such a caller and no account could be crossed with another (each
+      // user is synced with their own refresh_token), but it was real work and
+      // metered SP-API quota on anyone's request.
+      //
+      // isInternalCaller accepts x-internal-secret or a service-role bearer,
+      // and nothing else. The scheduled job presents the header as of
+      // migration 20261112230000 -- which is why that had to be applied and
+      // VERIFIED first: guarding here while the job still sent only a bearer
+      // would have stopped the five-minute sales sync outright.
+      //
+      // The user-facing path is deliberately untouched. It authenticates
+      // further down and must keep working for a signed-in browser.
+      if (!isInternalCaller(req)) {
+        console.warn('[sync-sales-orders] refused an all-users call from a non-internal caller');
+        return new Response(JSON.stringify({ error: 'Forbidden' }), {
+          status: 403,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
       console.log('🔄 Starting automated sales sync for all users at:', new Date().toISOString());
 
       const { data: authorizations, error: authFetchError } = await supabase
