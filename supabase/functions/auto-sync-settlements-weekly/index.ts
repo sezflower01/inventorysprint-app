@@ -47,6 +47,12 @@ serve(async (req) => {
   // every user in seller_authorizations and pulls 75 days of settlement
   // reports for each, with the service-role key.
   //
+  // Like that one, this function is verify_jwt = FALSE on the platform, so
+  // before this guard there was nothing in front of it either -- the gateway
+  // did not ask for a token, and it was reachable unauthenticated by anyone
+  // who knew the URL. Read that from `supabase functions list`, never from
+  // config.toml, which does not declare this function at all.
+  //
   // It already READ INTERNAL_SYNC_SECRET from the environment, but only to
   // check it was configured and to FORWARD it to the per-user function. It
   // never compared it to an incoming header, so the secret in the env was

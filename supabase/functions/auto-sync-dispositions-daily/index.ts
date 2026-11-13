@@ -20,8 +20,18 @@ serve(async (req) => {
   // Cron-only endpoint. It fans out over every row in seller_authorizations
   // with the service-role key and has no user-facing path at all, yet it had
   // no caller check of any kind -- not the internal secret, not a user
-  // lookup. Any caller the gateway admitted could start a full fan-out, and
-  // the gateway admits the publishable key from the browser bundle.
+  // lookup.
+  //
+  // And nothing in front of it, either: this function is verify_jwt = FALSE
+  // on the platform, so the gateway did not ask for a token at all. It was
+  // reachable unauthenticated, from anywhere, by anyone who knew the URL.
+  //
+  // That was established by reading `supabase functions list`, not
+  // config.toml: this function is not declared there, and "absent means the
+  // documented default of true" is wrong -- only 166 of 269 functions are
+  // declared, and the platform keeps its own value across redeploys. An
+  // earlier version of this comment said the gateway "admits the publishable
+  // key", which was the config.toml reading and understated it.
   //
   // The scheduled job presents x-internal-secret as of migration
   // 20261112230000. That migration must be applied before this guard ships,
