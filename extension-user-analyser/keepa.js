@@ -181,8 +181,80 @@
     return callKeepa('/product', { asin: a, domain: String(domain), stats: '180' });
   }
 
+  // ── Reading a product answer ─────────────────────────────────────────────
+  //
+  // Kept as a PURE function, separate from the call, so the tests can hand it
+  // a recorded body. Everything here obeys readPage.js's rule 1: a field that
+  // cannot be read reports { found: false }, never a zero and never a guess.
+  //
+  // Index 3 of the stats/csv arrays is the sales rank. The other indices are
+  // prices and are deliberately not touched here: this build shows rank and
+  // units, and a price read from rank data would contradict the page.
+  const SALES_RANK_INDEX = 3;
+
+  const NOT_FOUND = Object.freeze({ found: false, value: null, text: 'not found' });
+  const NOT_AVAILABLE = Object.freeze({ found: false, value: null, text: 'not available' });
+
+  function summariseProduct(data) {
+    const p = data && Array.isArray(data.products) ? data.products[0] : null;
+    if (!p) return { ok: false, code: 'NO_PRODUCT', message: 'The provider returned no product for that ASIN.' };
+
+    // ── rank ──
+    // -1 is the provider's "no data", and it is also a perfectly valid-looking
+    // number. Anything not a positive integer is not a rank.
+    let rank = NOT_FOUND;
+    const raw = p.stats && Array.isArray(p.stats.current) ? p.stats.current[SALES_RANK_INDEX] : null;
+    if (Number.isFinite(raw) && raw > 0) {
+      const cat = Array.isArray(p.categoryTree) && p.categoryTree.length
+        ? String(p.categoryTree[0].name || '').trim()
+        : '';
+      rank = {
+        found: true,
+        value: raw,
+        category: cat || null,
+        text: '#' + raw.toLocaleString() + (cat ? ' in ' + cat : ''),
+      };
+    }
+
+    // ── units a month ──
+    // This is Amazon's OWN "bought in past month" figure, passed through.
+    // It is NOT a rank-to-sales estimate: this file does not own a model for
+    // that, and inventing one would put a number on screen that no source
+    // stands behind. When Amazon does not publish it, say so.
+    let monthlySold = NOT_AVAILABLE;
+    if (Number.isFinite(p.monthlySold) && p.monthlySold > 0) {
+      monthlySold = {
+        found: true,
+        value: p.monthlySold,
+        text: p.monthlySold.toLocaleString() + '+',
+      };
+    }
+
+    return {
+      ok: true,
+      asin: p.asin || null,
+      title: p.title || null,
+      rank,
+      monthlySold,
+    };
+  }
+
+  /** One ASIN, already reduced to the fields the panel shows. 1 token. */
+  async function productSummary(asin, marketplace) {
+    const r = await product(asin, marketplace);
+    if (!r.ok) return r;
+    const out = summariseProduct(r.data);
+    if (!out.ok) return { ok: false, code: out.code, message: out.message };
+    return {
+      ...out,
+      tokensLeft: r.tokensLeft,
+      tokensConsumed: r.tokensConsumed,
+      refillIn: r.refillIn,
+    };
+  }
+
   root.KEEPA = {
-    getKey, setKey, clearKey, maskKey, validate, product,
+    getKey, setKey, clearKey, maskKey, validate, product, productSummary, summariseProduct,
     KEY_STORE, DOMAIN, BASE,
   };
 })(typeof self !== 'undefined' ? self : globalThis);

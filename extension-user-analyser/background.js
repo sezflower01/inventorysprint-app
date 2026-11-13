@@ -27,6 +27,11 @@
 // and switching it to a module would change how every other file in it loads.
 importScripts('keepa.js');
 
+// How long one ASIN's rank/units answer is reused before spending another of
+// the user's tokens. Six hours: rank moves slowly, and the figure on screen
+// carries its own age, so a stale-but-labelled number beats a spent token.
+const PRODUCT_TTL_MS = 6 * 60 * 60 * 1000;
+
 const CFG = {
   SUPABASE_URL: 'https://mstibdszibcheodvnprm.supabase.co',
   // Publishable anon key. Safe to ship -- it grants nothing on its own, every
@@ -314,6 +319,34 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         case 'ISUA_PROVIDER_CLEAR_KEY': {
           await KEEPA.clearKey();
           sendResponse({ ok: true });
+          break;
+        }
+        // One ASIN's rank and units, CACHED PER ASIN.
+        //
+        // Every call spends one of the user's own tokens, and a product page
+        // gets revisited constantly -- tabbing back and forth would spend a
+        // token each time for an answer that does not move hour to hour. The
+        // cache makes a revisit free; PRODUCT_TTL_MS is the only knob.
+        case 'ISUA_PROVIDER_PRODUCT': {
+          const asin = String(msg.asin || '').trim().toUpperCase();
+          const mkt = String(msg.marketplace || 'US').toUpperCase();
+          if (!/^[A-Z0-9]{10}$/.test(asin)) { sendResponse({ ok: false, error: 'Not a valid ASIN.' }); break; }
+
+          const cacheKey = `isua_prod_${mkt}_${asin}`;
+          if (!msg.force) {
+            const hit = (await chrome.storage.local.get(cacheKey))[cacheKey];
+            if (hit && Number.isFinite(hit.at) && Date.now() - hit.at < PRODUCT_TTL_MS) {
+              sendResponse({ ...hit.value, cached: true });
+              break;
+            }
+          }
+
+          const r = await KEEPA.productSummary(asin, mkt);
+          if (!r.ok) { sendResponse({ ok: false, code: r.code, error: r.message }); break; }
+          // Only a good answer is cached. Caching a failure would hide a
+          // recovered key or a refilled bucket for the whole TTL.
+          await chrome.storage.local.set({ [cacheKey]: { at: Date.now(), value: r } });
+          sendResponse(r);
           break;
         }
         case 'ISUA_SIGN_IN_PASSWORD': {

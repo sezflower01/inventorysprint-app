@@ -133,6 +133,36 @@
     setUnavailable($('apx-history-verdict'), NOT_READ, 'Price history needs sales-rank history, which this version does not have.');
     const alerts = $('apx-sa-alerts');
     if (alerts) { alerts.textContent = '—'; alerts.title = ''; }
+
+    renderSellersPending();
+  }
+
+  // ── the seller list ───────────────────────────────────────────
+  //
+  // Empty on purpose, and SAYING so. The ported markup ships the string
+  // "Loading offers…", which in the Analyzer is true for about a second and
+  // here would be a permanent lie -- a spinner that never resolves reads as
+  // a broken panel, and the user waits instead of getting on with it.
+  //
+  // Why it is not wired: the Analyzer fills this from SP-API getItemOffers,
+  // server-side, under ONE seller’s credentials. That is the exact thing
+  // this extension exists not to do -- it is how one account’s catalogue
+  // once ended up written under another’s. The replacement has to read the
+  // offers from the user’s own browser instead, and that needs the real
+  // markup of the offers panel, which is not guessable from here.
+  function renderSellersPending() {
+    const count = $('apx-sellers-count');
+    if (count) { count.textContent = '—'; count.title = 'Not read yet'; }
+    const list = $('apx-sellers-list');
+    if (list) {
+      list.textContent = '';
+      const d = document.createElement('div');
+      d.className = 'apx-sellers-empty apx-k';
+      d.textContent = 'Not read yet — the seller list is not wired up in this version.';
+      d.title = 'It will be read from the offers panel in your own browser session, '
+        + 'not from any seller account.';
+      list.appendChild(d);
+    }
   }
 
   // ── page-read fields ────────────────────────────────────────────────────
@@ -366,8 +396,91 @@
     if (d.type === 'PAGE_READING') {
       renderNeedsAmazon();
       renderReading(d.reading);
+      requestRank(d.reading);
     }
   });
+
+  // ── rank and units, from the user’s own provider key ────────────────
+  //
+  // These two fields can come from nowhere else. Seller Central does not
+  // publish a competitor-visible rank history, and units sold a month is
+  // Amazon’s own figure that only the provider mirrors. So unlike fees and
+  // gating, they do NOT wait on the Seller Central wiring -- they wait on a
+  // key, which the gate has already made certain exists.
+  //
+  // Cost: one token per ASIN, then free for six hours (the worker caches).
+
+  let rankFor = null;
+
+  function renderRank(res) {
+    const bsr = $('apx-sa-bsr');
+    const bsrTop = $('apx-bsr');
+    const sales = $('apx-sa-sales');
+
+    if (!res || !res.ok) {
+      // A failure here must not overwrite a rank the PAGE already gave us.
+      const why = (res && res.error) || 'Could not reach the data provider.';
+      setUnavailable(sales, 'not available', why);
+      if (bsr && bsr.classList.contains('apx-sa-unknown')) setUnavailable(bsr, 'not found', why);
+      return;
+    }
+
+    // Rank: the page is preferred when it had one -- it is this minute’s
+    // value from the page the user is looking at. The provider fills the gap
+    // when the page layout hid it, and the tooltip says which source spoke.
+    if (res.rank && res.rank.found) {
+      for (const el of [bsr, bsrTop]) {
+        if (!el) continue;
+        if (!el.classList.contains('apx-sa-unknown')) continue; // the page already answered
+        el.textContent = res.rank.text;
+        el.classList.remove('apx-sa-unknown');
+        el.title = 'From your data provider' + (res.cached ? ' (cached)' : '');
+      }
+    }
+
+    // Units: Amazon’s own "bought in past month", passed straight through.
+    // Absent is a REAL answer -- Amazon does not publish it for every ASIN --
+    // and it is not the same as "not checked".
+    if (res.monthlySold && res.monthlySold.found) {
+      if (sales) {
+        sales.textContent = res.monthlySold.text;
+        sales.classList.remove('apx-sa-unknown');
+        sales.title = 'Units bought in the past month, as published by Amazon'
+          + (res.cached ? ' (cached)' : '');
+      }
+    } else {
+      setUnavailable(sales, 'not available',
+        'Amazon does not publish a monthly units figure for this ASIN. This panel '
+        + 'will not substitute an estimate derived from rank, because no source '
+        + 'stands behind that number.');
+    }
+  }
+
+  function requestRank(reading) {
+    const a = reading && reading.asin;
+    const asin = a && a.found ? String(a.value || a.text || '').trim() : '';
+    if (!/^[A-Za-z0-9]{10}$/.test(asin)) return;
+    if (!hasKey) return; // the gate is showing; nothing to spend a token on
+
+    const mkt = reading.marketplace || 'US';
+    const tag = mkt + ':' + asin;
+    if (rankFor === tag) return; // already answered for this page
+    rankFor = tag;
+
+    setUnavailable($('apx-sa-sales'), 'checking…', 'Asking your data provider.');
+    try {
+      chrome.runtime.sendMessage({ type: 'ISUA_PROVIDER_PRODUCT', asin, marketplace: mkt }, (res) => {
+        const fault = workerFault(res);
+        if (fault) { rankFor = null; renderRank({ ok: false, error: fault }); return; }
+        if (!res || !res.ok) rankFor = null; // let a later read retry
+        renderRank(res);
+        refreshKeepa(); // tokens left moved; keep the footer honest
+      });
+    } catch (e) {
+      rankFor = null;
+      renderRank({ ok: false, error: 'Could not reach the extension worker.' });
+    }
+  }
 
   // ── the API-key gate ────────────────────────────────────────────────────
   //
