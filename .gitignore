@@ -47,3 +47,17 @@ print-clients/windows/obj/
 # checkout knows what to fill in.
 .env*
 !.env.example
+
+# ── raw page captures ───────────────────────────────────────────────────────
+#
+# Whole-page DevTools captures of Amazon detail pages, used to build and
+# regression-test readPage.js against real markup. They stay OUT of the repo:
+# this repo is public, and a whole-page capture carries far more than the
+# fields being parsed -- session identifiers, personalisation, recommendation
+# payloads and whatever else Amazon embedded for that one logged-in view.
+#
+# The committed artefact is a TRIMMED, SCRUBBED fixture under
+# extension-user-analyser/tests/fixtures/, holding only the rows a test reads.
+# Scrubbing a 12,000-line file by inspection is not a thing anyone does
+# reliably, which is why the raw file is never the fixture.
+captures/
