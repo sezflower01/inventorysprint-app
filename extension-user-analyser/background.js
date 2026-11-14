@@ -59,6 +59,16 @@ const KEEPA_CALL_CAP = 3;
 const KEEPA_CALL_WINDOW_MS = 60 * 1000;
 const CALL_LEDGER_KEY = 'isua_keepa_calls';
 
+/** The user's own seller id, typed by them. Never fetched, never guessed. */
+const MY_SELLER_KEY = 'isua_my_seller_id';
+
+/** Amazon marketplace ids, which look exactly like seller ids and are not. */
+const MARKETPLACE_IDS = [
+  'ATVPDKIKX0DER', 'A2EUQ1WTGCTBG2', 'A1AM78C64UM0Y8', 'A2Q3Y263D00KWC',
+  'A1F83G8C2ARO7P', 'A1PA6795UKMFR9', 'A13V1IB3VIYZZH', 'APJ6JRA9NG5V4',
+  'A1RKKUPIHCS9HS', 'A1VC38T7YXB528',
+];
+
 /**
  * Claim one slot in the current minute, or refuse.
  *
@@ -371,6 +381,54 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             refillIn: v.refillIn,
             refillRate: v.refillRate,
           });
+          break;
+        }
+        // ── the viewing user’s own seller id ────────────────────────────
+        //
+        // TYPED BY THE USER, stored locally, and nothing else. The panel
+        // needs to know which offer in the drawer is the user’s own so it
+        // can stop counting them as their own competitor -- the same
+        // mistake the repricer made, where holding the Buy Box read as
+        // "already lowest among eligible competitors" and the price
+        // shadowed itself downwards for months.
+        //
+        // THE SOURCE HAD TO BE THE USER. Amazon puts no "this is you"
+        // marker on a detail page, and the only other route is the
+        // signed-in session -- which means cookies, which this extension
+        // is banned from touching and has a test to prove it. So it is a
+        // field they fill in once. No network call, no permission, and
+        // the value never leaves this browser.
+        case 'ISUA_GET_MY_SELLER': {
+          const got = await chrome.storage.local.get(MY_SELLER_KEY);
+          sendResponse({ ok: true, sellerId: got[MY_SELLER_KEY] || null });
+          break;
+        }
+        case 'ISUA_SET_MY_SELLER': {
+          const raw = String(msg.sellerId || '').trim().toUpperCase();
+          if (!raw) {
+            await chrome.storage.local.remove(MY_SELLER_KEY);
+            sendResponse({ ok: true, sellerId: null });
+            break;
+          }
+          if (!/^A[A-Z0-9]{12,13}$/.test(raw)) {
+            sendResponse({ ok: false,
+              error: 'That is not a seller ID. It starts with A and is 13 or 14 '
+                + 'characters, like the seller= value in your storefront link.' });
+            break;
+          }
+          // A MARKETPLACE ID IS NOT A SELLER ID, and the two are easy to
+          // confuse: both start with A, both are 13-14 characters, and both
+          // sit in Amazon URLs next to each other. Storing one would match
+          // no offer at all, so the panel would silently keep counting the
+          // user as their own competitor while looking configured.
+          if (MARKETPLACE_IDS.includes(raw)) {
+            sendResponse({ ok: false,
+              error: 'That is a marketplace ID, not your seller ID. Yours is the '
+                + 'seller= value in your own storefront link.' });
+            break;
+          }
+          await chrome.storage.local.set({ [MY_SELLER_KEY]: raw });
+          sendResponse({ ok: true, sellerId: raw });
           break;
         }
         case 'ISUA_PROVIDER_CLEAR_KEY': {

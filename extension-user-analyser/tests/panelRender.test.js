@@ -107,7 +107,13 @@ function readFixture(fixture, url) {
 }
 
 /** Load panel.html, run panel.js, feed it a reading. */
-function renderPanel(reading) {
+/**
+ * `responses` lets a test answer specific worker messages by type, falling
+ * back to the generic signed-in reply. Added for the seller-id feature, whose
+ * whole behaviour depends on what ISUA_GET_MY_SELLER returns -- a single
+ * canned reply for every message cannot express "this user has an id saved".
+ */
+function renderPanel(reading, responses) {
   const dom = new JSDOM(srcOf('panel.html'), {
     url: 'chrome-extension://test/panel.html',
     resources: undefined, // do not fetch the font stylesheet
@@ -122,7 +128,10 @@ function renderPanel(reading) {
       getManifest: () => JSON.parse(srcOf('manifest.json')),
       sendMessage: (msg, cb) => {
         sent.push(msg);
-        if (cb) cb({ ok: true, signedIn: true, email: 'someone@example.invalid' });
+        if (!cb) return;
+        const own = responses && Object.prototype.hasOwnProperty.call(responses, msg && msg.type);
+        cb(own ? responses[msg.type]
+               : { ok: true, signedIn: true, email: 'someone@example.invalid' });
       },
       lastError: null,
     },
@@ -567,4 +576,104 @@ test('the open offer list renders landed cost, and says so', { skip }, () => {
   // names come from a page we do not control.
   assert.ok(!/<[a-z]/i.test($('apx-sellers-list').innerHTML.replace(/<\/?div[^>]*>/gi, '')),
     'markup from the page reached the offer rows');
+});
+
+/** renderPanel, but with a seller id already saved in the worker's store. */
+function renderPanelAsSeller(reading, sellerId) {
+  return renderPanel(wire(reading), {
+    ISUA_GET_MY_SELLER: { ok: true, sellerId },
+    ISUA_SET_MY_SELLER: { ok: true, sellerId },
+  });
+}
+
+test('the user own offer is marked, excluded, and the exclusion is stated', { skip }, () => {
+  // THE BUG THIS PREVENTS, already shipped once in the repricer: holding the
+  // Buy Box read as "already lowest among eligible competitors", so the price
+  // shadowed itself downwards for months. The lowest offer being yours is not
+  // a price you have to beat.
+  const reading = readFixture('09-offers-panel.html', URL_FOR('B0H8QLSNPP'));
+  // The Buy Box offer, which is also the joint-cheapest FBA one -- the exact
+  // shape where counting yourself costs money.
+  const me = reading.offers.buyBox.sellerId;
+  assert.ok(/^ASYNTH/.test(me), 'the fixture seller ids are no longer synthetic');
+
+  const { $, text } = renderPanelAsSeller(reading, me);
+
+  // 7 offers, one of them ours -> 6 competitors.
+  assert.equal(text('apx-sellers-count'), '6',
+    'the user is still being counted among their own competitors');
+  assert.match($('apx-sellers-count').title, /one of them yours/,
+    'the total no longer explains why the count dropped');
+
+  // Lowest FBA must now be the cheapest offer that is NOT ours. Three offers
+  // tie at 64.97, so excluding ours leaves the same price from someone else
+  // -- which is the subtle case: the NUMBER is unchanged and the meaning is
+  // not, and that is exactly when a silent exclusion is undetectable.
+  assert.equal(text('apx-fba'), '$64.97');
+  assert.match($('apx-fba').title, /excluded from this figure/,
+    'the FBA figure no longer says that the user own offer was taken out');
+
+  // The row is labelled.
+  const rows = $('apx-sellers-list').querySelectorAll('.apx-sellers-row');
+  const mineRow = Array.from(rows).find((r) => / You$/.test(r.textContent));
+  assert.ok(mineRow, 'the user own offer is not marked in the list');
+  assert.equal(rows.length, 7, 'the own offer was dropped from the list instead of marked');
+
+  // And the suppression is SPELLED OUT. An exclusion the user cannot see is
+  // worse than none: a stale id would hide a real rival with no trace.
+  const note = $('apx-sellers-list').querySelector('.apx-sellers-note');
+  assert.ok(note, 'nothing states what was excluded');
+  assert.match(note.textContent, /Your own offer/);
+  assert.match(note.textContent, /excluded/);
+});
+
+test('an id set but not on this listing says so, and excludes nothing', { skip }, () => {
+  // "You are not selling this" and "your id is wrong" look identical from the
+  // outside and want different actions, so they are different messages.
+  const reading = readFixture('09-offers-panel.html', URL_FOR('B0H8QLSNPP'));
+  const { $, text } = renderPanelAsSeller(reading, 'ASYNTH99999999');
+
+  assert.equal(text('apx-sellers-count'), '7', 'offers were excluded for an id that matched none');
+  const note = $('apx-sellers-list').querySelector('.apx-sellers-note');
+  assert.match(note.textContent, /None of these offers is yours/);
+  assert.ok(!/ You$/m.test($('apx-sellers-list').textContent), 'an offer was marked as the user own');
+});
+
+test('with no id set, the panel says what setting one would do', { skip }, () => {
+  const reading = readFixture('09-offers-panel.html', URL_FOR('B0H8QLSNPP'));
+  const { $, text } = renderPanelAsSeller(reading, null);
+  assert.equal(text('apx-sellers-count'), '7');
+  const note = $('apx-sellers-list').querySelector('.apx-sellers-note');
+  assert.match(note.textContent, /Set your seller ID/,
+    'an unconfigured panel does not say that it is counting the user as a rival');
+});
+
+test('the seller id is typed and local: no cookie, no network, no guess', () => {
+  // The source HAD to be the user. Amazon puts no "this is you" marker on a
+  // detail page, and the only other route is the signed-in session, which
+  // means cookies -- banned here, with its own test. So the one thing that
+  // must stay true of this feature is that it asks rather than infers.
+  const bg = srcOf('background.js');
+  const code = bg.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+
+  assert.match(code, /ISUA_SET_MY_SELLER/, 'the setter has gone');
+  assert.match(code, /ISUA_GET_MY_SELLER/, 'the getter has gone');
+  assert.match(code, /\^A\[A-Z0-9\]\{12,13\}\$/, 'the seller-id format is no longer validated');
+
+  // Stored locally, and nowhere else.
+  const slice = code.slice(code.indexOf("case 'ISUA_SET_MY_SELLER'"), code.indexOf("case 'ISUA_PROVIDER_CLEAR_KEY'"));
+  assert.match(slice, /storage\.local/, 'the id is no longer stored in local storage');
+  assert.ok(!/fetch\(|XMLHttpRequest|supabase/i.test(slice),
+    'saving the seller id now makes a network call');
+
+  // A MARKETPLACE ID IS NOT A SELLER ID. Both start with A, both are 13-14
+  // characters, both sit in Amazon URLs. Storing one matches no offer, so the
+  // panel keeps counting the user as a rival while looking configured.
+  assert.match(code, /MARKETPLACE_IDS/, 'the marketplace-id guard has gone');
+  assert.match(code, /ATVPDKIKX0DER/, 'the marketplace list is empty');
+
+  // And the ban stays a ban.
+  const panel = srcOf('panel.js').replace(/\/\/[^\n]*/g, '');
+  assert.ok(!/chrome\.cookies|document\.cookie/.test(panel + code),
+    'a cookie API appeared alongside the seller-id feature');
 });

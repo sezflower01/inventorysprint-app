@@ -373,6 +373,24 @@
           <span id="apx-keepa-status" class="apx-k"></span>
           <button type="button" id="apx-keepa-change" class="apx-strip-link">Change key</button>
         </p>
+        <!-- The user’s own seller id. Typed once, stored in this browser,
+             and used only to stop their own offer being counted as a rival.
+             There is no way to read it from the page and no way to read it
+             from the session without cookies, which this extension does not
+             touch -- so it is asked for plainly. -->
+        <p class="apx-meta-row apx-k">
+          <span id="apx-me-status" class="apx-k"></span>
+          <button type="button" id="apx-me-change" class="apx-strip-link">Your seller ID</button>
+        </p>
+        <form id="apx-me-form" class="apx-signin-form hidden">
+          <input id="apx-me-input" type="text" placeholder="A1B2C3D4E5F6G7" autocomplete="off"
+                 spellcheck="false" autocapitalize="characters" maxlength="14" />
+          <div id="apx-me-error" class="apx-signin-error"></div>
+          <button id="apx-me-save" type="submit" class="apx-primary">Save</button>
+          <button id="apx-me-clear" type="button" class="apx-strip-link">Clear</button>
+          <p class="apx-k">It is the <code>seller=</code> value in your own storefront
+             link. It stays in this browser and is never sent anywhere.</p>
+        </form>
       </div>
     </main>
   </div>

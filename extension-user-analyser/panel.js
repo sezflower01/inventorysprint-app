@@ -414,6 +414,31 @@
     if (o.state === 'loading') { renderOffersLoading(o); return; }
     if (!o.found) { renderSellersPending(); return; }
 
+    // EXCLUDE THE USER’S OWN OFFER FROM THE COMPETITIVE FIGURES.
+    //
+    // This is the extension-side half of a bug the repricer already had:
+    // holding the Buy Box read as "already lowest among eligible
+    // competitors", so the price shadowed itself downwards for months. The
+    // lowest offer being YOURS is not a price you have to beat.
+    //
+    // It is ALWAYS SHOWN, never silently dropped. A stale or mistyped id
+    // would hide a real rival, and a figure that quietly excludes something
+    // is indistinguishable from a wrong one.
+    //
+    // Declared up here rather than beside its first use: the competitor count
+    // a few lines down reads `others`, and with the block further on this
+    // threw a temporal-dead-zone ReferenceError that killed the whole render.
+    // The panel then kept the previous "not open" labels and looked, exactly,
+    // like a drawer that had never opened.
+    const mine = mySellerId
+      ? o.offers.find((x) => x.sellerId === mySellerId) || null
+      : null;
+    const others = mine ? o.offers.filter((x) => x !== mine) : o.offers;
+    const cheapestOf = (list) => list.reduce(
+      (best, x) => (x.landed != null && (!best || x.landed < best.landed) ? x : best), null);
+    const rivalFba = cheapestOf(others.filter((x) => x.fba === true));
+    const rivalFbm = cheapestOf(others.filter((x) => x.fba === false));
+
     const count = $('apx-sellers-count');
     if (count) {
       count.textContent = String(o.count);
@@ -428,16 +453,32 @@
       // to the total -- an offer whose sold-by link carries no
       // isAmazonFulfilled counts towards neither, and is left visible as a
       // shortfall rather than quietly filed under FBM.
+      // The number shown is COMPETITORS, so the user’s own offer comes out
+      // of it. The total is kept in the tooltip, because a count that
+      // dropped from 7 to 6 with no explanation is a bug report.
+      count.textContent = String(others.length);
       const split = o.fbaCount + ' FBA, ' + o.fbmCount + ' FBM';
       const unknown = o.count - o.fbaCount - o.fbmCount;
-      count.title = o.count + ' offers read from the open list \u2014 ' + split
+      count.title = o.count + ' offers read from the open list'
+        + (mine ? ', one of them yours' : '') + ' \u2014 ' + split
         + (unknown > 0 ? ', ' + unknown + ' with no fulfilment stated' : '')
         + (o.amazonSold ? '. Amazon is one of them.' : '. Amazon is not selling this.')
         + (o.totalOthers != null ? ' The page\u2019s own counter says ' + o.totalOthers + ' besides the Buy Box.' : '');
     }
 
-    putOffer('apx-fba', o.fbaLow, 'none', 'No FBA offer in the open list.');
-    putOffer('apx-fbm', o.fbmLow, 'none', 'No FBM offer in the open list.');
+    putOffer('apx-fba', rivalFba, 'none',
+      mine ? 'No FBA offer but your own in the open list.' : 'No FBA offer in the open list.');
+    putOffer('apx-fbm', rivalFbm, 'none',
+      mine ? 'No FBM offer but your own in the open list.' : 'No FBM offer in the open list.');
+    if (mine) {
+      for (const [id, rival] of [['apx-fba', rivalFba], ['apx-fbm', rivalFbm]]) {
+        const el = $(id);
+        if (el && rival) {
+          el.title = (el.title || '') + ' Your own offer at ' + fmt(mine.landed)
+            + ' is excluded from this figure.';
+        }
+      }
+    }
     // Amazon absent is an ANSWER about the competition, not a gap in the read.
     putOffer('apx-amz', o.amazon, 'not selling',
       'Amazon itself is not one of the offers on this page.');
@@ -447,13 +488,35 @@
     list.textContent = '';
     for (const offer of o.offers) {
       const row = document.createElement('div');
-      row.className = 'apx-sellers-row apx-k';
+      const isMine = mine && offer === mine;
+      row.className = 'apx-sellers-row apx-k' + (isMine ? ' apx-sellers-row-mine' : '');
       // textContent, never innerHTML: a seller name is third-party text on a
       // page we do not control, and this panel runs inside the extension.
-      row.textContent = offerLine(offer);
-      if (offer.sellerId) row.title = 'Seller ' + offer.sellerId;
+      row.textContent = offerLine(offer) + (isMine ? ' \u00b7 You' : '');
+      if (offer.sellerId) row.title = 'Seller ' + offer.sellerId
+        + (isMine ? ' \u2014 your own offer, excluded from the competitor figures.' : '');
       list.appendChild(row);
     }
+
+    // THE SUPPRESSION IS STATED, in all three cases. An exclusion the user
+    // cannot see is worse than none: they would read a competitive floor
+    // that silently skipped an offer and have no way to know.
+    const note = document.createElement('div');
+    note.className = 'apx-sellers-note apx-k';
+    if (mine) {
+      note.textContent = 'Your own offer (' + fmt(mine.landed) + ', '
+        + (mine.fba === true ? 'FBA' : mine.fba === false ? 'FBM' : 'fulfilment not stated')
+        + ') is excluded from the competitor count and the lowest-price figures.';
+    } else if (mySellerId) {
+      // Set, but not on this listing. Saying so distinguishes "you are not
+      // selling this" from "the id is wrong", which look identical
+      // otherwise and want different actions.
+      note.textContent = 'None of these offers is yours, so nothing was excluded.';
+    } else {
+      note.textContent = 'Set your seller ID below and your own offer stops '
+        + 'counting as a competitor.';
+    }
+    list.appendChild(note);
   }
 
   // ── page-read fields ────────────────────────────────────────────────────
@@ -749,6 +812,12 @@
   let rankFor = null;
   let lastReading = null;
   let lastRank = null;
+  // The viewing user's own seller id, typed by them in the field below the
+  // panel. readPage.js deliberately does NOT know it: a page reader that
+  // knows who is reading has an identity to leak, and its whole job is to
+  // report what the page says. The exclusion therefore happens here, where
+  // it is a presentation decision over a neutral reading.
+  let mySellerId = null;
 
   /**
    * The per-call diagnostic. Deliberately a plain sentence rather than a
@@ -1220,6 +1289,67 @@
   // the page is free and should paint at once. What must not depend on the
   // ordering is the provider call, so the reading that arrived meanwhile is
   // replayed here, now that hasKey is actually known.
+  // ── the seller-id field ─────────────────────────────────────────────────
+  function renderMySeller() {
+    const status = $('apx-me-status');
+    if (status) {
+      status.textContent = mySellerId
+        ? 'You: ' + mySellerId
+        : 'Your seller ID is not set';
+      status.title = mySellerId
+        ? 'Your own offer is marked and excluded from the competitor figures.'
+        : 'Without it, your own offer counts as one of your competitors.';
+    }
+    const input = $('apx-me-input');
+    if (input) input.value = mySellerId || '';
+  }
+
+  function wireMySeller() {
+    const form = $('apx-me-form');
+    const toggle = $('apx-me-change');
+    const err = $('apx-me-error');
+    const input = $('apx-me-input');
+    if (toggle && form) {
+      toggle.addEventListener('click', () => {
+        form.classList.toggle('hidden');
+        if (!form.classList.contains('hidden') && input) input.focus();
+      });
+    }
+    const save = (value) => {
+      toHost({ type: 'NOOP' });
+      chrome.runtime.sendMessage({ type: 'ISUA_SET_MY_SELLER', sellerId: value }, (res) => {
+        if (!res || !res.ok) {
+          if (err) err.textContent = (res && res.error) || 'Could not save that.';
+          return;
+        }
+        if (err) err.textContent = '';
+        mySellerId = res.sellerId;
+        renderMySeller();
+        if (form) form.classList.add('hidden');
+        // Re-render against the reading already in hand. No lookup, no
+        // token: the offers were read from the page and are still held.
+        if (lastReading) renderOffers(lastReading.offers);
+      });
+    };
+    if (form) {
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        save(input ? input.value : '');
+      });
+    }
+    const clear = $('apx-me-clear');
+    if (clear) clear.addEventListener('click', () => save(''));
+  }
+
+  wireMySeller();
+  chrome.runtime.sendMessage({ type: 'ISUA_GET_MY_SELLER' }, (res) => {
+    mySellerId = (res && res.ok && res.sellerId) || null;
+    renderMySeller();
+    // The reading may already have arrived -- same race as the provider key,
+    // and the same fix: replay what is held once the state is known.
+    if (lastReading) renderOffers(lastReading.offers);
+  });
+
   refreshKeepa(() => {
     if (hasKey) refreshAuth(); else show('keepa');
     if (hasKey && lastReading) requestRank(lastReading);
