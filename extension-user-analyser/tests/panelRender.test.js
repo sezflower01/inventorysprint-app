@@ -549,18 +549,18 @@ test('the open offer list renders landed cost, and says so', { skip }, () => {
 
   const rows = $('apx-sellers-list').querySelectorAll('.apx-sellers-row');
   assert.equal(rows.length, 7, 'the offer rows stopped rendering one per offer');
-  assert.match(rows[0].textContent, /J & M COLLECTIBLES/);
+  assert.match(rows[0].textContent, /Seller A & B/);
   assert.match(rows[0].textContent, /Buy Box/, 'the Buy Box offer is no longer marked');
   assert.match(rows[0].textContent, /FBA/);
 
-  const fbmRow = Array.from(rows).find((r) => /Treasureton/.test(r.textContent));
+  const fbmRow = Array.from(rows).find((r) => /Seller G/.test(r.textContent));
   assert.match(fbmRow.textContent, /FBM/);
   assert.match(fbmRow.textContent, /\$77\.28/, 'the FBM row shows the pre-shipping price');
   assert.match(fbmRow.textContent, /97% lifetime/,
     'the lifetime rating window is no longer distinguished from a 12-month one');
 
   // The 30-item cap must read as a ceiling, never as an exact count.
-  const capped = Array.from(rows).find((r) => /ACG ECOM/.test(r.textContent));
+  const capped = Array.from(rows).find((r) => /SLR E CO/.test(r.textContent));
   assert.match(capped.textContent, /qty 30\+/, 'the stock cap is shown as an exact figure');
 
   // Seller names go in as TEXT. This panel runs inside the extension and the

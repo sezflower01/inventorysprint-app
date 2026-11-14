@@ -12,40 +12,40 @@ import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { classifyInput, parseSellerLine, splitInputLines } from './parse.ts';
 
 Deno.test('parseSellerLine: bare seller ID', () => {
-  assertEquals(parseSellerLine('A1B0EBOAJDDILW'), 'A1B0EBOAJDDILW');
+  assertEquals(parseSellerLine('ASYNTH00000002'), 'ASYNTH00000002');
 });
 
 Deno.test('parseSellerLine: normalises case', () => {
-  assertEquals(parseSellerLine('a1b0eboajddilw'), 'A1B0EBOAJDDILW');
+  assertEquals(parseSellerLine('asynth00000002'), 'ASYNTH00000002');
 });
 
 Deno.test('parseSellerLine: full storefront URL', () => {
-  const url = 'https://www.amazon.com/sp?ie=UTF8&seller=A1B0EBOAJDDILW&me=A1B0EBOAJDDILW';
-  assertEquals(parseSellerLine(url), 'A1B0EBOAJDDILW');
+  const url = 'https://www.amazon.com/sp?ie=UTF8&seller=ASYNTH00000002&me=ASYNTH00000002';
+  assertEquals(parseSellerLine(url), 'ASYNTH00000002');
 });
 
 Deno.test('parseSellerLine: URL me= wins over other long alphanumeric runs', () => {
   // marketplaceID is a valid-looking token and appears BEFORE me= here. If
   // the column scan ran first it would return the wrong ID entirely.
-  const url = 'https://www.amazon.com/sp?marketplaceID=ATVPDKIKX0DER&me=A221MUUT57POIV&ref_=sr';
-  assertEquals(parseSellerLine(url), 'A221MUUT57POIV');
+  const url = 'https://www.amazon.com/sp?marketplaceID=ATVPDKIKX0DER&me=ASYNTH00000009&ref_=sr';
+  assertEquals(parseSellerLine(url), 'ASYNTH00000009');
 });
 
 Deno.test('parseSellerLine: CSV with ID first', () => {
-  assertEquals(parseSellerLine('A1B0EBOAJDDILW,Pedu'), 'A1B0EBOAJDDILW');
+  assertEquals(parseSellerLine('ASYNTH00000002,Seller C'), 'ASYNTH00000002');
 });
 
 Deno.test('parseSellerLine: CSV with name first', () => {
-  assertEquals(parseSellerLine('Pedu,A1B0EBOAJDDILW'), 'A1B0EBOAJDDILW');
+  assertEquals(parseSellerLine('Seller C,ASYNTH00000002'), 'ASYNTH00000002');
 });
 
 Deno.test('parseSellerLine: strips surrounding quotes', () => {
-  assertEquals(parseSellerLine('"A1B0EBOAJDDILW","Pedu"'), 'A1B0EBOAJDDILW');
+  assertEquals(parseSellerLine('"ASYNTH00000002","Seller C"'), 'ASYNTH00000002');
 });
 
 Deno.test('parseSellerLine: semicolon and tab delimiters', () => {
-  assertEquals(parseSellerLine('Pedu;A1B0EBOAJDDILW'), 'A1B0EBOAJDDILW');
-  assertEquals(parseSellerLine('Pedu\tA1B0EBOAJDDILW'), 'A1B0EBOAJDDILW');
+  assertEquals(parseSellerLine('Seller C;ASYNTH00000002'), 'ASYNTH00000002');
+  assertEquals(parseSellerLine('Seller C\tASYNTH00000002'), 'ASYNTH00000002');
 });
 
 Deno.test('parseSellerLine: rejects too-short and too-long tokens', () => {
@@ -60,32 +60,32 @@ Deno.test('parseSellerLine: rejects lines with nothing ID-shaped', () => {
 });
 
 Deno.test('splitInputLines: drops a header row', () => {
-  const text = 'seller_id,name\nA1B0EBOAJDDILW,Pedu\nA221MUUT57POIV,VIP';
+  const text = 'seller_id,name\nASYNTH00000002,Seller C\nASYNTH00000009,VIP';
   assertEquals(splitInputLines(text).length, 2);
 });
 
 Deno.test('splitInputLines: keeps a first line that IS an ID', () => {
-  const text = 'A1B0EBOAJDDILW\nA221MUUT57POIV';
-  assertEquals(splitInputLines(text), ['A1B0EBOAJDDILW', 'A221MUUT57POIV']);
+  const text = 'ASYNTH00000002\nASYNTH00000009';
+  assertEquals(splitInputLines(text), ['ASYNTH00000002', 'ASYNTH00000009']);
 });
 
 Deno.test('splitInputLines: single ID line is not mistaken for a header', () => {
-  assertEquals(splitInputLines('A1B0EBOAJDDILW'), ['A1B0EBOAJDDILW']);
+  assertEquals(splitInputLines('ASYNTH00000002'), ['ASYNTH00000002']);
 });
 
 Deno.test('splitInputLines: handles CRLF and blank lines', () => {
-  const text = 'A1B0EBOAJDDILW\r\n\r\nA221MUUT57POIV\r\n';
-  assertEquals(splitInputLines(text), ['A1B0EBOAJDDILW', 'A221MUUT57POIV']);
+  const text = 'ASYNTH00000002\r\n\r\nASYNTH00000009\r\n';
+  assertEquals(splitInputLines(text), ['ASYNTH00000002', 'ASYNTH00000009']);
 });
 
 Deno.test('classifyInput: dedupes case-insensitively, preserving first-seen order', () => {
-  const { parsed, duplicates } = classifyInput('A1B0EBOAJDDILW\na1b0eboajddilw\nA221MUUT57POIV');
-  assertEquals(parsed, ['A1B0EBOAJDDILW', 'A221MUUT57POIV']);
-  assertEquals(duplicates, ['A1B0EBOAJDDILW']);
+  const { parsed, duplicates } = classifyInput('ASYNTH00000002\nasynth00000002\nASYNTH00000009');
+  assertEquals(parsed, ['ASYNTH00000002', 'ASYNTH00000009']);
+  assertEquals(duplicates, ['ASYNTH00000002']);
 });
 
 Deno.test('classifyInput: separates invalid lines from valid ones', () => {
-  const { parsed, invalid } = classifyInput('A1B0EBOAJDDILW\ngarbage line\nA221MUUT57POIV');
+  const { parsed, invalid } = classifyInput('ASYNTH00000002\ngarbage line\nASYNTH00000009');
   assertEquals(parsed.length, 2);
   assertEquals(invalid, ['garbage line']);
 });
@@ -93,13 +93,13 @@ Deno.test('classifyInput: separates invalid lines from valid ones', () => {
 Deno.test('classifyInput: mixed bare IDs, URLs and CSV rows in one paste', () => {
   const text = [
     'seller_id,note',
-    'A1B0EBOAJDDILW,first',
-    'https://www.amazon.com/sp?me=A221MUUT57POIV',
-    'Some Store;A1JGL3QS3PG2RX',
+    'ASYNTH00000002,first',
+    'https://www.amazon.com/sp?me=ASYNTH00000009',
+    'Some Store;ASYNTH00000008',
     'oops',
   ].join('\n');
   const { parsed, invalid } = classifyInput(text);
-  assertEquals(parsed, ['A1B0EBOAJDDILW', 'A221MUUT57POIV', 'A1JGL3QS3PG2RX']);
+  assertEquals(parsed, ['ASYNTH00000002', 'ASYNTH00000009', 'ASYNTH00000008']);
   assertEquals(invalid, ['oops']);
 });
 

@@ -188,7 +188,7 @@ test('09 offers panel: the real capture, and the four things it settled', { skip
 
   // 1. The Buy Box is the pinned offer, and it is NOT simply the cheapest --
   //    three offers tie at 64.97 and Amazon picked one of them.
-  assert.equal(o.buyBox.sellerName, 'J & M COLLECTIBLES');
+  assert.equal(o.buyBox.sellerName, 'Seller A & B');
   assert.equal(o.buyBox.isBuyBox, true);
   assert.equal(o.offers.filter((x) => x.landed === 64.97).length, 3, 'the three-way price tie stopped parsing');
 
@@ -197,7 +197,7 @@ test('09 offers panel: the real capture, and the four things it settled', { skip
   //    on the displayed price it looks like the fourth-cheapest offer; ranked
   //    on what it costs to receive, it is the second DEAREST.
   const fbm = o.fbmLow;
-  assert.equal(fbm.sellerName, 'Treasureton');
+  assert.equal(fbm.sellerName, 'Seller G');
   assert.equal(fbm.price, 68.95);
   assert.equal(fbm.shipping, 8.33);
   assert.equal(fbm.landed, 77.28, 'shipping is no longer added, so FBM reads cheaper than it is');
@@ -221,7 +221,7 @@ test('09 offers panel: the real capture, and the four things it settled', { skip
     'the fixture no longer reproduces the duplicate-id layout');
 
   // The cheapest FBA offer, which is what a seller actually competes with.
-  assert.equal(o.fbaLow.sellerName, 'J & M COLLECTIBLES');
+  assert.equal(o.fbaLow.sellerName, 'Seller A & B');
   assert.equal(o.fbaLow.landed, 64.97);
 
   // Amazon is not an offer here, and that is an ANSWER about the competition.
@@ -231,7 +231,7 @@ test('09 offers panel: the real capture, and the four things it settled', { skip
   // twelve months are different claims about a seller.
   assert.equal(fbm.positivePct, 97);
   assert.equal(fbm.positiveWindow, 'lifetime');
-  const buckeye = o.offers.find((x) => /Buckeye/.test(x.sellerName));
+  const buckeye = o.offers.find((x) => /Seller H/.test(x.sellerName));
   assert.equal(buckeye.stars, 4);
   assert.equal(buckeye.positivePct, 77);
   assert.equal(buckeye.positiveWindow, '12m');
@@ -275,7 +275,7 @@ test('09: no session token survived into the fixture', { skip }, () => {
     assert.ok(!rx.test(raw), 'the scrubbed fixture contains ' + name);
   }
   // Seller ids ARE public on the page and are kept on purpose.
-  assert.ok(/seller=A1GD4LR25P9QFR/.test(raw), 'the public seller ids were stripped too');
+  assert.ok(/seller=ASYNTH00000001/.test(raw), 'the synthetic seller id was stripped too — the href structure is what the reader parses');
 });
 
 test('a closed offers panel is not-found, not a crash', { skip }, () => {
@@ -303,7 +303,7 @@ test('the pinned offer is in the DOM twice and must be counted once', { skip }, 
 
   const o = readPage.readOffers(doc);
   assert.equal(o.count, 7, 'the sticky duplicate is being counted as an eighth offer');
-  const jm = o.offers.filter((x) => /COLLECTIBLES/.test(x.sellerName));
+  const jm = o.offers.filter((x) => /Seller A & B/.test(x.sellerName));
   assert.equal(jm.length, 1, 'the Buy Box seller appears twice');
   assert.equal(jm[0].isBuyBox, true);
   assert.equal(o.fbaCount + o.fbmCount, 7, 'the fulfilment counts no longer cover every offer');
@@ -369,4 +369,55 @@ test('Prime is reported as unstated, never inferred from FBA', { skip }, () => {
   // Amazon's own delivery-programme enum IS read, because it is a reading.
   assert.equal(o.offers.find((x) => x.fba === false).deliveryProgram, 'paid_shipping');
   assert.equal(o.buyBox.deliveryProgram, 'cfs');
+});
+
+test('no real Amazon seller id or name can get back into a fixture', () => {
+  // WHY THIS EXISTS. Fixture 09 was committed with seven real seller ids and
+  // names on the reasoning that they are public on the product page. Six were
+  // other people's; the seventh was the operator's own business. The argument
+  // was sound and the conclusion was wrong, because "visible to any shopper"
+  // and "safe for us to commit to a public repo" are different questions.
+  //
+  // So the rule is now mechanical rather than judged: inside this folder a
+  // seller id must look synthetic. Marketplace ids are allowed because they
+  // are global constants, not anybody's identity.
+  const MARKETPLACES = [
+    'ATVPDKIKX0DER', 'A2EUQ1WTGCTBG2', 'A1AM78C64UM0Y8', 'A2Q3Y263D00KWC',
+    'A1F83G8C2ARO7P', 'A1PA6795UKMFR9', 'A13V1IB3VIYZZH', 'APJ6JRA9NG5V4',
+    'A1RKKUPIHCS9HS', 'A1VC38T7YXB528',
+  ];
+  const files = fs.readdirSync(FIX).filter((f) => f.endsWith('.html')).map((f) => path.join(FIX, f))
+    .concat(fs.readdirSync(__dirname).filter((f) => f.endsWith('.test.js')).map((f) => path.join(__dirname, f)));
+
+  for (const file of files) {
+    const text = fs.readFileSync(file, 'utf8');
+    // An Amazon seller id is A followed by 12 or 13 more of [A-Z0-9].
+    for (const id of new Set(text.match(/\bA[A-Z0-9]{12,13}\b/g) || [])) {
+      if (MARKETPLACES.includes(id)) continue;
+      assert.ok(id.startsWith('ASYNTH'),
+        path.basename(file) + ' carries a seller id that is not synthetic: ' + id);
+    }
+  }
+
+  // And the specific names that were published, so a partial revert of the
+  // substitution fails loudly instead of leaving one behind.
+  //
+  // ASSEMBLED FROM FRAGMENTS on purpose: this guard scans the test files too,
+  // so spelling the forbidden names out here would make the guard trip on
+  // itself -- which it did, and the first instinct was to exclude this file
+  // from its own check. That would have left a real hole for the sake of a
+  // green run.
+  const FORBIDDEN = ['COLLECT' + 'IBLES', 'Maiden' + '3118', 'ACG' + ' ECOM',
+    'Treasure' + 'ton', 'Buck' + 'eye'];
+  for (const file of files) {
+    const text = fs.readFileSync(file, 'utf8');
+    for (const name of FORBIDDEN) {
+      assert.ok(!text.includes(name),
+        path.basename(file) + ' still carries the real seller name ' + name);
+    }
+    // Whole word: the operator's business name is short enough to appear
+    // inside ordinary words, and a substring test would fail on innocent text.
+    assert.ok(!new RegExp('\\bPe' + 'du\\b').test(text),
+      path.basename(file) + ' still carries the operator’s own business name');
+  }
 });

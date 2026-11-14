@@ -19,7 +19,7 @@
   What was KEPT, deliberately, because each one is load-bearing:
 
     data-csa-c-price-to-pay      the offer price, as a number, in an attribute
-    data-csa-c-shipping-charge   separate from the price (Treasureton charges)
+    data-csa-c-shipping-charge   separate from the price (Seller G charges)
     seller= in the Sold-by href  the seller id
     isAmazonFulfilled=0|1        THE FBA/FBM DISCRIMINATOR -- see readPage.js
     maxQty in data-aod-atc-action  stock, capped at 30 by Amazon
@@ -29,8 +29,20 @@
     two keepaStock divs           ANOTHER EXTENSION'S injected DOM, left in on
                                   purpose so a test can prove we never read it.
 
-  Seller names and ids are public on the page. No customer, session or
-  operator identifier survives here.
+  EVERY SELLER ID AND NAME HERE IS SYNTHETIC, and why is worth recording.
+
+  This header used to say they were kept because they are public on the page.
+  That was true of six of the seven and WRONG about the one that mattered:
+  one was the operator's own business. So an argument about "public" data
+  published an owner identifier into a public repo, and the reasoning looked
+  sound the whole way through. "Visible to any shopper" and "safe for us to
+  commit" are different questions, and only the second one decides this.
+
+  The substitutions keep what the tests actually prove: two ids of 13
+  characters and five of 14, an ampersand that arrives HTML-escaped, an
+  apostrophe, digits inside a name, an all-caps name with a space, and one
+  name long enough to wrap. No customer, session or operator identifier
+  survives here.
 
   The seven offers cover: three-way price tie, a cheaper-but-not-Buy-Box
   offer, the 30+ stock cap, a 4.5-star seller, the one FBM offer (ships from
@@ -46,8 +58,8 @@
 
     <!-- The live drawer carries the pinned offer TWICE: this hidden sticky
          header, shown on scroll, and the real block below. Same seller, same
-         price. A reader that takes both reports eight offers with J & M
-         COLLECTIBLES listed twice and a seller count one too high. Kept here
+         price. A reader that takes both reports eight offers, with the Buy
+         Box seller listed twice and a seller count one too high. Kept here
          so the de-duplication is provable. -->
     <div id="aod-sticky-pinned-offer" class="a-section aod-sticky-pinned-offer aok-hidden" style="top: -200px;">
       <span id="aod-price-0">
@@ -59,7 +71,7 @@
       <div id="aod-offer-soldBy" class="a-section" role="listitem">
         <span class="a-size-small a-color-tertiary">Sold by</span>
         <a class="a-size-small a-link-normal" target="_blank" rel="noopener"
-           href="/gp/aag/main?ie=UTF8&amp;seller=A1GD4LR25P9QFR&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_0" role="link">J &amp; M COLLECTIBLES </a>
+           href="/gp/aag/main?ie=UTF8&amp;seller=ASYNTH00000001&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_0" role="link">Seller A &amp; B </a>
       </div>
     </div>
 
@@ -83,7 +95,7 @@
         <input type="hidden" name="items[0.base][offerListingId]" value="OFFER_ID_0_REDACTED">
         <span class="a-declarative" data-action="aod-atc-action"
               data-aod-atc-action="{&quot;refTag&quot;:&quot;aod_dpdsk_new_0&quot;,&quot;isStickyPinnedOffer&quot;:false,&quot;asin&quot;:&quot;B0H8QLSNPP&quot;,&quot;maxQty&quot;:18,&quot;offerIndex&quot;:0,&quot;minQty&quot;:1}">
-          <span class="a-button a-button-primary"><input name="submit.addToCart" aria-label="Add to Cart from seller J &amp; M COLLECTIBLES and price $64.97&#10;" class="a-button-input" type="submit"></span>
+          <span class="a-button a-button-primary"><input name="submit.addToCart" aria-label="Add to Cart from seller Seller A &amp; B and price $64.97&#10;" class="a-button-input" type="submit"></span>
         </span>
       </form>
 
@@ -107,8 +119,8 @@
         </div>
         <div id="aod-offer-soldBy" class="a-section" role="listitem">
           <span class="a-size-small a-color-tertiary">Sold by</span>
-          <a aria-label="J &amp; M COLLECTIBLES. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
-             href="/gp/aag/main?ie=UTF8&amp;seller=A1GD4LR25P9QFR&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_0" role="link">J &amp; M COLLECTIBLES </a>
+          <a aria-label="Seller A &amp; B. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+             href="/gp/aag/main?ie=UTF8&amp;seller=ASYNTH00000001&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_0" role="link">Seller A &amp; B </a>
           <div id="aod-offer-seller-rating" class="a-section">
             <i class="a-icon a-icon-star-mini a-star-mini-5"><span class="a-icon-alt">Seller rating is 5 out of 5 stars</span></i>
             <span class="a-size-small a-color-base"><span>(24558 ratings) <br>99% positive over last 12 months</span></span>
@@ -157,8 +169,8 @@
           </div>
           <div id="aod-offer-soldBy" class="a-section" role="listitem">
             <span class="a-size-small a-color-tertiary">Sold by</span>
-            <a aria-label="Pedu. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
-               href="/gp/aag/main?ie=UTF8&amp;seller=A1B0EBOAJDDILW&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_1" role="link">Pedu </a>
+            <a aria-label="Seller C. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+               href="/gp/aag/main?ie=UTF8&amp;seller=ASYNTH00000002&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_1" role="link">Seller C </a>
             <div id="aod-offer-seller-rating" class="a-section">
               <i class="a-icon a-icon-star-mini a-star-mini-5"><span class="a-icon-alt">Seller rating is 5 out of 5 stars</span></i>
               <span class="a-size-small a-color-base"><span>(791 ratings) <br>99% positive over last 12 months</span></span>
@@ -200,8 +212,8 @@
           </div>
           <div id="aod-offer-soldBy" class="a-section" role="listitem">
             <span class="a-size-small a-color-tertiary">Sold by</span>
-            <a aria-label="Maiden3118. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
-               href="/gp/aag/main?ie=UTF8&amp;seller=A3S8KDLTLWNQQ&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_2" role="link">Maiden3118 </a>
+            <a aria-label="Seller D4718. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+               href="/gp/aag/main?ie=UTF8&amp;seller=ASYNTH0000003&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_2" role="link">Seller D4718 </a>
             <div id="aod-offer-seller-rating" class="a-section">
               <i class="a-icon a-icon-star-mini a-star-mini-5"><span class="a-icon-alt">Seller rating is 5 out of 5 stars</span></i>
               <span class="a-size-small a-color-base"><span>(176 ratings) <br>98% positive over last 12 months</span></span>
@@ -238,8 +250,8 @@
             </div>
             <div id="aod-offer-soldBy" class="a-section" role="listitem">
               <span class="a-size-small a-color-tertiary">Sold by</span>
-              <a aria-label="ACG ECOM. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
-                 href="/gp/aag/main?ie=UTF8&amp;seller=A2RO0IV3XRPLHH&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_3" role="link">ACG ECOM </a>
+              <a aria-label="SLR E CO. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+                 href="/gp/aag/main?ie=UTF8&amp;seller=ASYNTH00000004&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_3" role="link">SLR E CO </a>
               <div id="aod-offer-seller-rating" class="a-section">
                 <i class="a-icon a-icon-star-mini a-star-mini-5"><span class="a-icon-alt">Seller rating is 5 out of 5 stars</span></i>
                 <span class="a-size-small a-color-base"><span>(162 ratings) <br>99% positive over last 12 months</span></span>
@@ -272,8 +284,8 @@
             </div>
             <div id="aod-offer-soldBy" class="a-section" role="listitem">
               <span class="a-size-small a-color-tertiary">Sold by</span>
-              <a aria-label="ARK&#39;d Brands. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
-                 href="/gp/aag/main?ie=UTF8&amp;seller=A30EI4OFCRGQPI&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_4" role="link">ARK'd Brands </a>
+              <a aria-label="Seller F&#39;s Shop. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+                 href="/gp/aag/main?ie=UTF8&amp;seller=ASYNTH00000005&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_4" role="link">Seller F's Shop </a>
               <div id="aod-offer-seller-rating" class="a-section">
                 <i class="a-icon a-icon-star-mini a-star-mini-4-5"><span class="a-icon-alt">Seller rating is 4.5 out of 5 stars</span></i>
                 <span class="a-size-small a-color-base"><span>(424 ratings) <br>94% positive over last 12 months</span></span>
@@ -311,12 +323,12 @@
           <div class="a-section" role="list">
             <div id="aod-offer-shipsFrom" class="a-section" role="listitem">
               <span class="a-size-small a-color-tertiary">Ships from</span>
-              <span class="a-size-small a-color-base"> Treasureton </span>
+              <span class="a-size-small a-color-base"> Seller G </span>
             </div>
             <div id="aod-offer-soldBy" class="a-section" role="listitem">
               <span class="a-size-small a-color-tertiary">Sold by</span>
-              <a aria-label="Treasureton. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
-                 href="/gp/aag/main?ie=UTF8&amp;seller=AJTV7V8Y8840E&amp;isAmazonFulfilled=0&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_5" role="link">Treasureton </a>
+              <a aria-label="Seller G. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+                 href="/gp/aag/main?ie=UTF8&amp;seller=ASYNTH0000006&amp;isAmazonFulfilled=0&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_5" role="link">Seller G </a>
               <div id="aod-offer-seller-rating" class="a-section">
                 <i class="a-icon a-icon-star-mini a-star-mini-5"><span class="a-icon-alt">Seller rating is 5 out of 5 stars</span></i>
                 <span class="a-size-small a-color-base"><span>(2152 ratings) <br>97% positive over lifetime</span></span>
@@ -324,7 +336,7 @@
             </div>
             <div id="aod-offer-customerServiceIdentifier" class="a-section" role="listitem">
               <span class="a-size-small a-color-tertiary">Customer<br>service</span>
-              <a class="a-size-small a-link-normal" target="_blank" rel="noopener" href="/sp?marketplaceID=ATVPDKIKX0DER&amp;seller=AJTV7V8Y8840E&amp;ref_=dp_merchant_link&amp;asin=B0H8QLSNPP5" role="link">Treasureton</a>
+              <a class="a-size-small a-link-normal" target="_blank" rel="noopener" href="/sp?marketplaceID=ATVPDKIKX0DER&amp;seller=ASYNTH0000006&amp;ref_=dp_merchant_link&amp;asin=B0H8QLSNPP5" role="link">Seller G</a>
             </div>
           </div>
         </div>
@@ -353,8 +365,8 @@
             </div>
             <div id="aod-offer-soldBy" class="a-section" role="listitem">
               <span class="a-size-small a-color-tertiary">Sold by</span>
-              <a aria-label="The Buckeye Retail Collective. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
-                 href="/gp/aag/main?ie=UTF8&amp;seller=A39DI2KWG3OOZZ&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_6" role="link">The Buckeye Retail Collective </a>
+              <a aria-label="The Seller H Retail Group. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+                 href="/gp/aag/main?ie=UTF8&amp;seller=ASYNTH00000007&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_6" role="link">The Seller H Retail Group </a>
               <div id="aod-offer-seller-rating" class="a-section">
                 <i class="a-icon a-icon-star-mini a-star-mini-4"><span class="a-icon-alt">Seller rating is 4 out of 5 stars</span></i>
                 <span class="a-size-small a-color-base"><span>(166 ratings) <br>77% positive over last 12 months</span></span>

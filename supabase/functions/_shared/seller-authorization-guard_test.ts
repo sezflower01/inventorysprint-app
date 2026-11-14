@@ -17,7 +17,7 @@ import {
 
 const OWNER = '020dd71f-78ce-4bc2-9117-dc997c533ab9';
 const OTHER = '3f0f8098-9112-43bc-941c-7795b3027296';
-const SELLER = 'A1B0EBOAJDDILW';
+const SELLER = 'ASYNTH00000002';
 const US = 'ATVPDKIKX0DER';
 
 /** Fake client returning one stored row, and recording whether it was queried. */
