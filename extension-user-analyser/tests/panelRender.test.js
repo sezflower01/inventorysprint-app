@@ -88,6 +88,7 @@ function wire(reading, marketplace = 'US') {
     availability: f(reading.availability),
     variationParent: f(reading.variationParent),
     isBook: f(reading.isBook),
+    offers: reading.offers || null,
     gating: reading.gating ? { text: reading.gating.text, sellerCentralUrl: reading.gating.sellerCentralUrl } : null,
     marketplace,
     pageUrl: 'https://www.amazon.com/dp/TEST',
@@ -462,9 +463,25 @@ test('every empty field is in exactly one of the two states, and the right one',
   //   dims                 a catalogue field this build never fetches
   const WILL_NOT = [
     'apx-sa-eligible', 'apx-sa-pl', 'apx-history-verdict',
-    'apx-fba', 'apx-fbm', 'apx-amz', 'apx-swing',
+    // apx-swing is "3M swing" -- a PRICE-HISTORY figure, not an offer spread.
+    // It looks like it belongs with the offer rows below and does not.
+    'apx-swing',
     'apx-dims-pkg', 'apx-dims-pkg-wt', 'apx-dims-item', 'apx-dims-item-wt',
   ];
+
+  // A THIRD state, and it had to exist. These three fill from the offers
+  // panel, which is CLOSED on every page until the shopper opens it. That is
+  // neither "loading" nor "absent from this build" -- it is a fixable state,
+  // so it is the one empty label in the panel that names an action.
+  const NEEDS_THE_LIST_OPEN = ['apx-fba', 'apx-fbm', 'apx-amz'];
+  for (const id of NEEDS_THE_LIST_OPEN) {
+    const el = $(id);
+    assert.ok(el, id + ' is missing from the markup');
+    assert.equal(el.textContent.trim(), 'not open',
+      id + ' should say the offer list is not open, not that it is loading or absent');
+    assert.match(el.title, /Recheck/,
+      id + ' no longer tells the user what to do about it');
+  }
 
   for (const id of WILL_ARRIVE) {
     const el = $(id);
@@ -504,4 +521,47 @@ test('the retired blanket label is gone from the rendered panel', { skip }, () =
   }
   assert.ok(!/not read yet/i.test(srcOf('panel.html')),
     'panel.html still ships the retired label as static markup');
+});
+
+test('the open offer list renders landed cost, and says so', { skip }, () => {
+  // The display half of the landed-cost rule. readPage.test.js proves the
+  // reader adds shipping; this proves the PANEL shows the total and not the
+  // number printed on the page, because that is the figure a seller sources
+  // against.
+  const reading = readFixture('09-offers-panel.html', URL_FOR('B0H8QLSNPP'));
+  const { $, text } = renderPanel(wire(reading));
+
+  assert.equal(text('apx-fba'), '$64.97', 'Lowest FBA is not the cheapest landed FBA offer');
+
+  // $68.95 is on the page. $77.28 is what it costs to receive it.
+  assert.equal(text('apx-fbm'), '$77.28',
+    'Lowest FBM shows the page price again, so an FBM offer reads cheaper than it is');
+  assert.match($('apx-fbm').title, /68\.95.*8\.33/,
+    'the FBM tooltip no longer shows the price and delivery it was built from');
+
+  // Amazon is not an offer on this ASIN. That is an answer, not a gap.
+  assert.equal(text('apx-amz'), 'not selling');
+
+  assert.equal(text('apx-sellers-count'), '7', 'the seller count is not the offers read');
+
+  const rows = $('apx-sellers-list').querySelectorAll('.apx-sellers-row');
+  assert.equal(rows.length, 7, 'the offer rows stopped rendering one per offer');
+  assert.match(rows[0].textContent, /J & M COLLECTIBLES/);
+  assert.match(rows[0].textContent, /Buy Box/, 'the Buy Box offer is no longer marked');
+  assert.match(rows[0].textContent, /FBA/);
+
+  const fbmRow = Array.from(rows).find((r) => /Treasureton/.test(r.textContent));
+  assert.match(fbmRow.textContent, /FBM/);
+  assert.match(fbmRow.textContent, /\$77\.28/, 'the FBM row shows the pre-shipping price');
+  assert.match(fbmRow.textContent, /97% lifetime/,
+    'the lifetime rating window is no longer distinguished from a 12-month one');
+
+  // The 30-item cap must read as a ceiling, never as an exact count.
+  const capped = Array.from(rows).find((r) => /ACG ECOM/.test(r.textContent));
+  assert.match(capped.textContent, /qty 30\+/, 'the stock cap is shown as an exact figure');
+
+  // Seller names go in as TEXT. This panel runs inside the extension and the
+  // names come from a page we do not control.
+  assert.ok(!/<[a-z]/i.test($('apx-sellers-list').innerHTML.replace(/<\/?div[^>]*>/gi, '')),
+    'markup from the page reached the offer rows');
 });

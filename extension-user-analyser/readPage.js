@@ -264,6 +264,158 @@
    * produced from the ACCOUNT OWNER's restrictions. So this build states that
    * it did not check, offers no verdict, and carries no colour.
    */
+  // ── The offers panel ────────────────────────────────────────────────────
+  //
+  // #all-offers-display is the "New (7) from $64.97" panel. It is NOT on the
+  // page until the shopper opens it, so everything here reports not-found
+  // rather than failing when it is absent -- a closed panel is a normal state,
+  // not an error.
+  //
+  // Built against a REAL capture of B0H8QLSNPP (2026-11-14), trimmed and
+  // scrubbed into fixtures/09-offers-panel.html. Four things that capture
+  // settled, each of which a reasonable guess would have got wrong:
+  //
+  //   1. FBA vs FBM is in the SOLD-BY LINK, not the text. The href carries
+  //      isAmazonFulfilled=0|1. "Ships from Amazon.com" is the obvious-looking
+  //      signal and it is localised prose, so reading it would break on every
+  //      non-English marketplace this extension already supports.
+  //
+  //   2. Price and shipping are SEPARATE attributes on the price block
+  //      (data-csa-c-price-to-pay, data-csa-c-shipping-charge). The rendered
+  //      "$68.95" omits the $8.33 shipping entirely, so a reader that scrapes
+  //      the visible price ranks an FBM offer 8 dollars cheaper than it is.
+  //      Everything here sorts on LANDED cost.
+  //
+  //   3. Every offer block carries id="aod-offer". Seven elements, one id.
+  //      Invalid HTML, and what Amazon ships; querySelectorAll copes,
+  //      getElementById would silently return one offer out of seven.
+  //
+  //   4. The capture had ANOTHER EXTENSION'S nodes injected into it --
+  //      .keepaStock divs holding a per-offer stock figure. Tempting, and
+  //      reading them would make this panel silently depend on the user having
+  //      that extension installed. Amazon's own maxQty is used instead.
+  function offerStock(block) {
+    // maxQty from Amazon's own add-to-cart payload. In the capture it equalled
+    // the other extension's stock readout on 6 of 7 offers; the seventh was
+    // maxQty 30 against "30+", so 30 is a CAP and not a count. Reported as a
+    // ceiling, never as "there are exactly N".
+    const el = block.querySelector('[data-aod-atc-action]');
+    if (!el) return { maxQty: null, atLeast: false };
+    let n = null;
+    try { n = JSON.parse(el.getAttribute('data-aod-atc-action')).maxQty; } catch (_) { return { maxQty: null, atLeast: false }; }
+    if (!Number.isInteger(n) || n < 1) return { maxQty: null, atLeast: false };
+    return { maxQty: n, atLeast: n >= 30 };
+  }
+
+  function readOneOffer(block, isBuyBox) {
+    const link = block.querySelector('#aod-offer-soldBy a[href*="seller="]');
+    const href = link ? (link.getAttribute('href') || '') : '';
+    const sellerId = (/[?&]seller=([A-Z0-9]+)/i.exec(href) || [])[1] || null;
+
+    // The ONE reliable fulfilment signal. Absent means we do not know, which
+    // is not the same as FBM -- so it stays null and the caller must cope.
+    const ful = /[?&]isAmazonFulfilled=([01])/i.exec(href);
+    const fba = ful ? ful[1] === '1' : null;
+
+    const priceEl = block.querySelector('[data-csa-c-price-to-pay]');
+    const num = (el, attr) => {
+      if (!el) return null;
+      const v = parseFloat(el.getAttribute(attr));
+      return Number.isFinite(v) ? v : null;
+    };
+    const price = num(priceEl, 'data-csa-c-price-to-pay');
+    // Absent shipping means free on this layout, but absent PRICE means we
+    // cannot total anything -- so landed is null rather than 0.
+    const shipping = num(priceEl, 'data-csa-c-shipping-charge') || 0;
+    const landed = price == null ? null : Math.round((price + shipping) * 100) / 100;
+
+    const alt = block.querySelector('#aod-offer-seller-rating .a-icon-alt');
+    const stars = alt ? parseFloat((/([\d.]+) out of 5/.exec(alt.textContent) || [])[1]) : NaN;
+
+    const rateText = block.querySelector('#aod-offer-seller-rating') ?
+      block.querySelector('#aod-offer-seller-rating').textContent.replace(/\s+/g, ' ') : '';
+    const count = (/\(([\d,]+) ratings?\)/.exec(rateText) || [])[1];
+    const pct = (/(\d+)% positive/.exec(rateText) || [])[1];
+    // "over last 12 months" and "over lifetime" are different claims and the
+    // capture had both. Keeping the window means a 97%-lifetime seller is not
+    // read as equivalent to a 97%-this-year one.
+    const window = /over lifetime/i.test(rateText) ? 'lifetime'
+      : (/last 12 months/i.test(rateText) ? '12m' : null);
+
+    const shipsFromEl = block.querySelector('#aod-offer-shipsFrom');
+    const shipsFrom = shipsFromEl
+      ? shipsFromEl.textContent.replace(/\s+/g, ' ').replace(/^\s*Ships from\s*/i, '').trim() || null
+      : null;
+
+    const name = link ? link.textContent.replace(/\s+/g, ' ').trim() : null;
+    if (!name && price == null) return null; // not an offer block at all
+
+    const stock = offerStock(block);
+    return {
+      sellerName: name,
+      sellerId: sellerId,
+      // Amazon selling directly is a different competitive fact from a
+      // third party who happens to ship from an Amazon warehouse.
+      isAmazon: /^amazon(\.[a-z.]+)?$/i.test(String(name || '')),
+      fba: fba,
+      price: price,
+      shipping: shipping,
+      landed: landed,
+      shipsFrom: shipsFrom,
+      stars: Number.isFinite(stars) ? stars : null,
+      ratings: count ? Number(count.replace(/,/g, '')) : null,
+      positivePct: pct ? Number(pct) : null,
+      positiveWindow: window,
+      maxQty: stock.maxQty,
+      maxQtyIsCap: stock.atLeast,
+      isBuyBox: !!isBuyBox,
+    };
+  }
+
+  function readOffers(doc) {
+    const panel = doc.querySelector('#all-offers-display');
+    const none = {
+      found: false, text: 'not found', source: SRC_PAGE,
+      count: 0, totalOthers: null, offers: [],
+      buyBox: null, fbaLow: null, fbmLow: null, amazon: null,
+    };
+    if (!panel) return none;
+
+    const blocks = [];
+    const pinned = panel.querySelector('#aod-pinned-offer');
+    if (pinned) blocks.push([pinned, true]);
+    // querySelectorAll, because the id is on every block (see note 3 above).
+    for (const el of panel.querySelectorAll('#aod-offer')) blocks.push([el, false]);
+
+    const offers = [];
+    for (const [el, isBB] of blocks) {
+      const o = readOneOffer(el, isBB);
+      if (o) offers.push(o);
+    }
+    if (!offers.length) return none;
+
+    const cheapest = (list) => list.reduce(
+      (best, o) => (o.landed != null && (!best || o.landed < best.landed) ? o : best), null);
+
+    const totalEl = panel.querySelector('#aod-total-offer-count');
+    const rawTotal = totalEl ? parseInt(totalEl.getAttribute('value'), 10) : NaN;
+
+    return {
+      found: true,
+      // Amazon counts the OTHERS: "6 other options" alongside the pinned one.
+      // Reporting that as the offer count would be off by one on every ASIN.
+      text: offers.length + (offers.length === 1 ? ' offer' : ' offers'),
+      source: SRC_PAGE,
+      count: offers.length,
+      totalOthers: Number.isInteger(rawTotal) ? rawTotal : null,
+      offers: offers,
+      buyBox: offers.find((o) => o.isBuyBox) || null,
+      fbaLow: cheapest(offers.filter((o) => o.fba === true)),
+      fbmLow: cheapest(offers.filter((o) => o.fba === false)),
+      amazon: offers.find((o) => o.isAmazon) || null,
+    };
+  }
+
   function gatingNotice() {
     return {
       checked: false,
@@ -287,6 +439,7 @@
       availability: readAvailability(doc),
       variationParent: readVariationParent(doc),
       isBook: readIsBook(doc),
+      offers: readOffers(doc),
       gating: gatingNotice(),
       readAt: null, // set by content.js; left null so extract() stays pure
     };
@@ -294,6 +447,7 @@
 
   const api = {
     extract: extract,
+    readOffers: readOffers,
     parseMoney: parseMoney,
     NOT_FOUND: NOT_FOUND,
     SRC_PAGE: SRC_PAGE,

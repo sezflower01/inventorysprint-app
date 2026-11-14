@@ -41,7 +41,7 @@ test('every fixture file is covered by a case here', { skip }, () => {
   assert.deepEqual(onDisk, [
     '01-normal.html', '02-no-buybox.html', '03-many-sellers.html',
     '04-out-of-stock.html', '05-book.html', '06-variation-parent.html',
-    '07-sparse.html', '08-proddetails-bsr.html',
+    '07-sparse.html', '08-proddetails-bsr.html', '09-offers-panel.html',
   ], 'a fixture was added or renamed without a test');
 });
 
@@ -167,4 +167,126 @@ test('08 prodDetails: a rank in the older two-table layout is read', { skip }, (
   // The "(See Top 100 ...)" link sits between the two ranks. If the category
   // capture ever swallows it, this is what fails first.
   assert.ok(!/top 100/i.test(r.bsr.category), 'the parenthetical leaked into the category');
+});
+
+test('09 offers panel: the real capture, and the four things it settled', { skip }, () => {
+  // THE FIRST NON-SYNTHETIC FIXTURE. Trimmed and scrubbed from a real
+  // B0H8QLSNPP capture, so unlike the others a green run here IS evidence the
+  // parser survives Amazon's markup -- for this one layout, on this one day.
+  const r = readPage.extract(load('09-offers-panel.html'), URL_FOR('B0H8QLSNPP'));
+  const o = r.offers;
+
+  assert.equal(o.found, true, 'the offers panel is invisible to the reader');
+
+  // SEVEN offers: the pinned Buy Box plus six. Amazon's own hidden counter
+  // says 6, counting only the others, so reporting that figure as the number
+  // of sellers is off by one on every ASIN.
+  assert.equal(o.count, 7);
+  assert.equal(o.totalOthers, 6);
+  assert.equal(o.count, o.totalOthers + 1, 'the pinned offer stopped being counted');
+
+  // 1. The Buy Box is the pinned offer, and it is NOT simply the cheapest --
+  //    three offers tie at 64.97 and Amazon picked one of them.
+  assert.equal(o.buyBox.sellerName, 'J & M COLLECTIBLES');
+  assert.equal(o.buyBox.isBuyBox, true);
+  assert.equal(o.offers.filter((x) => x.landed === 64.97).length, 3, 'the three-way price tie stopped parsing');
+
+  // 2. LANDED COST, and this is the one that would have cost money. The page
+  //    shows the FBM offer as $68.95 and charges $8.33 to deliver it. Ranked
+  //    on the displayed price it looks like the fourth-cheapest offer; ranked
+  //    on what it costs to receive, it is the second DEAREST.
+  const fbm = o.fbmLow;
+  assert.equal(fbm.sellerName, 'Treasureton');
+  assert.equal(fbm.price, 68.95);
+  assert.equal(fbm.shipping, 8.33);
+  assert.equal(fbm.landed, 77.28, 'shipping is no longer added, so FBM reads cheaper than it is');
+  assert.ok(fbm.landed > o.offers.filter((x) => x.fba).map((x) => x.landed).sort((a, b) => a - b)[4],
+    'the FBM offer now ranks below FBA offers it is dearer than');
+
+  // 3. FBA vs FBM comes from isAmazonFulfilled in the sold-by href, never from
+  //    the words "Ships from Amazon.com" -- which are localised prose, and
+  //    this extension already supports ten marketplaces.
+  assert.equal(fbm.fba, false);
+  assert.equal(o.offers.filter((x) => x.fba === true).length, 6);
+  assert.equal(o.offers.filter((x) => x.fba === false).length, 1);
+  const src = fs.readFileSync(path.join(__dirname, '..', 'readPage.js'), 'utf8');
+  const slice = src.slice(src.indexOf('function readOneOffer'), src.indexOf('function readOffers'));
+  assert.ok(/isAmazonFulfilled/.test(slice), 'the fulfilment discriminator has gone');
+  assert.ok(!/Ships from Amazon/i.test(slice.replace(/\/\/[^\n]*/g, '')),
+    'fulfilment is being decided from localised prose');
+
+  // 4. Every offer block carries id="aod-offer". Seven elements, one id.
+  assert.equal(load('09-offers-panel.html').querySelectorAll('#aod-offer').length, 6,
+    'the fixture no longer reproduces the duplicate-id layout');
+
+  // The cheapest FBA offer, which is what a seller actually competes with.
+  assert.equal(o.fbaLow.sellerName, 'J & M COLLECTIBLES');
+  assert.equal(o.fbaLow.landed, 64.97);
+
+  // Amazon is not an offer here, and that is an ANSWER about the competition.
+  assert.equal(o.amazon, null);
+
+  // Seller quality, with the WINDOW kept: 97% over a lifetime and 97% over
+  // twelve months are different claims about a seller.
+  assert.equal(fbm.positivePct, 97);
+  assert.equal(fbm.positiveWindow, 'lifetime');
+  const buckeye = o.offers.find((x) => /Buckeye/.test(x.sellerName));
+  assert.equal(buckeye.stars, 4);
+  assert.equal(buckeye.positivePct, 77);
+  assert.equal(buckeye.positiveWindow, '12m');
+});
+
+test('09: stock comes from Amazon, never from another extension', { skip }, () => {
+  // The capture arrived with a THIRD-PARTY EXTENSION'S nodes injected into it
+  // (.keepaStock divs carrying a per-offer stock figure). Reading those would
+  // make this panel silently depend on the user having that extension
+  // installed -- it would work on the developer's machine and show nothing for
+  // everyone else. The fixture keeps two of them so this stays provable.
+  const doc = load('09-offers-panel.html');
+  assert.ok(doc.querySelectorAll('.keepaStock').length >= 2,
+    'the fixture no longer contains the foreign nodes this test is about');
+
+  const src = fs.readFileSync(path.join(__dirname, '..', 'readPage.js'), 'utf8');
+  const code = src.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(!/keepa/i.test(code), 'readPage.js now reads another extension\u2019s injected DOM');
+
+  // maxQty from Amazon's own add-to-cart payload instead. It matched the
+  // foreign readout on six of seven offers; the seventh was maxQty 30 against
+  // "30+", so 30 is a CAP and is reported as a ceiling, not a count.
+  const o = readPage.readOffers(doc);
+  assert.deepEqual(o.offers.map((x) => x.maxQty), [18, 8, 2, 30, 20, 1, 3]);
+  const capped = o.offers.filter((x) => x.maxQtyIsCap);
+  assert.equal(capped.length, 1, 'the 30-item cap is no longer flagged as a ceiling');
+  assert.equal(capped[0].maxQty, 30);
+});
+
+test('09: no session token survived into the fixture', { skip }, () => {
+  // The capture carried seven anti-csrftoken-a2z values and an
+  // aod-atc-csrf-token. They are session-scoped and useless without the
+  // cookie, and the rule is that no token reaches a public repo regardless.
+  const raw = fs.readFileSync(path.join(FIX, '09-offers-panel.html'), 'utf8');
+  for (const [name, rx] of [
+    ['a CSRF token', /name="anti-csrftoken-a2z" value="(?!REDACTED")/],
+    ['the cart CSRF token', /id="aod-atc-csrf-token"[^>]*value="(?!REDACTED")/],
+    ['a long offerListingId', /offerListingId" value="[^"]{40,}/],
+    ['a cookie header', /cookie/i],
+  ]) {
+    assert.ok(!rx.test(raw), 'the scrubbed fixture contains ' + name);
+  }
+  // Seller ids ARE public on the page and are kept on purpose.
+  assert.ok(/seller=A1GD4LR25P9QFR/.test(raw), 'the public seller ids were stripped too');
+});
+
+test('a closed offers panel is not-found, not a crash', { skip }, () => {
+  // The panel does not exist until the shopper opens it, which is the normal
+  // state on every page load. Every other fixture is a page with no panel.
+  for (const f of ['01-normal.html', '07-sparse.html']) {
+    const o = readPage.extract(load(f), URL_FOR('B07XYZ1234')).offers;
+    assert.equal(o.found, false, f + ': invented an offers panel');
+    assert.equal(o.count, 0);
+    assert.deepEqual(o.offers, []);
+    assert.equal(o.buyBox, null);
+    assert.equal(o.fbaLow, null);
+    assert.equal(o.fbmLow, null);
+  }
 });

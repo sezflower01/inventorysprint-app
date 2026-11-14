@@ -244,29 +244,109 @@
 
   // ── the seller list ───────────────────────────────────────────
   //
-  // Empty on purpose, and SAYING so. The ported markup ships the string
-  // "Loading offers…", which in the Analyzer is true for about a second and
-  // here would be a permanent lie -- a spinner that never resolves reads as
-  // a broken panel, and the user waits instead of getting on with it.
+  // WIRED NOW, from the page. The Analyzer fills this from SP-API
+  // getItemOffers, server-side, under ONE seller’s credentials -- the exact
+  // thing this extension exists not to do, and how one account’s catalogue
+  // once ended up written under another’s. This reads #all-offers-display out
+  // of the page the user is already looking at: no account, no credentials,
+  // and no provider tokens.
   //
-  // Why it is not wired: the Analyzer fills this from SP-API getItemOffers,
-  // server-side, under ONE seller’s credentials. That is the exact thing
-  // this extension exists not to do -- it is how one account’s catalogue
-  // once ended up written under another’s. The replacement has to read the
-  // offers from the user’s own browser instead, and that needs the real
-  // markup of the offers panel, which is not guessable from here.
+  // The panel is CLOSED until the shopper opens it, so "not read" here is a
+  // real and fixable state rather than a missing feature. That makes it the
+  // one empty label in this file that names an action, and it may: the thing
+  // it asks for is on screen, and pressing Recheck afterwards does work.
+  const OFFERS_CLOSED_WHY =
+    'Open the "New (N) from ..." offer list on the page, then press Recheck. '
+    + 'It is read from the page in your own browser -- no seller account, and '
+    + 'no provider tokens.';
+
   function renderSellersPending() {
     const count = $('apx-sellers-count');
-    if (count) { count.textContent = '—'; count.title = NOT_IN_VERSION + '.'; }
+    if (count) { count.textContent = '—'; count.title = OFFERS_CLOSED_WHY; }
     const list = $('apx-sellers-list');
     if (list) {
       list.textContent = '';
       const d = document.createElement('div');
       d.className = 'apx-sellers-empty apx-k';
-      d.textContent = NOT_IN_VERSION + ' — the seller list is not wired up here.';
-      d.title = 'It will be read from the offers panel in your own browser session, '
-        + 'not from any seller account.';
+      d.textContent = 'Offer list not open on this page.';
+      d.title = OFFERS_CLOSED_WHY;
       list.appendChild(d);
+    }
+    for (const id of ['apx-fba', 'apx-fbm', 'apx-amz']) {
+      setUnavailable($(id), 'not open', OFFERS_CLOSED_WHY);
+    }
+  }
+
+  // ── the offers panel, once it is open ───────────────────────────────────
+  //
+  // EVERY figure here is LANDED cost, price plus shipping. The page shows the
+  // FBM offer in the capture as "$68.95" and charges $8.33 to deliver it, so
+  // ranking on the displayed price puts it below three FBA offers it is in
+  // fact 12 dollars dearer than. On a sourcing panel that is not a rounding
+  // error, it is the wrong buy.
+  function offerLine(o) {
+    const bits = [o.sellerName || 'unnamed seller'];
+    bits.push(fmt(o.landed));
+    // null is "the page did not say", which is not FBM.
+    bits.push(o.fba === true ? 'FBA' : (o.fba === false ? 'FBM' : 'fulfilment not stated'));
+    if (o.stars != null) {
+      const r = o.ratings != null ? ' (' + o.ratings.toLocaleString() + ')' : '';
+      const p = o.positivePct != null
+        ? ' ' + o.positivePct + '%' + (o.positiveWindow === 'lifetime' ? ' lifetime' : '')
+        : '';
+      bits.push(o.stars + '\u2605' + r + p);
+    }
+    if (o.maxQty != null) bits.push('qty ' + o.maxQty + (o.maxQtyIsCap ? '+' : ''));
+    if (o.isBuyBox) bits.push('Buy Box');
+    return bits.join(' \u00b7 ');
+  }
+
+  function putOffer(id, o, absentLabel, absentWhy) {
+    const el = $(id);
+    if (!el) return;
+    if (!o || o.landed == null) { setUnavailable(el, absentLabel, absentWhy); return; }
+    el.textContent = fmt(o.landed);
+    el.classList.remove('apx-sa-unknown');
+    el.title = o.sellerName
+      + (o.shipping > 0
+          ? ' \u2014 ' + fmt(o.price) + ' plus ' + fmt(o.shipping) + ' delivery. The page '
+            + 'shows only ' + fmt(o.price) + '; this is what it costs to receive.'
+          : ' \u2014 delivered, no separate shipping charge.');
+  }
+
+  function renderOffers(o) {
+    if (!o || !o.found) { renderSellersPending(); return; }
+
+    const count = $('apx-sellers-count');
+    if (count) {
+      count.textContent = String(o.count);
+      // Amazon's own hidden counter says "6 other options" -- the others,
+      // excluding the pinned Buy Box offer. Reporting that as the number of
+      // sellers is off by one on every ASIN, so the count here is the offers
+      // actually read. The page's own "Competitors" figure up top comes from a
+      // different element and CAN disagree; neither is reconciled into the
+      // other, because a figure silently adjusted to match is not a reading.
+      count.title = o.count + ' offers read from the open list'
+        + (o.totalOthers != null ? '; the page\u2019s own counter says ' + o.totalOthers + ' besides the Buy Box' : '');
+    }
+
+    putOffer('apx-fba', o.fbaLow, 'none', 'No FBA offer in the open list.');
+    putOffer('apx-fbm', o.fbmLow, 'none', 'No FBM offer in the open list.');
+    // Amazon absent is an ANSWER about the competition, not a gap in the read.
+    putOffer('apx-amz', o.amazon, 'not selling',
+      'Amazon itself is not one of the offers on this page.');
+
+    const list = $('apx-sellers-list');
+    if (!list) return;
+    list.textContent = '';
+    for (const offer of o.offers) {
+      const row = document.createElement('div');
+      row.className = 'apx-sellers-row apx-k';
+      // textContent, never innerHTML: a seller name is third-party text on a
+      // page we do not control, and this panel runs inside the extension.
+      row.textContent = offerLine(offer);
+      if (offer.sellerId) row.title = 'Seller ' + offer.sellerId;
+      list.appendChild(row);
     }
   }
 
@@ -296,6 +376,7 @@
 
     put('apx-bb', r.buyBoxSeller);
     put('apx-sellers', r.sellerCount);
+    renderOffers(r.offers);
     put('apx-bsr', r.bsr);
     put('apx-sa-bsr', r.bsr);
 
@@ -314,31 +395,52 @@
       pill.title = (r.gating && r.gating.text) || '';
     }
 
-    // Offer-derived prices come from the seller's own API in the original.
-    // Here only the Buy Box owner is known, from the page.
-    const OFFERS_WHY = 'Needs a read of the offers panel on this page, which '
-      + 'this version does not do. It does NOT need an Amazon connection.';
-    setUnavailable($('apx-fba'), NOT_IN_VERSION, OFFERS_WHY);
-    setUnavailable($('apx-fbm'), NOT_IN_VERSION, OFFERS_WHY);
-    setUnavailable($('apx-amz'), NOT_IN_VERSION, OFFERS_WHY);
-    setUnavailable($('apx-swing'), NOT_IN_VERSION, OFFERS_WHY);
+    // Lowest FBA, Lowest FBM and Amazon USED TO BE BLANKED HERE, and this
+    // block ran AFTER renderOffers above -- so once the offers panel was
+    // wired, three freshly-read prices were overwritten with "Not available
+    // in this version" a few lines later. The read worked; the panel threw it
+    // away. Only the swing is still unread, and it is unread for a different
+    // reason, so it keeps its own message.
+    //
+    // "3M swing" is a PRICE-HISTORY figure -- the three-month spread -- not
+    // the spread across today's offers. It sits beside the three offer cards
+    // and belongs with the chart, which is why it was grouped wrongly here in
+    // the first place.
+    setUnavailable($('apx-swing'), NOT_IN_VERSION,
+      'The three-month price spread needs the price-history series, which '
+      + 'this version does not chart yet. It is not an offer-list figure.');
 
-    const list = $('apx-sellers-list');
-    if (list) {
-      list.textContent = '';
-      const empty = document.createElement('div');
-      empty.className = 'apx-sellers-empty apx-k';
-      empty.textContent = r.buyBoxSeller && r.buyBoxSeller.found
-        // NOT “needs an Amazon connection”. It does not, and saying so told the
-        // user to go and do something that would not help -- the whole point of
-        // this extension is that no account connection exists. What the full
-        // list needs is a read of the offers panel in this browser.
-        ? `Buy Box: ${r.buyBoxSeller.text} — full offer list not available in this version`
-        : 'Offer list not available in this version';
-      list.appendChild(empty);
+    // THE FALLBACK, and it must not run when the offer list is open.
+    //
+    // renderOffers() above already filled the rows and the count from the open
+    // panel. This block ran unconditionally and a few lines later, so it wiped
+    // seven parsed offers and replaced the count with the detail page's own
+    // figure -- the same overwrite that hit Lowest FBA above, from a second
+    // writer nobody had noticed. Two writers to one element is the bug; the
+    // guard names which one owns it.
+    //
+    // When the list IS closed the page still knows the Buy Box owner and a
+    // competitor count, so those are worth showing rather than a dash.
+    const offersOpen = !!(r.offers && r.offers.found);
+    if (!offersOpen) {
+      const list = $('apx-sellers-list');
+      if (list) {
+        list.textContent = '';
+        const empty = document.createElement('div');
+        empty.className = 'apx-sellers-empty apx-k';
+        empty.textContent = r.buyBoxSeller && r.buyBoxSeller.found
+          ? `Buy Box: ${r.buyBoxSeller.text} — open the offer list for the rest`
+          : 'Offer list not open on this page.';
+        empty.title = OFFERS_CLOSED_WHY;
+        list.appendChild(empty);
+      }
+      // The page's own competitor count. It can DISAGREE with the number of
+      // offers in the panel -- different elements, different inclusion rules --
+      // and neither is adjusted to match the other, because a figure quietly
+      // reconciled is not a reading of anything.
+      const count = $('apx-sellers-count');
+      if (count) count.textContent = r.sellerCount && r.sellerCount.found ? String(r.sellerCount.text) : '—';
     }
-    const count = $('apx-sellers-count');
-    if (count) count.textContent = r.sellerCount && r.sellerCount.found ? String(r.sellerCount.text) : '—';
 
     // Dimensions are an SP-API catalogue field in the original.
     for (const id of ['apx-dims-pkg', 'apx-dims-pkg-wt', 'apx-dims-item', 'apx-dims-item-wt']) {

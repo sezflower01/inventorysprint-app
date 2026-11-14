@@ -188,6 +188,9 @@
       availability: f(reading.availability),
       variationParent: f(reading.variationParent),
       isBook: f(reading.isBook),
+      // Passed through whole, not flattened: this is a LIST, and f() would
+      // reduce it to found/text/value and throw the offers away.
+      offers: reading.offers || null,
       gating: reading.gating ? { text: reading.gating.text, sellerCentralUrl: reading.gating.sellerCentralUrl } : null,
       marketplace: reading.marketplace || 'US',
       pageUrl: location.href.split('?')[0],

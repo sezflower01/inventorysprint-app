@@ -1,0 +1,339 @@
+<!doctype html>
+<!--
+  09: the "All Offers Display" panel (#all-offers-display), trimmed and scrubbed
+  from a REAL capture of B0H8QLSNPP taken 2026-11-14.
+
+  This is the first fixture in this folder that is not synthetic. What was
+  removed, and why:
+
+    anti-csrftoken-a2z      SESSION TOKENS. Seven of them in the capture, one
+    aod-atc-csrf-token      per add-to-cart form. Replaced with REDACTED.
+    items[0.base][offerListingId]
+                            ~200 chars each, and they encode the offer plus
+                            cart state. Replaced with short placeholders --
+                            nothing here reads them.
+    qty dropdowns           1..29 options per offer, all identical in shape.
+    delivery scripts        Prime signup injection, popovers, carousels.
+    recommendations         A whole other widget.
+
+  What was KEPT, deliberately, because each one is load-bearing:
+
+    data-csa-c-price-to-pay      the offer price, as a number, in an attribute
+    data-csa-c-shipping-charge   separate from the price (Treasureton charges)
+    seller= in the Sold-by href  the seller id
+    isAmazonFulfilled=0|1        THE FBA/FBM DISCRIMINATOR -- see readPage.js
+    maxQty in data-aod-atc-action  stock, capped at 30 by Amazon
+    #aod-total-offer-count       6, meaning six BESIDES the pinned offer
+    the duplicate id="aod-offer"  every offer block carries it. Invalid HTML,
+                                  and real; the reader must cope.
+    two keepaStock divs           ANOTHER EXTENSION'S injected DOM, left in on
+                                  purpose so a test can prove we never read it.
+
+  Seller names and ids are public on the page. No customer, session or
+  operator identifier survives here.
+
+  The seven offers cover: three-way price tie, a cheaper-but-not-Buy-Box
+  offer, the 30+ stock cap, a 4.5-star seller, the one FBM offer (ships from
+  the seller, charges shipping, customer service is the seller), and a
+  77%-positive seller. Amazon itself is NOT an offer on this ASIN, which is
+  why the Amazon price row legitimately reads as unread.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture 09 — offers panel</title></head>
+<body>
+<div id="all-offers-display" class="a-section" aria-label="All Offers Display" role="dialog">
+  <div id="aod-container" class="a-section">
+
+    <!-- ── the pinned offer: this is the Buy Box ───────────────────────── -->
+    <div id="aod-pinned-offer" class="a-section aod-pinned-offer">
+      <h5 id="aod-asin-title-text">2026 Panini Donruss NASCAR Racing Mega Trading Card Box (2 Autographs or Memorabilia Cards Per Box)</h5>
+
+      <span id="aod-price-0">
+        <div data-csa-c-buying-option-type="NEW" data-csa-c-painter="apex-dp-price"
+             data-csa-c-price-to-pay="64.97" data-csa-c-shipping-charge="0.0"
+             data-csa-c-strike-through-price="74.9" data-csa-c-type="item"
+             class="a-section apex-core-price-identifier">
+          <span class="a-price apex-pricetopay-value"><span aria-hidden="true"><span class="a-price-symbol">$</span><span class="a-price-whole">64<span class="a-price-decimal">.</span></span><span class="a-price-fraction">97</span></span></span>
+          <span class="apex-basisprice-offscreen-label">Typical price: $74.90</span>
+        </div>
+      </span>
+
+      <form method="post" action="/cart/add-to-cart/ref=aod_dpdsk_new_0" class="AodAddToCart">
+        <input type="hidden" name="anti-csrftoken-a2z" value="REDACTED">
+        <input type="hidden" name="items[0.base][asin]" value="B0H8QLSNPP">
+        <input type="hidden" name="items[0.base][offerListingId]" value="OFFER_ID_0_REDACTED">
+        <span class="a-declarative" data-action="aod-atc-action"
+              data-aod-atc-action="{&quot;refTag&quot;:&quot;aod_dpdsk_new_0&quot;,&quot;isStickyPinnedOffer&quot;:false,&quot;asin&quot;:&quot;B0H8QLSNPP&quot;,&quot;maxQty&quot;:18,&quot;offerIndex&quot;:0,&quot;minQty&quot;:1}">
+          <span class="a-button a-button-primary"><input name="submit.addToCart" aria-label="Add to Cart from seller J &amp; M COLLECTIBLES and price $64.97&#10;" class="a-button-input" type="submit"></span>
+        </span>
+      </form>
+
+      <!-- Another extension injected this. We must never read it. -->
+      <div class="a-section keepaStock" style="display: none;">
+        <span class="a-size-small a-color-tertiary">Stock</span>
+        <span class="a-size-small a-color-base"><span style="font-weight: bold;">18 </span></span>
+      </div>
+
+      <div id="aod-pinned-offer-additional-content" class="a-section" role="list">
+        <div id="aod-offer-shipsFrom" class="a-section" role="listitem">
+          <span class="a-size-small a-color-tertiary">Ships from</span>
+          <span class="a-size-small a-color-base"> Amazon.com </span>
+        </div>
+        <div id="aod-offer-soldBy" class="a-section" role="listitem">
+          <span class="a-size-small a-color-tertiary">Sold by</span>
+          <a aria-label="J &amp; M COLLECTIBLES. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+             href="/gp/aag/main?ie=UTF8&amp;seller=A1GD4LR25P9QFR&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_0" role="link">J &amp; M COLLECTIBLES </a>
+          <div id="aod-offer-seller-rating" class="a-section">
+            <i class="a-icon a-icon-star-mini a-star-mini-5"><span class="a-icon-alt">Seller rating is 5 out of 5 stars</span></i>
+            <span class="a-size-small a-color-base"><span>(24558 ratings) <br>99% positive over last 12 months</span></span>
+          </div>
+        </div>
+        <div id="aod-offer-customerServiceIdentifier" class="a-section" role="listitem">
+          <span class="a-size-small a-color-tertiary">Customer<br>service</span>
+          <span class="a-size-small a-color-base">Amazon</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="aod-filter" class="a-section">
+      <h2 id="aod-filter-offer-count-string" class="a-size-base">Sellers on Amazon</h2>
+      <p id="aod-sort-details-string" class="a-size-small">sorted by price + delivery: low to high</p>
+    </div>
+
+    <!-- ── the first two visible offers ────────────────────────────────── -->
+    <div id="aod-offer-list" class="a-section">
+      <input type="hidden" value="6" id="aod-total-offer-count">
+      <input type="hidden" value="6 other options" id="aod-total-offer-count-string">
+      <input type="hidden" value="REDACTED" id="aod-atc-csrf-token">
+
+      <div id="aod-offer" class="a-section a-padding-small aod-information-block aod-clear-float" role="listitem">
+        <div id="aod-offer-heading" class="a-section"><span class="a-size-base a-text-bold">New</span></div>
+        <div id="aod-offer-price" class="a-section">
+          <span id="aod-price-1">
+            <div data-csa-c-buying-option-type="NEW" data-csa-c-painter="apex-dp-price"
+                 data-csa-c-price-to-pay="64.97" data-csa-c-shipping-charge="0.0"
+                 data-csa-c-strike-through-price="74.9" data-csa-c-type="item"
+                 class="a-section apex-core-price-identifier">
+              <span class="a-price apex-pricetopay-value"><span aria-hidden="true">$64.97</span></span>
+            </div>
+          </span>
+        </div>
+        <form method="post" action="/cart/add-to-cart/ref=aod_dpdsk_new_1" class="AodAddToCart">
+          <input type="hidden" name="anti-csrftoken-a2z" value="REDACTED">
+          <input type="hidden" name="items[0.base][offerListingId]" value="OFFER_ID_1_REDACTED">
+          <span class="a-declarative" data-action="aod-atc-action"
+                data-aod-atc-action="{&quot;refTag&quot;:&quot;aod_dpdsk_new_1&quot;,&quot;isStickyPinnedOffer&quot;:false,&quot;asin&quot;:&quot;B0H8QLSNPP&quot;,&quot;maxQty&quot;:8,&quot;offerIndex&quot;:1,&quot;minQty&quot;:1}"></span>
+        </form>
+        <div class="a-section" role="list">
+          <div id="aod-offer-shipsFrom" class="a-section" role="listitem">
+            <span class="a-size-small a-color-tertiary">Ships from</span>
+            <span class="a-size-small a-color-base"> Amazon.com </span>
+          </div>
+          <div id="aod-offer-soldBy" class="a-section" role="listitem">
+            <span class="a-size-small a-color-tertiary">Sold by</span>
+            <a aria-label="Pedu. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+               href="/gp/aag/main?ie=UTF8&amp;seller=A1B0EBOAJDDILW&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_1" role="link">Pedu </a>
+            <div id="aod-offer-seller-rating" class="a-section">
+              <i class="a-icon a-icon-star-mini a-star-mini-5"><span class="a-icon-alt">Seller rating is 5 out of 5 stars</span></i>
+              <span class="a-size-small a-color-base"><span>(791 ratings) <br>99% positive over last 12 months</span></span>
+            </div>
+          </div>
+          <div id="aod-offer-customerServiceIdentifier" class="a-section" role="listitem">
+            <span class="a-size-small a-color-tertiary">Customer<br>service</span>
+            <span class="a-size-small a-color-base">Amazon</span>
+          </div>
+        </div>
+        <div class="a-section keepaStock" style="display: none;">
+          <span class="a-size-small a-color-tertiary">Stock</span>
+          <span class="a-size-small a-color-base"><span style="font-weight: bold;">8 </span></span>
+        </div>
+      </div>
+
+      <div id="aod-offer" class="a-section a-padding-small aod-information-block aod-clear-float" role="listitem">
+        <div id="aod-offer-heading" class="a-section"><span class="a-size-base a-text-bold">New</span></div>
+        <div id="aod-offer-price" class="a-section">
+          <span id="aod-price-2">
+            <div data-csa-c-buying-option-type="NEW" data-csa-c-painter="apex-dp-price"
+                 data-csa-c-price-to-pay="64.97" data-csa-c-shipping-charge="0.0"
+                 data-csa-c-strike-through-price="74.9" data-csa-c-type="item"
+                 class="a-section apex-core-price-identifier">
+              <span class="a-price apex-pricetopay-value"><span aria-hidden="true">$64.97</span></span>
+            </div>
+          </span>
+        </div>
+        <form method="post" action="/cart/add-to-cart/ref=aod_dpdsk_new_2" class="AodAddToCart">
+          <input type="hidden" name="anti-csrftoken-a2z" value="REDACTED">
+          <input type="hidden" name="items[0.base][offerListingId]" value="OFFER_ID_2_REDACTED">
+          <span class="a-declarative" data-action="aod-atc-action"
+                data-aod-atc-action="{&quot;refTag&quot;:&quot;aod_dpdsk_new_2&quot;,&quot;isStickyPinnedOffer&quot;:false,&quot;asin&quot;:&quot;B0H8QLSNPP&quot;,&quot;maxQty&quot;:2,&quot;offerIndex&quot;:2,&quot;minQty&quot;:1}"></span>
+        </form>
+        <div class="a-section" role="list">
+          <div id="aod-offer-shipsFrom" class="a-section" role="listitem">
+            <span class="a-size-small a-color-tertiary">Ships from</span>
+            <span class="a-size-small a-color-base"> Amazon.com </span>
+          </div>
+          <div id="aod-offer-soldBy" class="a-section" role="listitem">
+            <span class="a-size-small a-color-tertiary">Sold by</span>
+            <a aria-label="Maiden3118. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+               href="/gp/aag/main?ie=UTF8&amp;seller=A3S8KDLTLWNQQ&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_2" role="link">Maiden3118 </a>
+            <div id="aod-offer-seller-rating" class="a-section">
+              <i class="a-icon a-icon-star-mini a-star-mini-5"><span class="a-icon-alt">Seller rating is 5 out of 5 stars</span></i>
+              <span class="a-size-small a-color-base"><span>(176 ratings) <br>98% positive over last 12 months</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── the four offers Amazon hides behind "See 4 more options" ──── -->
+      <div id="aod-retail-other-offers-content" class="a-section">
+
+        <div id="aod-offer" class="a-section a-padding-small aod-information-block aod-clear-float" role="listitem">
+          <div id="aod-offer-heading" class="a-section"><span class="a-size-base a-text-bold">New</span></div>
+          <div id="aod-offer-price" class="a-section">
+            <span id="aod-price-3">
+              <div data-csa-c-buying-option-type="NEW" data-csa-c-painter="apex-dp-price"
+                   data-csa-c-price-to-pay="64.99" data-csa-c-shipping-charge="0.0"
+                   data-csa-c-strike-through-price="74.9" data-csa-c-type="item"
+                   class="a-section apex-core-price-identifier">
+                <span class="a-price apex-pricetopay-value"><span aria-hidden="true">$64.99</span></span>
+              </div>
+            </span>
+          </div>
+          <form method="post" action="/cart/add-to-cart/ref=aod_dpdsk_new_3" class="AodAddToCart">
+            <input type="hidden" name="anti-csrftoken-a2z" value="REDACTED">
+            <input type="hidden" name="items[0.base][offerListingId]" value="OFFER_ID_3_REDACTED">
+            <span class="a-declarative" data-action="aod-atc-action"
+                  data-aod-atc-action="{&quot;refTag&quot;:&quot;aod_dpdsk_new_3&quot;,&quot;isStickyPinnedOffer&quot;:false,&quot;asin&quot;:&quot;B0H8QLSNPP&quot;,&quot;maxQty&quot;:30,&quot;offerIndex&quot;:3,&quot;minQty&quot;:1}"></span>
+          </form>
+          <div class="a-section" role="list">
+            <div id="aod-offer-shipsFrom" class="a-section" role="listitem">
+              <span class="a-size-small a-color-tertiary">Ships from</span>
+              <span class="a-size-small a-color-base"> Amazon.com </span>
+            </div>
+            <div id="aod-offer-soldBy" class="a-section" role="listitem">
+              <span class="a-size-small a-color-tertiary">Sold by</span>
+              <a aria-label="ACG ECOM. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+                 href="/gp/aag/main?ie=UTF8&amp;seller=A2RO0IV3XRPLHH&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_3" role="link">ACG ECOM </a>
+              <div id="aod-offer-seller-rating" class="a-section">
+                <i class="a-icon a-icon-star-mini a-star-mini-5"><span class="a-icon-alt">Seller rating is 5 out of 5 stars</span></i>
+                <span class="a-size-small a-color-base"><span>(162 ratings) <br>99% positive over last 12 months</span></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="aod-offer" class="a-section a-padding-small aod-information-block aod-clear-float" role="listitem">
+          <div id="aod-offer-heading" class="a-section"><span class="a-size-base a-text-bold">New</span></div>
+          <div id="aod-offer-price" class="a-section">
+            <span id="aod-price-4">
+              <div data-csa-c-buying-option-type="NEW" data-csa-c-painter="apex-dp-price"
+                   data-csa-c-price-to-pay="74.99" data-csa-c-shipping-charge="0.0"
+                   data-csa-c-type="item" class="a-section apex-core-price-identifier">
+                <span class="a-price apex-pricetopay-value"><span aria-hidden="true">$74.99</span></span>
+              </div>
+            </span>
+          </div>
+          <form method="post" action="/cart/add-to-cart/ref=aod_dpdsk_new_4" class="AodAddToCart">
+            <input type="hidden" name="anti-csrftoken-a2z" value="REDACTED">
+            <input type="hidden" name="items[0.base][offerListingId]" value="OFFER_ID_4_REDACTED">
+            <span class="a-declarative" data-action="aod-atc-action"
+                  data-aod-atc-action="{&quot;refTag&quot;:&quot;aod_dpdsk_new_4&quot;,&quot;isStickyPinnedOffer&quot;:false,&quot;asin&quot;:&quot;B0H8QLSNPP&quot;,&quot;maxQty&quot;:20,&quot;offerIndex&quot;:4,&quot;minQty&quot;:1}"></span>
+          </form>
+          <div class="a-section" role="list">
+            <div id="aod-offer-shipsFrom" class="a-section" role="listitem">
+              <span class="a-size-small a-color-tertiary">Ships from</span>
+              <span class="a-size-small a-color-base"> Amazon.com </span>
+            </div>
+            <div id="aod-offer-soldBy" class="a-section" role="listitem">
+              <span class="a-size-small a-color-tertiary">Sold by</span>
+              <a aria-label="ARK&#39;d Brands. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+                 href="/gp/aag/main?ie=UTF8&amp;seller=A30EI4OFCRGQPI&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_4" role="link">ARK'd Brands </a>
+              <div id="aod-offer-seller-rating" class="a-section">
+                <i class="a-icon a-icon-star-mini a-star-mini-4-5"><span class="a-icon-alt">Seller rating is 4.5 out of 5 stars</span></i>
+                <span class="a-size-small a-color-base"><span>(424 ratings) <br>94% positive over last 12 months</span></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- THE FBM OFFER. isAmazonFulfilled=0, ships from the seller,
+             charges shipping, and customer service is the seller. -->
+        <div id="aod-offer" class="a-section a-padding-small aod-information-block aod-clear-float" role="listitem">
+          <div id="aod-offer-heading" class="a-section"><span class="a-size-base a-text-bold">New</span></div>
+          <div id="aod-offer-price" class="a-section">
+            <span id="aod-price-5">
+              <div data-csa-c-buying-option-type="NEW" data-csa-c-painter="apex-dp-price"
+                   data-csa-c-price-to-pay="68.95" data-csa-c-shipping-charge="8.33"
+                   data-csa-c-strike-through-price="74.9" data-csa-c-type="item"
+                   class="a-section apex-core-price-identifier">
+                <span class="a-price apex-pricetopay-value"><span aria-hidden="true">$68.95</span></span>
+              </div>
+            </span>
+          </div>
+          <form method="post" action="/cart/add-to-cart/ref=aod_dpdsk_new_5" class="AodAddToCart">
+            <input type="hidden" name="anti-csrftoken-a2z" value="REDACTED">
+            <input type="hidden" name="items[0.base][offerListingId]" value="OFFER_ID_5_REDACTED">
+            <span class="a-declarative" data-action="aod-atc-action"
+                  data-aod-atc-action="{&quot;refTag&quot;:&quot;aod_dpdsk_new_5&quot;,&quot;isStickyPinnedOffer&quot;:false,&quot;asin&quot;:&quot;B0H8QLSNPP&quot;,&quot;maxQty&quot;:1,&quot;offerIndex&quot;:5,&quot;minQty&quot;:1}"></span>
+          </form>
+          <div class="a-section" role="list">
+            <div id="aod-offer-shipsFrom" class="a-section" role="listitem">
+              <span class="a-size-small a-color-tertiary">Ships from</span>
+              <span class="a-size-small a-color-base"> Treasureton </span>
+            </div>
+            <div id="aod-offer-soldBy" class="a-section" role="listitem">
+              <span class="a-size-small a-color-tertiary">Sold by</span>
+              <a aria-label="Treasureton. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+                 href="/gp/aag/main?ie=UTF8&amp;seller=AJTV7V8Y8840E&amp;isAmazonFulfilled=0&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_5" role="link">Treasureton </a>
+              <div id="aod-offer-seller-rating" class="a-section">
+                <i class="a-icon a-icon-star-mini a-star-mini-5"><span class="a-icon-alt">Seller rating is 5 out of 5 stars</span></i>
+                <span class="a-size-small a-color-base"><span>(2152 ratings) <br>97% positive over lifetime</span></span>
+              </div>
+            </div>
+            <div id="aod-offer-customerServiceIdentifier" class="a-section" role="listitem">
+              <span class="a-size-small a-color-tertiary">Customer<br>service</span>
+              <a class="a-size-small a-link-normal" target="_blank" rel="noopener" href="/sp?marketplaceID=ATVPDKIKX0DER&amp;seller=AJTV7V8Y8840E&amp;ref_=dp_merchant_link&amp;asin=B0H8QLSNPP5" role="link">Treasureton</a>
+            </div>
+          </div>
+        </div>
+
+        <div id="aod-offer" class="a-section a-padding-small aod-information-block aod-clear-float" role="listitem">
+          <div id="aod-offer-heading" class="a-section"><span class="a-size-base a-text-bold">New</span></div>
+          <div id="aod-offer-price" class="a-section">
+            <span id="aod-price-6">
+              <div data-csa-c-buying-option-type="NEW" data-csa-c-painter="apex-dp-price"
+                   data-csa-c-price-to-pay="82.0" data-csa-c-shipping-charge="0.0"
+                   data-csa-c-type="item" class="a-section apex-core-price-identifier">
+                <span class="a-price apex-pricetopay-value"><span aria-hidden="true">$82.00</span></span>
+              </div>
+            </span>
+          </div>
+          <form method="post" action="/cart/add-to-cart/ref=aod_dpdsk_new_6" class="AodAddToCart">
+            <input type="hidden" name="anti-csrftoken-a2z" value="REDACTED">
+            <input type="hidden" name="items[0.base][offerListingId]" value="OFFER_ID_6_REDACTED">
+            <span class="a-declarative" data-action="aod-atc-action"
+                  data-aod-atc-action="{&quot;refTag&quot;:&quot;aod_dpdsk_new_6&quot;,&quot;isStickyPinnedOffer&quot;:false,&quot;asin&quot;:&quot;B0H8QLSNPP&quot;,&quot;maxQty&quot;:3,&quot;offerIndex&quot;:6,&quot;minQty&quot;:1}"></span>
+          </form>
+          <div class="a-section" role="list">
+            <div id="aod-offer-shipsFrom" class="a-section" role="listitem">
+              <span class="a-size-small a-color-tertiary">Ships from</span>
+              <span class="a-size-small a-color-base"> Amazon.com </span>
+            </div>
+            <div id="aod-offer-soldBy" class="a-section" role="listitem">
+              <span class="a-size-small a-color-tertiary">Sold by</span>
+              <a aria-label="The Buckeye Retail Collective. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+                 href="/gp/aag/main?ie=UTF8&amp;seller=A39DI2KWG3OOZZ&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_6" role="link">The Buckeye Retail Collective </a>
+              <div id="aod-offer-seller-rating" class="a-section">
+                <i class="a-icon a-icon-star-mini a-star-mini-4"><span class="a-icon-alt">Seller rating is 4 out of 5 stars</span></i>
+                <span class="a-size-small a-color-base"><span>(166 ratings) <br>77% positive over last 12 months</span></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
