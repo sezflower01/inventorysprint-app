@@ -1,6 +1,31 @@
-DROP INDEX IF EXISTS public.fnsku_map_unique_idx;
+-- Drops a unique index on fnsku_map that no longer matched the conflict
+-- target used by the inserts below it.
+--
+-- ⚠️ A ONE-ROW BACKFILL WAS REMOVED FROM THIS FILE ON 2026-11-14, and this
+-- note exists because deleting it is not free.
+--
+-- The INSERT carried, as literals in a PUBLIC repository: the operator's
+-- seller id, an Amazon-generated seller SKU (an amzn.gr.* resource id), and
+-- an FNSKU. Together those identify the business, one of its listings and the
+-- physical unit. None of it had to be in version control -- it was a manual
+-- backfill of a single fnsku_map row, typed into a migration because that was
+-- the handy place to put it.
+--
+-- WHAT THIS COSTS. If this migration has already been applied -- which it had
+-- been long before the removal -- nothing: the row is in the table and
+-- migrations are tracked by version, not by content, so editing this text
+-- does not re-run it. If it is ever applied to a FRESH database (a restore, a
+-- branch, a local dev reset) that one fnsku_map row will not be recreated,
+-- and label printing for that single ASIN-and-condition pair has no mapping
+-- until the FNSKU is re-synced from SP-API, which is where the value
+-- originally came from.
+--
+-- TO RESTORE IT by hand, run the equivalent INSERT in the SQL Editor with
+-- your own identifiers passed in there rather than committed. The original
+-- literals are in this file's git history; history was deliberately not
+-- rewritten, so they remain reachable to anyone who already has the repo.
+-- Removing them here stops them being read by anyone looking at the current
+-- tree, which is the only thing a scrub without a rewrite can achieve, and
+-- it is worth being clear about that limit rather than implying more.
 
-INSERT INTO public.fnsku_map (seller_id, marketplace_id, asin, seller_sku, fnsku, condition)
-VALUES ('A1B0EBOAJDDILW','ATVPDKIKX0DER','B0CCSQ62KN','amzn.gr.1066502134-gHXybu7rkamTXRR_BE-VG','X004VXLY99','USED - VERY GOOD')
-ON CONFLICT (seller_id, marketplace_id, asin, fnsku)
-DO UPDATE SET seller_sku = EXCLUDED.seller_sku, condition = EXCLUDED.condition;
+DROP INDEX IF EXISTS public.fnsku_map_unique_idx;
