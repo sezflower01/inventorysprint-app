@@ -151,11 +151,20 @@
     for (const id of NEEDS_AMAZON_CHIPS) setUnavailable($(id), NOT_READ);
     for (const id of VERDICT_PILLS) setUnavailable($(id), '—');
 
-    // Est/mo is the one field no Seller Central call can answer -- it is an
-    // estimate derived from sales-rank history, so it waits on the rank-data
-    // provider planned for 0.2.0, not on the Seller Central wiring. Saying so
-    // stops it looking like a bug when everything around it fills in.
-    setUnavailable($('apx-sa-sales'), NOT_READ, 'Sales estimates need sales-rank history, which this version does not have.');
+    // Est/mo is the one field no Seller Central call can answer, so it is
+    // blanked here with a reason of its own rather than the Seller Central one.
+    //
+    // The reason CHANGED once the provider was wired. It used to read that this
+    // needed sales-rank HISTORY from a provider planned for 0.2.0. Both halves
+    // are now false: the provider answers today, and the estimate is a power
+    // law over the ONE CURRENT rank, not a history. A tooltip claiming the
+    // version cannot do what it just did is the same fault as a label
+    // asserting a state nothing checks -- it teaches the reader to distrust
+    // the tiles that ARE right.
+    setUnavailable($('apx-sa-sales'), NOT_READ,
+      'Waiting on your data provider. Where Amazon publishes no units figure '
+      + 'for a product, this is estimated from its current sales rank and '
+      + 'marked with a ~.');
 
     // The decision strip must not imply a decision.
     const emoji = $('apx-fd-emoji');
@@ -176,7 +185,11 @@
     const fd = $('apx-final-decision');
     if (fd) { fd.className = 'apx-final-decision unknown'; }
 
-    setUnavailable($('apx-history-verdict'), NOT_READ, 'Price history needs sales-rank history, which this version does not have.');
+    // Says only what is true: the chart is not drawn. The old wording blamed
+    // missing provider data, which stopped being the reason once the provider
+    // was answering -- and it sat directly under a rank the panel had read.
+    setUnavailable($('apx-history-verdict'), NOT_READ,
+      'This version does not draw the price-history chart yet.');
     const alerts = $('apx-sa-alerts');
     if (alerts) { alerts.textContent = '—'; alerts.title = ''; }
 
