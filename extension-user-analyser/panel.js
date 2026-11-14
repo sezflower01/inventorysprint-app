@@ -255,10 +255,11 @@
   // real and fixable state rather than a missing feature. That makes it the
   // one empty label in this file that names an action, and it may: the thing
   // it asks for is on screen, and pressing Recheck afterwards does work.
+  const OFFERS_CLOSED_TEXT = 'Open See All Buying Options to read offers';
   const OFFERS_CLOSED_WHY =
-    'Open the "New (N) from ..." offer list on the page, then press Recheck. '
-    + 'It is read from the page in your own browser -- no seller account, and '
-    + 'no provider tokens.';
+    OFFERS_CLOSED_TEXT + '. It is read from the page in your own browser -- no '
+    + 'seller account, no credentials, and no provider tokens. Press Recheck '
+    + 'after opening it.';
 
   function renderSellersPending() {
     const count = $('apx-sellers-count');
@@ -268,7 +269,7 @@
       list.textContent = '';
       const d = document.createElement('div');
       d.className = 'apx-sellers-empty apx-k';
-      d.textContent = 'Offer list not open on this page.';
+      d.textContent = OFFERS_CLOSED_TEXT;
       d.title = OFFERS_CLOSED_WHY;
       list.appendChild(d);
     }
@@ -314,8 +315,37 @@
           : ' \u2014 delivered, no separate shipping charge.');
   }
 
+  // The drawer is built asynchronously, so this renders THREE states. The
+  // middle one is the reason it is not a boolean: Amazon paints the pinned
+  // offer and the counter first and fetches the rest after, so a read taken
+  // in that window legitimately sees one offer out of seven. Showing
+  // "Lowest FBA $64.97" from that partial list would put a number on screen
+  // that silently changes a second later, with nothing to tell the user it
+  // had -- so the half-built state says Loading and shows no figures.
+  function renderOffersLoading(o) {
+    const waiting = (o && o.totalOthers != null)
+      ? 'Reading the offer list: ' + (o.count || 0) + ' of ' + (o.totalOthers + 1) + ' offers so far.'
+      : 'Reading the offer list.';
+    const why = waiting + ' No figure is shown yet, because one computed from '
+      + 'half the offers would change under you without saying so.';
+    for (const id of ['apx-fba', 'apx-fbm', 'apx-amz']) setUnavailable($(id), LOADING, why);
+    const count = $('apx-sellers-count');
+    if (count) { count.textContent = '\u2014'; count.title = why; }
+    const list = $('apx-sellers-list');
+    if (list) {
+      list.textContent = '';
+      const d = document.createElement('div');
+      d.className = 'apx-sellers-empty apx-k';
+      d.textContent = LOADING;
+      d.title = why;
+      list.appendChild(d);
+    }
+  }
+
   function renderOffers(o) {
-    if (!o || !o.found) { renderSellersPending(); return; }
+    if (!o) { renderSellersPending(); return; }
+    if (o.state === 'loading') { renderOffersLoading(o); return; }
+    if (!o.found) { renderSellersPending(); return; }
 
     const count = $('apx-sellers-count');
     if (count) {
@@ -326,8 +356,17 @@
       // actually read. The page's own "Competitors" figure up top comes from a
       // different element and CAN disagree; neither is reconciled into the
       // other, because a figure silently adjusted to match is not a reading.
-      count.title = o.count + ' offers read from the open list'
-        + (o.totalOthers != null ? '; the page\u2019s own counter says ' + o.totalOthers + ' besides the Buy Box' : '');
+      // The FBA/FBM split belongs in the tooltip, not a fourth card: it is
+      // what a seller is actually deciding against. The two need not add up
+      // to the total -- an offer whose sold-by link carries no
+      // isAmazonFulfilled counts towards neither, and is left visible as a
+      // shortfall rather than quietly filed under FBM.
+      const split = o.fbaCount + ' FBA, ' + o.fbmCount + ' FBM';
+      const unknown = o.count - o.fbaCount - o.fbmCount;
+      count.title = o.count + ' offers read from the open list \u2014 ' + split
+        + (unknown > 0 ? ', ' + unknown + ' with no fulfilment stated' : '')
+        + (o.amazonSold ? '. Amazon is one of them.' : '. Amazon is not selling this.')
+        + (o.totalOthers != null ? ' The page\u2019s own counter says ' + o.totalOthers + ' besides the Buy Box.' : '');
     }
 
     putOffer('apx-fba', o.fbaLow, 'none', 'No FBA offer in the open list.');
@@ -429,8 +468,8 @@
         const empty = document.createElement('div');
         empty.className = 'apx-sellers-empty apx-k';
         empty.textContent = r.buyBoxSeller && r.buyBoxSeller.found
-          ? `Buy Box: ${r.buyBoxSeller.text} — open the offer list for the rest`
-          : 'Offer list not open on this page.';
+          ? `Buy Box: ${r.buyBoxSeller.text} — ${OFFERS_CLOSED_TEXT.toLowerCase()}`
+          : OFFERS_CLOSED_TEXT;
         empty.title = OFFERS_CLOSED_WHY;
         list.appendChild(empty);
       }

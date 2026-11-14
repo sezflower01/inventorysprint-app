@@ -44,6 +44,25 @@
 <div id="all-offers-display" class="a-section" aria-label="All Offers Display" role="dialog">
   <div id="aod-container" class="a-section">
 
+    <!-- The live drawer carries the pinned offer TWICE: this hidden sticky
+         header, shown on scroll, and the real block below. Same seller, same
+         price. A reader that takes both reports eight offers with J & M
+         COLLECTIBLES listed twice and a seller count one too high. Kept here
+         so the de-duplication is provable. -->
+    <div id="aod-sticky-pinned-offer" class="a-section aod-sticky-pinned-offer aok-hidden" style="top: -200px;">
+      <span id="aod-price-0">
+        <div data-csa-c-price-to-pay="64.97" data-csa-c-shipping-charge="0.0"
+             data-csa-c-type="item" class="a-section apex-core-price-identifier">
+          <span class="a-price apex-pricetopay-value"><span aria-hidden="true">$64.97</span></span>
+        </div>
+      </span>
+      <div id="aod-offer-soldBy" class="a-section" role="listitem">
+        <span class="a-size-small a-color-tertiary">Sold by</span>
+        <a class="a-size-small a-link-normal" target="_blank" rel="noopener"
+           href="/gp/aag/main?ie=UTF8&amp;seller=A1GD4LR25P9QFR&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_0" role="link">J &amp; M COLLECTIBLES </a>
+      </div>
+    </div>
+
     <!-- ── the pinned offer: this is the Buy Box ───────────────────────── -->
     <div id="aod-pinned-offer" class="a-section aod-pinned-offer">
       <h5 id="aod-asin-title-text">2026 Panini Donruss NASCAR Racing Mega Trading Card Box (2 Autographs or Memorabilia Cards Per Box)</h5>
@@ -72,6 +91,13 @@
       <div class="a-section keepaStock" style="display: none;">
         <span class="a-size-small a-color-tertiary">Stock</span>
         <span class="a-size-small a-color-base"><span style="font-weight: bold;">18 </span></span>
+      </div>
+
+      <div class="a-row aod-delivery-promise">
+        <span data-csa-c-type="element" data-csa-c-content-id="DEXUnifiedCXPDM"
+              data-csa-c-delivery-price="FREE" data-csa-c-delivery-type="delivery"
+              data-csa-c-delivery-time="Thursday, November 19"
+              data-csa-c-delivery-benefit-program-id="cfs"> FREE delivery <span class="a-text-bold">Thursday, November 19</span> </span>
       </div>
 
       <div id="aod-pinned-offer-additional-content" class="a-section" role="list">
@@ -276,6 +302,12 @@
             <span class="a-declarative" data-action="aod-atc-action"
                   data-aod-atc-action="{&quot;refTag&quot;:&quot;aod_dpdsk_new_5&quot;,&quot;isStickyPinnedOffer&quot;:false,&quot;asin&quot;:&quot;B0H8QLSNPP&quot;,&quot;maxQty&quot;:1,&quot;offerIndex&quot;:5,&quot;minQty&quot;:1}"></span>
           </form>
+          <div class="a-row aod-delivery-promise">
+            <span data-csa-c-type="element" data-csa-c-content-id="DEXUnifiedCXPDM"
+                  data-csa-c-delivery-price="$8.33" data-csa-c-delivery-type="delivery"
+                  data-csa-c-delivery-time="Wednesday, November 25"
+                  data-csa-c-delivery-benefit-program-id="paid_shipping"> $8.33 delivery <span class="a-text-bold">Wednesday, November 25</span>. </span>
+          </div>
           <div class="a-section" role="list">
             <div id="aod-offer-shipsFrom" class="a-section" role="listitem">
               <span class="a-size-small a-color-tertiary">Ships from</span>

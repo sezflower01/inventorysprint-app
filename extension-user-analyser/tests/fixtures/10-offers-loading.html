@@ -1,0 +1,93 @@
+<!doctype html>
+<!--
+  10: the offers drawer MID-LOAD, which is a different answer from both
+  "closed" and "read".
+
+  Derived from the same real B0H8QLSNPP capture as fixture 09, keeping the
+  parts that distinguish a drawer still filling in from one that has finished:
+
+    #all-offers-display-spinner      present WITHOUT aok-hidden. In the
+                                     finished capture it carries aok-hidden,
+                                     so the class is the signal.
+    #aod-sticky-pinned-offer         Amazon renders the pinned offer first.
+    #aod-total-offer-count = 6       the drawer already KNOWS six others are
+                                     coming, and none of them is in the DOM.
+
+  That last pair is what makes this unambiguous. One parsed offer plus a
+  counter saying six more exist is a drawer that is loading. One parsed offer
+  plus a counter saying zero others is a product with a single offer, which is
+  a complete read. Without the counter the two are indistinguishable and the
+  panel would show "Loading" forever on every single-offer ASIN.
+
+  Same scrubbing as fixture 09: every anti-csrftoken-a2z and offerListingId is
+  REDACTED. Seller names and ids are public and kept.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture 10 — offers drawer loading</title></head>
+<body>
+<div id="all-offers-display" class="a-section" aria-label="All Offers Display" role="dialog">
+
+  <!-- NOT aok-hidden: Amazon is still fetching the rest. -->
+  <div id="all-offers-display-spinner" class="aod-spinner-wrapper">
+    <span class="aod-spinner-container">
+      <span class="aod-spinner-container-inner"><span class="aod-animation aod-page-load"></span></span>
+      <div class="aod-load-text"><span class="a-size-base a-color-base">[Suspenseful music plays]</span></div>
+    </span>
+  </div>
+
+  <div id="aod-container" class="a-section">
+    <div id="aod-sticky-pinned-container" class="a-section">
+      <div id="aod-sticky-pinned-offer" class="a-section aod-sticky-pinned-offer">
+        <div id="aod-offer-heading" class="a-section"><span class="a-size-base a-text-bold">New</span></div>
+
+        <span id="aod-price-0">
+          <div data-csa-c-buying-option-type="NEW" data-csa-c-painter="apex-dp-price"
+               data-csa-c-price-to-pay="64.97" data-csa-c-ship-free-threshold="35.0"
+               data-csa-c-shipping-charge="0.0" data-csa-c-strike-through-price="74.9"
+               data-csa-c-type="item" class="a-section apex-core-price-identifier">
+            <span class="a-price apex-pricetopay-value"><span aria-hidden="true">$64.97</span></span>
+          </div>
+        </span>
+
+        <div class="a-row aod-delivery-promise">
+          <span data-csa-c-type="element" data-csa-c-content-id="DEXUnifiedCXPDM"
+                data-csa-c-delivery-price="FREE" data-csa-c-delivery-type="delivery"
+                data-csa-c-delivery-time="Thursday, November 19"
+                data-csa-c-delivery-benefit-program-id="cfs"> FREE delivery <span class="a-text-bold">Thursday, November 19</span> </span>
+        </div>
+
+        <form method="post" action="/cart/add-to-cart/ref=aod_dpdsk_new_0" class="AodAddToCart">
+          <input type="hidden" name="anti-csrftoken-a2z" value="REDACTED">
+          <input type="hidden" name="items[0.base][asin]" value="B0H8QLSNPP">
+          <input type="hidden" name="items[0.base][offerListingId]" value="OFFER_ID_0_REDACTED">
+          <span class="a-declarative" data-action="aod-atc-action"
+                data-aod-atc-action="{&quot;refTag&quot;:&quot;aod_dpdsk_new_0&quot;,&quot;isStickyPinnedOffer&quot;:true,&quot;asin&quot;:&quot;B0H8QLSNPP&quot;,&quot;maxQty&quot;:18,&quot;offerIndex&quot;:0,&quot;minQty&quot;:1}"></span>
+        </form>
+
+        <div id="aod-sticky-pinned-offer-additional-content" class="a-section">
+          <div id="aod-offer-shipsFrom" class="a-section" role="listitem">
+            <span class="a-size-small a-color-tertiary">Ships from</span>
+            <span class="a-size-small a-color-base"> Amazon.com </span>
+          </div>
+          <div id="aod-offer-soldBy" class="a-section" role="listitem">
+            <span class="a-size-small a-color-tertiary">Sold by</span>
+            <a aria-label="J &amp; M COLLECTIBLES. Opens a new page" class="a-size-small a-link-normal" target="_blank" rel="noopener"
+               href="/gp/aag/main?ie=UTF8&amp;seller=A1GD4LR25P9QFR&amp;isAmazonFulfilled=1&amp;asin=B0H8QLSNPP&amp;ref_=olp_merch_name_0" role="link">J &amp; M COLLECTIBLES </a>
+            <div id="aod-offer-seller-rating" class="a-section">
+              <i class="a-icon a-icon-star-mini a-star-mini-5"><span class="a-icon-alt">Seller rating is 5 out of 5 stars</span></i>
+              <span class="a-size-small a-color-base"><span>(24558 ratings) <br>99% positive over last 12 months</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- The counter has arrived. The six offers it counts have not. -->
+    <div id="aod-offer-list" class="a-section">
+      <input type="hidden" value="6" id="aod-total-offer-count">
+      <input type="hidden" value="6 other options" id="aod-total-offer-count-string">
+    </div>
+  </div>
+</div>
+</body>
+</html>

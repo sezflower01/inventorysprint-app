@@ -347,6 +347,26 @@
       ? shipsFromEl.textContent.replace(/\s+/g, ' ').replace(/^\s*Ships from\s*/i, '').trim() || null
       : null;
 
+    // Amazon's own label for how delivery is paid: 'cfs' on the free-shipping
+    // offers in the capture, 'paid_shipping' on the one that charges. Read
+    // rather than interpreted -- it is an enum nobody has documented to us.
+    const progEl = block.querySelector('[data-csa-c-delivery-benefit-program-id]');
+    const deliveryProgram = progEl
+      ? (progEl.getAttribute('data-csa-c-delivery-benefit-program-id') || null) || null
+      : null;
+
+    // PRIME IS NOT A PER-OFFER FIELD IN THIS LAYOUT, and this is the honest
+    // answer rather than the convenient one. The capture carries a-icon-prime
+    // only inside the FILTER control, never inside an offer block; the offer
+    // rows mention Prime solely in prose ("Prime members get FREE delivery"),
+    // which is localised and also appears on offers that are not Prime.
+    //
+    // Every FBA offer is in practice Prime-eligible, so fba could be reported
+    // as prime and would usually be right. It would also be an inference
+    // dressed as a reading, which is the one thing this file does not do --
+    // so primeStated says whether the PAGE said it, and nothing more.
+    const primeStated = !!block.querySelector('.a-icon-prime');
+
     const name = link ? link.textContent.replace(/\s+/g, ' ').trim() : null;
     if (!name && price == null) return null; // not an offer block at all
 
@@ -368,21 +388,58 @@
       positiveWindow: window,
       maxQty: stock.maxQty,
       maxQtyIsCap: stock.atLeast,
+      deliveryProgram: deliveryProgram,
+      primeStated: primeStated,
       isBuyBox: !!isBuyBox,
     };
   }
 
+  // THREE STATES, because the drawer is built asynchronously and "nothing to
+  // show" has three different causes the user can act on differently:
+  //
+  //   closed   #all-offers-display is not in the DOM at all. The normal state
+  //            on every page load, and fixable: open the offer list.
+  //   loading  the drawer is there and still filling. Amazon paints the
+  //            pinned offer and the counter FIRST, then fetches the rest, so
+  //            a read taken in that window sees one offer out of seven.
+  //   read     everything the counter promised is present.
+  //
+  // Distinguishing loading from read needs the counter, not the spinner alone:
+  // one parsed offer with a counter saying six more exist is a half-built
+  // drawer, while one parsed offer with a counter saying zero others is a
+  // single-offer product and a COMPLETE read. Without that check the panel
+  // would say "Loading" forever on every sole-seller ASIN -- which is exactly
+  // the population a sourcing panel cares most about.
+  function offersState(panel, parsedCount, totalOthers) {
+    if (!panel) return 'closed';
+    if (!parsedCount) return 'loading';
+    if (totalOthers != null && (parsedCount - 1) < totalOthers) return 'loading';
+    const sp = panel.querySelector('#all-offers-display-spinner');
+    // The spinner element is always present; the class is what hides it.
+    if (sp && !/\baok-hidden\b/.test(sp.className || '')) return 'loading';
+    return 'read';
+  }
+
   function readOffers(doc) {
     const panel = doc.querySelector('#all-offers-display');
-    const none = {
-      found: false, text: 'not found', source: SRC_PAGE,
+    const base = {
+      found: false, text: 'not found', source: SRC_PAGE, state: 'closed',
       count: 0, totalOthers: null, offers: [],
       buyBox: null, fbaLow: null, fbmLow: null, amazon: null,
+      fbaCount: 0, fbmCount: 0, amazonSold: false,
     };
-    if (!panel) return none;
+    if (!panel) return base;
 
     const blocks = [];
-    const pinned = panel.querySelector('#aod-pinned-offer');
+    // THE PINNED OFFER IS IN THE DOM TWICE on the live drawer: a hidden
+    // #aod-sticky-pinned-offer that appears on scroll, and the real
+    // #aod-pinned-offer. Same seller, same price. Taking both reports eight
+    // offers for a seven-offer ASIN with the Buy Box seller listed twice, and
+    // inflates the FBA count by one. The real block wins; the sticky one is
+    // only used when it is the ONLY pinned offer present, which is how a
+    // half-built drawer looks.
+    const pinned = panel.querySelector('#aod-pinned-offer')
+      || panel.querySelector('#aod-sticky-pinned-offer');
     if (pinned) blocks.push([pinned, true]);
     // querySelectorAll, because the id is on every block (see note 3 above).
     for (const el of panel.querySelectorAll('#aod-offer')) blocks.push([el, false]);
@@ -392,27 +449,51 @@
       const o = readOneOffer(el, isBB);
       if (o) offers.push(o);
     }
-    if (!offers.length) return none;
-
-    const cheapest = (list) => list.reduce(
-      (best, o) => (o.landed != null && (!best || o.landed < best.landed) ? o : best), null);
 
     const totalEl = panel.querySelector('#aod-total-offer-count');
     const rawTotal = totalEl ? parseInt(totalEl.getAttribute('value'), 10) : NaN;
+    const totalOthers = Number.isInteger(rawTotal) ? rawTotal : null;
+
+    const state = offersState(panel, offers.length, totalOthers);
+    if (state !== 'read') {
+      // The partial offers are returned so a caller could show them, but every
+      // DERIVED figure stays null: "lowest FBA" computed from two of seven
+      // offers is a number that will change under the user without warning,
+      // and they would have no way to tell it had.
+      return Object.assign({}, base, {
+        state: state,
+        text: state === 'loading' ? 'loading' : 'not found',
+        count: offers.length,
+        totalOthers: totalOthers,
+        offers: offers,
+      });
+    }
+
+    const cheapest = (list) => list.reduce(
+      (best, o) => (o.landed != null && (!best || o.landed < best.landed) ? o : best), null);
+    const amazon = offers.find((o) => o.isAmazon) || null;
 
     return {
       found: true,
+      state: 'read',
       // Amazon counts the OTHERS: "6 other options" alongside the pinned one.
       // Reporting that as the offer count would be off by one on every ASIN.
       text: offers.length + (offers.length === 1 ? ' offer' : ' offers'),
       source: SRC_PAGE,
       count: offers.length,
-      totalOthers: Number.isInteger(rawTotal) ? rawTotal : null,
+      totalOthers: totalOthers,
       offers: offers,
       buyBox: offers.find((o) => o.isBuyBox) || null,
       fbaLow: cheapest(offers.filter((o) => o.fba === true)),
       fbmLow: cheapest(offers.filter((o) => o.fba === false)),
-      amazon: offers.find((o) => o.isAmazon) || null,
+      amazon: amazon,
+      // fba === null is "the page did not say", so it counts towards neither.
+      // The two counts therefore need not add up to count, and that is the
+      // point: a missing discriminator is visible instead of being bundled
+      // into FBM, which is what a simple !fba test would have done.
+      fbaCount: offers.filter((o) => o.fba === true).length,
+      fbmCount: offers.filter((o) => o.fba === false).length,
+      amazonSold: !!amazon,
     };
   }
 

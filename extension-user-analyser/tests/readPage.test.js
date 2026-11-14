@@ -42,6 +42,7 @@ test('every fixture file is covered by a case here', { skip }, () => {
     '01-normal.html', '02-no-buybox.html', '03-many-sellers.html',
     '04-out-of-stock.html', '05-book.html', '06-variation-parent.html',
     '07-sparse.html', '08-proddetails-bsr.html', '09-offers-panel.html',
+    '10-offers-loading.html',
   ], 'a fixture was added or renamed without a test');
 });
 
@@ -289,4 +290,83 @@ test('a closed offers panel is not-found, not a crash', { skip }, () => {
     assert.equal(o.fbaLow, null);
     assert.equal(o.fbmLow, null);
   }
+});
+
+test('the pinned offer is in the DOM twice and must be counted once', { skip }, () => {
+  // The live drawer carries a hidden #aod-sticky-pinned-offer (shown on
+  // scroll) AND the real #aod-pinned-offer, same seller, same price. Taking
+  // both reports eight offers for a seven-offer ASIN, lists the Buy Box seller
+  // twice, and inflates the FBA count -- all while looking entirely plausible.
+  const doc = load('09-offers-panel.html');
+  assert.ok(doc.querySelector('#aod-sticky-pinned-offer'), 'the fixture lost the sticky duplicate');
+  assert.ok(doc.querySelector('#aod-pinned-offer'), 'the fixture lost the real pinned offer');
+
+  const o = readPage.readOffers(doc);
+  assert.equal(o.count, 7, 'the sticky duplicate is being counted as an eighth offer');
+  const jm = o.offers.filter((x) => /COLLECTIBLES/.test(x.sellerName));
+  assert.equal(jm.length, 1, 'the Buy Box seller appears twice');
+  assert.equal(jm[0].isBuyBox, true);
+  assert.equal(o.fbaCount + o.fbmCount, 7, 'the fulfilment counts no longer cover every offer');
+  assert.equal(o.fbaCount, 6);
+  assert.equal(o.fbmCount, 1);
+  assert.equal(o.amazonSold, false);
+});
+
+test('10 loading: a half-built drawer is not a finished read', { skip }, () => {
+  // Amazon paints the pinned offer and the counter first, then fetches the
+  // rest. A read taken in that window sees one offer out of seven, and
+  // "lowest FBA" computed from it is a number that changes a second later
+  // with nothing on screen to say it had.
+  const o = readPage.readOffers(load('10-offers-loading.html'));
+  assert.equal(o.state, 'loading');
+  assert.equal(o.found, false, 'a partial drawer reported itself as read');
+  assert.equal(o.count, 1, 'the pinned offer did not parse from the sticky block');
+  assert.equal(o.totalOthers, 6, 'the counter that proves more are coming was not read');
+
+  // The partial offers come through, but EVERY derived figure stays null.
+  assert.equal(o.offers.length, 1);
+  for (const k of ['fbaLow', 'fbmLow', 'buyBox', 'amazon']) {
+    assert.equal(o[k], null, k + ' was derived from a partial offer list');
+  }
+  assert.equal(o.fbaCount, 0, 'counts were derived from a partial list');
+});
+
+test('a single-offer product is a complete read, not a stuck spinner', { skip }, () => {
+  // THE CASE THE COUNTER EXISTS FOR. One parsed offer looks identical to a
+  // half-built drawer unless the counter is consulted: six others promised
+  // means loading, zero others promised means done. Get this wrong and the
+  // panel says "Loading" forever on every sole-seller ASIN -- which is the
+  // population a sourcing panel cares most about.
+  const html = fs.readFileSync(path.join(FIX, '10-offers-loading.html'), 'utf8')
+    .replace('value="6" id="aod-total-offer-count"', 'value="0" id="aod-total-offer-count"')
+    // aok-hidden is how the finished drawer hides its spinner -- the element
+    // is always present, so the class is the signal.
+    .replace('id="all-offers-display-spinner" class="aod-spinner-wrapper"',
+      'id="all-offers-display-spinner" class="aod-spinner-wrapper aok-hidden"');
+  const o = readPage.readOffers(new JSDOM(html).window.document);
+  assert.equal(o.state, 'read', 'a sole-seller ASIN is stuck reporting itself as loading');
+  assert.equal(o.count, 1);
+  assert.equal(o.text, '1 offer', 'the singular is not used for one offer');
+  assert.ok(o.buyBox, 'the only offer is not recognised as the Buy Box');
+});
+
+test('Prime is reported as unstated, never inferred from FBA', { skip }, () => {
+  // Every FBA offer is in practice Prime-eligible, so reporting fba as prime
+  // would usually be right -- and would be an inference dressed as a reading,
+  // which is the one thing this file does not do. The capture carries
+  // a-icon-prime only inside the FILTER control, never in an offer block.
+  const o = readPage.readOffers(load('09-offers-panel.html'));
+  assert.ok(o.offers.every((x) => x.primeStated === false),
+    'Prime is being claimed from a page that never said it');
+  assert.ok(o.offers.some((x) => x.fba === true), 'the fixture has no FBA offer to test against');
+
+  const src = fs.readFileSync(path.join(__dirname, '..', 'readPage.js'), 'utf8');
+  const slice = src.slice(src.indexOf('function readOneOffer'), src.indexOf('function offersState'));
+  const code = slice.replace(/\/\/[^\n]*/g, '');
+  assert.ok(!/prime[A-Za-z]*\s*[:=]\s*[^;,]*\bfba\b/i.test(code),
+    'Prime is being derived from the fulfilment flag');
+
+  // Amazon's own delivery-programme enum IS read, because it is a reading.
+  assert.equal(o.offers.find((x) => x.fba === false).deliveryProgram, 'paid_shipping');
+  assert.equal(o.buyBox.deliveryProgram, 'cfs');
 });
