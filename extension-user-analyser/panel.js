@@ -27,11 +27,15 @@
 //   rank data  est/mo sales and price history. Neither can come from Seller
 //              Central at all; they are rank-derived. Planned for 0.2.0.
 //
-// Until those are wired, each dependent field reads "Not checked yet" in
-// place: the tile keeps its size and position and shows no number, no colour
-// and no verdict. A blank or a zero would both read as information. The one
-// thing this panel must never do is show a figure computed from somebody
-// else's seller account.
+// Until those are wired, each dependent field reads NOT_READ in place: the
+// tile keeps its size and position and shows no number, no colour and no
+// verdict. A blank or a zero would both read as information. The one thing
+// this panel must never do is show a figure computed from somebody else’s
+// seller account.
+//
+// The label is referred to by its CONSTANT here, never quoted. Quoting it
+// left a third, retired wording in this header while the code said another,
+// and a reader has no way to tell which of the two is current.
 
 (function () {
   'use strict';
@@ -68,10 +72,24 @@
     $('apx-version').textContent = '';
   }
 
-  // ── fields that need the user signed in to Seller Central ────────────────────
+  // ── fields nothing has answered yet, at first paint ──────────────────────────
   //
   // Listed explicitly rather than derived, so that adding a tile is a
   // decision about where its number comes from and not an oversight.
+  //
+  // These two lists are NOT the same wait, and one shared label hid it:
+  //
+  //   NEEDS_AMAZON        the money tiles. They wait on the PROVIDER KEY,
+  //                       which already answers -- renderMoney fills every
+  //                       one of them as soon as fees arrive. The not-read
+  //                       state here is first paint only.
+  //
+  //   NEEDS_AMAZON_CHIPS  gating and P&L eligibility. These wait on the
+  //                       Seller Central read, which is not wired, so they
+  //                       stay not-read for the whole session.
+  //
+  // The names stay as they are because panel.html uses the same ids; what
+  // the comment must not do is give both lists one wrong cause.
   const NEEDS_AMAZON = [
     'apx-fees', 'apx-profit', 'apx-roi-out', 'apx-sa-maxcost',
     'apx-sa-margin', 'apx-sa-sales',
@@ -342,7 +360,7 @@
     const pass = passEl();
     showAuthError('');
     if (mode === 'signup') {
-      if (intro) intro.textContent = 'Create an InventorySprint account. Reading product pages needs no Amazon connection — just be signed in to Amazon Seller Central in this browser.';
+      if (intro) intro.textContent = 'Create an InventorySprint account. Reading product pages needs no Amazon connection, and no seller credentials.';
       if (submit) submit.textContent = 'Create account';
       if (toggle) toggle.textContent = 'I already have an account';
       // Tells a password manager to offer a NEW password rather than fill an
