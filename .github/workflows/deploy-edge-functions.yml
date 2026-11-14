@@ -8,9 +8,11 @@ name: Deploy Edge Functions
 #
 # Only functions that actually changed in the pushed commits are deployed
 # (detected via git diff), not the whole ~150-function fleet every time.
-# Exception: a change under supabase/functions/_shared/** redeploys every
-# function, since any of them may import shared code and there's no cheap
-# way to compute which ones without parsing imports.
+# Exception: a change to a shared MODULE under supabase/functions/_shared/**
+# redeploys every function, since any of them may import shared code and
+# there's no cheap way to compute which ones without parsing imports.
+# A *_test.ts file under _shared/ is excluded from that rule -- no function
+# imports a test, so it cannot change deployed behaviour.
 #
 # Deletions are NOT synced here on purpose -- `supabase functions deploy`
 # only pushes new/changed code. Removing a function from Supabase is a
@@ -202,8 +204,19 @@ jobs:
             exit 0
           fi
 
+          # TEST FILES UNDER _shared/ DO NOT TRIGGER THE FULL REDEPLOY.
+          #
+          # The blanket rule below exists because any function may import a
+          # shared MODULE and the import graph is not parsed. A *_test.ts file
+          # is never imported by a function -- it is only ever run by `deno
+          # test` -- so a change to one cannot alter any deployed behaviour.
+          #
+          # On 2026-11-14 a one-character edit to a seller id inside
+          # _shared/seller-authorization-guard_test.ts queued all 269
+          # functions. That is the expensive deploy and the one that loses the
+          # ECR pull lottery, spent on a file no function reads.
           SHARED_CHANGED=false
-          if echo "$CHANGED_FILES" | grep -q '^supabase/functions/_shared/'; then
+          if echo "$CHANGED_FILES" | grep -v -E '_test\.ts$' | grep -q '^supabase/functions/_shared/'; then
             SHARED_CHANGED=true
           fi
 
