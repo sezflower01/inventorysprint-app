@@ -355,6 +355,17 @@
           </div>
         </section>
 
+        <!-- One line per provider lookup: which ASIN, whether it was
+             called, served from cache or skipped, the HTTP status, what it
+             cost and any error. It is in the panel and not only the
+             console because the question it answers -- "is this thing
+             spending my tokens?" -- was asked by someone watching the
+             panel, and the honest answer was in neither place. Never the
+             key, and never a token value from it. -->
+        <p class="apx-foot" id="apx-diag-row" hidden>
+          <span id="apx-diag" class="apx-k"></span>
+        </p>
+
         <p class="apx-foot">
           <span id="apx-cached"></span>
           <!-- Where the saved key lives once the gate is past: masked, with

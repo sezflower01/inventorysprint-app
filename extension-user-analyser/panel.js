@@ -445,8 +445,22 @@
       return;
     }
     if (d.type === 'PAGE_READING') {
+      // KEPT, because requestRank may not be allowed to run yet. The key
+      // state arrives from the worker, which is a slower round trip than
+      // this postMessage from the host, so on load the first reading lands
+      // BEFORE hasKey is known. See the startup note at the foot of this
+      // file: refreshKeepa replays this reading once it knows.
+      lastReading = d.reading;
+
       renderNeedsAmazon();
       renderReading(d.reading);
+
+      // renderNeedsAmazon has just blanked every provider-fed tile, so a
+      // REREAD would otherwise throw away an answer already paid for and
+      // NOT ask for it again -- rankFor still matches, so the request is
+      // skipped. Re-applying the held answer is what makes a re-read free.
+      if (lastRank) renderRank(lastRank);
+
       requestRank(d.reading);
     }
   });
@@ -462,8 +476,67 @@
   // Cost: one token per ASIN, then free for six hours (the worker caches).
 
   let rankFor = null;
+  let lastReading = null;
+  let lastRank = null;
+
+  /**
+   * The per-call diagnostic. Deliberately a plain sentence rather than a
+   * status light: the thing being diagnosed is "did this call happen and
+   * what did it cost", and a colour cannot say that.
+   *
+   * NEVER the key and never a token value read from it. The balance shown
+   * here is the one Keepa reports for the account, which the footer already
+   * shows; what is new is the COST of this one call.
+   */
+  function renderDiag(res) {
+    const row = $('apx-diag-row');
+    const el = $('apx-diag');
+    if (!row || !el) return;
+
+    const d = (res && res.diag) || null;
+    if (!d) {
+      // No diag at all means the answer did not come from the worker path
+      // that carries one -- a worker fault, usually. Say that rather than
+      // showing a blank line that looks like "nothing happened".
+      const why = res && res.error ? String(res.error) : '';
+      row.hidden = !why;
+      el.textContent = why ? 'Lookup failed before it reached the worker — ' + why : '';
+      el.title = why || '';
+      return;
+    }
+
+    const bits = [];
+    bits.push(d.asin + ' (' + (d.marketplace || 'US') + ')');
+
+    if (d.outcome === 'cached') {
+      const mins = Number.isFinite(d.ageMs) ? Math.round(d.ageMs / 60000) : null;
+      bits.push('cached' + (mins != null ? ' ' + mins + 'm ago' : '') + ', 0 tokens');
+    } else if (d.outcome === 'skipped') {
+      bits.push('skipped (' + (d.reason || 'guard') + '), 0 tokens');
+    } else {
+      bits.push('called');
+      if (d.status != null) bits.push('HTTP ' + d.status);
+      bits.push(Number.isFinite(d.tokensConsumed)
+        ? d.tokensConsumed + ' token' + (d.tokensConsumed === 1 ? '' : 's')
+        : 'cost not reported');
+      if (Number.isFinite(d.callsThisMinute)) bits.push(d.callsThisMinute + '/3 this minute');
+    }
+
+    if (d.error) bits.push('error: ' + d.error);
+
+    row.hidden = false;
+    el.textContent = bits.join(' · ');
+    el.title = 'One line per data-provider lookup. 0 tokens means nothing was spent.';
+
+    // Also to the console, where it can be read across a whole session
+    // rather than only for the latest call.
+    try { console.info('[InventorySprint Analyser] lookup', JSON.stringify(d)); } catch (_) {}
+  }
 
   function renderRank(res) {
+    lastRank = res || null;
+    renderDiag(res);
+
     const bsr = $('apx-sa-bsr');
     const bsrTop = $('apx-bsr');
     const sales = $('apx-sa-sales');
@@ -471,7 +544,15 @@
     if (!res || !res.ok) {
       // A failure here must not overwrite a rank the PAGE already gave us.
       const why = (res && res.error) || 'Could not reach the data provider.';
-      setUnavailable(sales, 'not available', why);
+
+      // The failure REPLACES the not-read label on every dependent tile.
+      // Leaving them reading "Not read yet" after a call that failed is how
+      // a provider error got mistaken for a token-burning loop: the panel
+      // looked identical whether it had never called or had called and been
+      // refused, so there was nothing to tell the two apart from outside.
+      const short = (res && res.code === 'PAUSED') ? 'paused' : 'not available';
+      for (const id of NEEDS_AMAZON) setUnavailable($(id), short, why);
+      setUnavailable(sales, short, why);
       if (bsr && bsr.classList.contains('apx-sa-unknown')) setUnavailable(bsr, 'not found', why);
       return;
     }
@@ -515,6 +596,21 @@
     const a = reading && reading.asin;
     const asin = a && a.found ? String(a.value || a.text || '').trim() : '';
     if (!/^[A-Za-z0-9]{10}$/.test(asin)) return;
+
+    // THE BUG THIS GUARDS, AND WHY IT LOOKED LIKE THE OPPOSITE ONE.
+    //
+    // hasKey is set by refreshKeepa, which is a sendMessage round trip to
+    // the service worker. The host answers READY with PAGE_READING over
+    // postMessage in the same document. The second is always faster, so on
+    // page load this returned here EVERY TIME and nothing re-triggered it:
+    // no timer, no observer, nothing. The panel sat on "Not read yet"
+    // forever and spent ZERO tokens.
+    //
+    // Reported on 2026-11-14 as a loop burning 46 tokens. It was the exact
+    // inverse -- a call that never fired -- and the tiles could not say so
+    // because "never asked" and "asked and refused" rendered identically.
+    // The replay in refreshKeepa is the fix; this guard stays because a
+    // keyless panel must still not call.
     if (!hasKey) return; // the gate is showing; nothing to spend a token on
 
     const mkt = reading.marketplace || 'US';
@@ -766,6 +862,14 @@
   renderNeedsAmazon();
   // The gate decides first; only once a working key exists does auth state
   // get to choose between the sign-in card and the content.
-  refreshKeepa(() => { if (hasKey) refreshAuth(); else show('keepa'); });
+  //
+  // READY is sent BEFORE this resolves, on purpose: everything read from
+  // the page is free and should paint at once. What must not depend on the
+  // ordering is the provider call, so the reading that arrived meanwhile is
+  // replayed here, now that hasKey is actually known.
+  refreshKeepa(() => {
+    if (hasKey) refreshAuth(); else show('keepa');
+    if (hasKey && lastReading) requestRank(lastReading);
+  });
   toHost({ type: 'READY' });
 })();

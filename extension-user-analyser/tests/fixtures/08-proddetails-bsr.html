@@ -1,0 +1,47 @@
+<!doctype html>
+<!--
+  08: the #prodDetails layout, where the rank was invisible to the reader.
+
+  Amazon serves at least three detail layouts. The reader scanned four
+  selectors and none covered #prodDetails, the older two-table form still used
+  for a lot of hardlines -- so on 2026-11-14 a live Sports & Outdoors page with
+  "#53,343 in Sports & Outdoors" plainly on it read "not found".
+
+  ⚠️ HAND-BUILT, NOT A CAPTURE. The structure here is the documented
+  #prodDetails shape, not a scrub of the real page: the capture that prompted
+  the fix was never on this machine. It pins the selector and the
+  root-category rule, and it is NOT evidence that the live page parses. Replace
+  it with a trimmed scrub of the real capture when that lands, and keep the two
+  rank rows -- the multi-rank row is the whole point of the second assertion.
+
+  Deliberately also: a second, more specific rank in the same row, and the
+  "(See Top 100 ...)" parenthetical that sits between them.
+-->
+<html lang="en">
+<head><meta charset="utf-8"><title>Fixture 08 — prodDetails BSR</title></head>
+<body>
+  <span id="title">Extra Thick Yoga Mat with Carrying Strap</span>
+
+  <div id="prodDetails">
+    <table class="prodDetTable">
+      <tr><th class="prodDetSectionEntry">Brand</th><td class="a-size-base">Generic</td></tr>
+      <tr><th class="prodDetSectionEntry">Item Weight</th><td class="a-size-base">2.6 pounds</td></tr>
+      <tr><th class="prodDetSectionEntry">ASIN</th><td class="a-size-base">B0H8QLSNPP</td></tr>
+    </table>
+    <table class="prodDetTable">
+      <tr>
+        <th class="prodDetSectionEntry">Best Sellers Rank</th>
+        <td>
+          #53,343 in Sports &amp; Outdoors (<a href="/gp/bestsellers/sporting-goods">See Top 100 in Sports &amp; Outdoors</a>)
+          #412 in Yoga Mats
+        </td>
+      </tr>
+      <tr><th class="prodDetSectionEntry">Date First Available</th><td class="a-size-base">March 4, 2026</td></tr>
+    </table>
+  </div>
+
+  <div id="corePrice_feature_div"><span class="a-offscreen">$74.90</span></div>
+  <div id="availability"><span>In Stock</span></div>
+  <div id="merchant-info">Ships from Amazon. Sold by ACG ECOM.</div>
+</body>
+</html>

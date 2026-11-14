@@ -85,7 +85,7 @@
 
   async function callKeepa(path, params) {
     const key = await getKey();
-    if (!key) return fail('NO_KEY', 'No API key saved.');
+    if (!key) return fail('NO_KEY', 'No API key saved.', { status: null, tokensConsumed: 0 });
 
     const qs = new URLSearchParams({ key, ...params });
     let res;
@@ -94,35 +94,45 @@
     } catch (e) {
       // Offline, DNS, blocked. Not an invalid key -- saying so would send the
       // user to re-enter a key that is fine.
-      return fail('NETWORK', 'Could not reach the data provider. Check your connection.');
+      return fail('NETWORK', 'Could not reach the data provider. Check your connection.',
+        // No status and no cost: the request never left the browser.
+        { status: null, tokensConsumed: 0 });
     }
 
     const text = await res.text();
     let json = null;
     try { json = text ? JSON.parse(text) : null; } catch (_) { json = null; }
 
+    // A rejected or throttled call is REPORTED WITH ITS COST, which Keepa
+    // states in the body even when it refuses. Assuming a failure was free
+    // is how a budget drifts from the provider’s own accounting.
+    const spent = Number.isFinite(json?.tokensConsumed) ? json.tokensConsumed : 0;
+    const meta = { status: res.status, tokensConsumed: spent,
+      tokensLeft: Number.isFinite(json?.tokensLeft) ? json.tokensLeft : null };
+
     if (res.status === 401 || res.status === 403) {
-      return fail('BAD_KEY', 'That API key was rejected.');
+      return fail('BAD_KEY', 'That API key was rejected.', meta);
     }
     if (res.status === 429) {
-      return fail('EXHAUSTED', 'Out of tokens.', { refillIn: json?.refillIn ?? null });
+      return fail('EXHAUSTED', 'Out of tokens.', { ...meta, refillIn: json?.refillIn ?? null });
     }
     if (!res.ok) {
-      return fail('HTTP', `Request failed (${res.status}).`);
+      return fail('HTTP', `Request failed (${res.status}).`, meta);
     }
     if (!json) {
-      return fail('HTTP', 'Unreadable response.');
+      return fail('HTTP', 'Unreadable response.', { status: res.status, tokensConsumed: 0 });
     }
     // THE TRAP: a 200 whose body carries an error. Checked before anything
     // reads a field off this object.
     if (json.error) {
       const msg = json.error.message || json.error.type || 'Request rejected.';
       const isKey = /token|key|subscription/i.test(String(msg));
-      return fail(isKey ? 'BAD_KEY' : 'API', String(msg));
+      return fail(isKey ? 'BAD_KEY' : 'API', String(msg), meta);
     }
 
     return {
       ok: true,
+      status: res.status,
       data: json,
       tokensLeft: Number.isFinite(json.tokensLeft) ? json.tokensLeft : null,
       tokensConsumed: Number.isFinite(json.tokensConsumed) ? json.tokensConsumed : null,
@@ -265,9 +275,16 @@
     const r = await product(asin, marketplace);
     if (!r.ok) return r;
     const out = summariseProduct(r.data);
-    if (!out.ok) return { ok: false, code: out.code, message: out.message };
+    // A 200 that carried no product STILL COST A TOKEN. Dropping the
+    // transport fields here reported it as free, so the footer and the
+    // diagnostic both understated what the call had spent.
+    if (!out.ok) {
+      return { ok: false, code: out.code, message: out.message,
+        status: r.status, tokensLeft: r.tokensLeft, tokensConsumed: r.tokensConsumed };
+    }
     return {
       ...out,
+      status: r.status,
       tokensLeft: r.tokensLeft,
       tokensConsumed: r.tokensConsumed,
       refillIn: r.refillIn,

@@ -32,6 +32,63 @@ importScripts('keepa.js');
 // carries its own age, so a stale-but-labelled number beats a spent token.
 const PRODUCT_TTL_MS = 6 * 60 * 60 * 1000;
 
+// How long a FAILED answer is reused. Failures used not to be cached at
+// all, on the reasoning that caching one would hide a refilled bucket or a
+// repaired key for the whole six hours. That reasoning was right about the
+// six hours and wrong about the conclusion: an uncached failure means every
+// retry pays Keepa again, and Keepa charges for a call it refuses.
+//
+// Five minutes settles both. A repaired key is usable almost at once, and a
+// run of retries costs one call instead of one each.
+const PRODUCT_FAIL_TTL_MS = 5 * 60 * 1000;
+
+// The outer stop. Even with the per-ASIN cache correct, a caller that walks
+// ASINs can spend without limit, and this key is the USER’S OWN -- the same
+// Keepa account the server-side repricer draws on, where starving the
+// repricer is a worse outcome than a blank tile.
+//
+// Deliberately far below the account’s refill: a human reading product
+// pages cannot outrun three lookups a minute, so this never binds in normal
+// use and binds immediately on a bug.
+//
+// The ledger lives in storage.local, NOT in a module variable. This is a
+// service worker: Chrome stops it when idle and starts it again on the next
+// message, which resets anything held in memory -- so an in-memory counter
+// would be a cap that a worker restart lifts.
+const KEEPA_CALL_CAP = 3;
+const KEEPA_CALL_WINDOW_MS = 60 * 1000;
+const CALL_LEDGER_KEY = 'isua_keepa_calls';
+
+/**
+ * Claim one slot in the current minute, or refuse.
+ *
+ * Read-modify-write on storage.local is not atomic, and two messages can
+ * interleave. That is tolerable here and a mutex is not: the window is a
+ * minute, the cap is three, and the worst interleaving overshoots by one
+ * call. A lock that could wedge the worker would cost more than it saves.
+ */
+async function claimKeepaSlot() {
+  const now = Date.now();
+  const led = (await chrome.storage.local.get(CALL_LEDGER_KEY))[CALL_LEDGER_KEY];
+  const recent = (Array.isArray(led) ? led : []).filter((t) => Number.isFinite(t) && now - t < KEEPA_CALL_WINDOW_MS);
+
+  if (recent.length >= KEEPA_CALL_CAP) {
+    const waitMs = KEEPA_CALL_WINDOW_MS - (now - Math.min(...recent));
+    return {
+      ok: false,
+      code: 'PAUSED',
+      message: 'Paused to protect your tokens: ' + KEEPA_CALL_CAP + ' lookups a minute is the cap. '
+        + 'Try again in ' + Math.max(1, Math.ceil(waitMs / 1000)) + 's.',
+      retryInMs: Math.max(0, waitMs),
+      used: recent.length,
+    };
+  }
+
+  recent.push(now);
+  await chrome.storage.local.set({ [CALL_LEDGER_KEY]: recent });
+  return { ok: true, used: recent.length };
+}
+
 const CFG = {
   SUPABASE_URL: 'https://mstibdszibcheodvnprm.supabase.co',
   // Publishable anon key. Safe to ship -- it grants nothing on its own, every
@@ -327,26 +384,65 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         // gets revisited constantly -- tabbing back and forth would spend a
         // token each time for an answer that does not move hour to hour. The
         // cache makes a revisit free; PRODUCT_TTL_MS is the only knob.
+        // One ASIN's rank, units and fees. ONE TOKEN, and the only message
+        // in this worker that spends anything, so every guard lives here.
+        //
+        // THERE IS NO force. It used to accept msg.force to skip the cache,
+        // and a parameter that skips the only per-ASIN guard is the whole
+        // guard, optional. Nothing sent it; it is gone so nothing can.
+        //
+        // Order matters and is not arbitrary: cache FIRST, then the cap.
+        // Checking the cap first would refuse answers that cost nothing.
         case 'ISUA_PROVIDER_PRODUCT': {
           const asin = String(msg.asin || '').trim().toUpperCase();
           const mkt = String(msg.marketplace || 'US').toUpperCase();
-          if (!/^[A-Z0-9]{10}$/.test(asin)) { sendResponse({ ok: false, error: 'Not a valid ASIN.' }); break; }
+          if (!/^[A-Z0-9]{10}$/.test(asin)) {
+            sendResponse({ ok: false, error: 'Not a valid ASIN.',
+              diag: { asin, marketplace: mkt, outcome: 'skipped', reason: 'bad ASIN', tokensConsumed: 0 } });
+            break;
+          }
 
           const cacheKey = `isua_prod_${mkt}_${asin}`;
-          if (!msg.force) {
-            const hit = (await chrome.storage.local.get(cacheKey))[cacheKey];
-            if (hit && Number.isFinite(hit.at) && Date.now() - hit.at < PRODUCT_TTL_MS) {
-              sendResponse({ ...hit.value, cached: true });
+          const hit = (await chrome.storage.local.get(cacheKey))[cacheKey];
+          if (hit && Number.isFinite(hit.at) && hit.value) {
+            // A failed answer is held briefly, a good one for the full TTL.
+            const ttl = hit.value.ok ? PRODUCT_TTL_MS : PRODUCT_FAIL_TTL_MS;
+            const age = Date.now() - hit.at;
+            if (age < ttl) {
+              sendResponse({
+                ...hit.value,
+                cached: true,
+                diag: { asin, marketplace: mkt, outcome: 'cached', ageMs: age,
+                  status: hit.value.status ?? null, tokensConsumed: 0,
+                  error: hit.value.ok ? null : (hit.value.message || hit.value.error || null) },
+              });
               break;
             }
           }
 
+          const slot = await claimKeepaSlot();
+          if (!slot.ok) {
+            sendResponse({ ok: false, code: slot.code, error: slot.message, retryInMs: slot.retryInMs,
+              diag: { asin, marketplace: mkt, outcome: 'skipped', reason: 'per-minute cap',
+                tokensConsumed: 0, error: slot.message } });
+            break;
+          }
+
           const r = await KEEPA.productSummary(asin, mkt);
-          if (!r.ok) { sendResponse({ ok: false, code: r.code, error: r.message }); break; }
-          // Only a good answer is cached. Caching a failure would hide a
-          // recovered key or a refilled bucket for the whole TTL.
+
+          // Cached EITHER WAY, which is the fix for the retry storm: an
+          // uncached failure made every repeat pay Keepa again.
           await chrome.storage.local.set({ [cacheKey]: { at: Date.now(), value: r } });
-          sendResponse(r);
+
+          const diag = { asin, marketplace: mkt, outcome: 'called',
+            status: r.status ?? null,
+            tokensConsumed: Number.isFinite(r.tokensConsumed) ? r.tokensConsumed : null,
+            tokensLeft: Number.isFinite(r.tokensLeft) ? r.tokensLeft : null,
+            callsThisMinute: slot.used,
+            error: r.ok ? null : (r.message || null) };
+
+          if (!r.ok) { sendResponse({ ok: false, code: r.code, error: r.message, diag }); break; }
+          sendResponse({ ...r, diag });
           break;
         }
         case 'ISUA_SIGN_IN_PASSWORD': {

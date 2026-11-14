@@ -41,7 +41,7 @@ test('every fixture file is covered by a case here', { skip }, () => {
   assert.deepEqual(onDisk, [
     '01-normal.html', '02-no-buybox.html', '03-many-sellers.html',
     '04-out-of-stock.html', '05-book.html', '06-variation-parent.html',
-    '07-sparse.html',
+    '07-sparse.html', '08-proddetails-bsr.html',
   ], 'a fixture was added or renamed without a test');
 });
 
@@ -145,4 +145,26 @@ test('parseMoney: the cases that decide whether a number is a guess', () => {
 test('extract() rejects a non-document rather than returning empty fields', () => {
   assert.throws(() => readPage.extract(null, 'x'), TypeError);
   assert.throws(() => readPage.extract({}, 'x'), TypeError);
+});
+
+test('08 prodDetails: a rank in the older two-table layout is read', { skip }, () => {
+  // THE REGRESSION. The selector list covered four layouts and not this one,
+  // so a live page with "#53,343 in Sports & Outdoors" visible on it reported
+  // "not found". Nothing was wrong with the parsing -- the row was never
+  // looked at.
+  const r = readPage.extract(load('08-proddetails-bsr.html'), URL_FOR('B0H8QLSNPP'));
+
+  assert.equal(r.bsr.found, true, 'the #prodDetails rank is still invisible to the reader');
+  assert.equal(r.bsr.value, 53343);
+
+  // The ROOT category, not the specific one. The row carries "#412 in Yoga
+  // Mats" as well, and Amazon prints the root rank as the headline -- as does
+  // the provider summary, so taking the specific one would put two different
+  // numbers in two tiles on the same screen.
+  assert.equal(r.bsr.category, 'Sports & Outdoors');
+  assert.equal(r.bsr.text, '#53,343 in Sports & Outdoors');
+
+  // The "(See Top 100 ...)" link sits between the two ranks. If the category
+  // capture ever swallows it, this is what fails first.
+  assert.ok(!/top 100/i.test(r.bsr.category), 'the parenthetical leaked into the category');
 });

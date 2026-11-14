@@ -175,12 +175,33 @@
   }
 
   // ── Best Sellers Rank ───────────────────────────────────────────────────
-  // Lives in a detail-bullets row whose label contains "Best Sellers Rank".
-  // Scanning rows by LABEL rather than by position: the row order differs
-  // between the two detail layouts and between categories.
+  // Lives in a row whose label contains "Best Sellers Rank". Scanning rows
+  // by LABEL rather than by position: the row order differs between detail
+  // layouts and between categories.
+  //
+  // THERE ARE MORE THAN TWO LAYOUTS, which is what this got wrong. The list
+  // below had four selectors and none of them was #prodDetails -- the older
+  // two-table layout Amazon still serves for a lot of hardlines. On
+  // B0F6KKKNJ6-style pages (Sports & Outdoors, 2026-11-14) the rank sat in
+  // #prodDetails and the reader returned "not found", which is the correct
+  // answer to the wrong question: the row was there and it was never looked
+  // at.
+  //
+  // Adding a selector is cheap and safe here BECAUSE of the rule below: a
+  // row found but unparseable returns NOT_FOUND rather than guessing, so a
+  // selector that matches the wrong table costs a missing rank, never a
+  // wrong one.
   function readBsr(doc) {
     const rows = [];
-    for (const sel of ['#productDetails_detailBullets_sections1 tr', '#detailBullets_feature_div li', '#detailBulletsWrapper_feature_div li', '#productDetails_db_sections tr']) {
+    for (const sel of [
+      '#productDetails_detailBullets_sections1 tr',
+      '#detailBullets_feature_div li',
+      '#detailBulletsWrapper_feature_div li',
+      '#productDetails_db_sections tr',
+      '#prodDetails tr',                  // the older two-table layout
+      '#productDetails_techSpec_section_1 tr',
+      '#detailBullets_feature_div span.a-list-item',
+    ]) {
       let nodes;
       try { nodes = doc.querySelectorAll(sel); } catch (_) { continue; }
       for (const n of nodes || []) rows.push(n);
@@ -188,6 +209,12 @@
     for (const row of rows) {
       const text = (row.textContent || '').replace(/\s+/g, ' ').trim();
       if (!/best sellers? rank/i.test(text)) continue;
+      // A #prodDetails row routinely carries several ranks:
+      //   "#53,343 in Sports & Outdoors (See Top 100) #412 in Yoga Mats"
+      // The FIRST is the root category, which is the one Amazon prints as
+      // the headline BSR and the one the provider summary reports -- so
+      // taking the most specific one would disagree with both the page and
+      // the tile beside it.
       const m = /#\s*([\d,]+)\s*in\s+([^(#]+)/i.exec(text);
       if (m) {
         const n = parseInt(m[1].replace(/,/g, ''), 10);

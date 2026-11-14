@@ -124,11 +124,20 @@ test('one ASIN costs one token, so the worker caches per ASIN', () => {
   assert.ok(readAt > -1, 'the handler no longer reads the cache');
   assert.ok(callAt > -1, 'the handler no longer calls the provider');
   assert.ok(readAt < callAt, 'the cache is read after the token is spent, which defeats it');
-  // A failure must not be cached: that would hide a refilled bucket or a
-  // repaired key for the whole TTL.
-  const setAt = slice.indexOf('storage.local.set');
-  const failAt = slice.indexOf('if (!r.ok)');
-  assert.ok(failAt > -1 && failAt < setAt, 'a failed answer can reach the cache');
+
+  // WHAT USED TO BE ASSERTED HERE, AND WHY IT WAS WRONG.
+  //
+  // This test also required that a FAILURE never reach the cache, so that a
+  // refilled bucket or a repaired key could not be hidden for the whole TTL.
+  // Sound-looking, and it was the expensive half of a 2026-11-14 scare: Keepa
+  // charges for a call it refuses, so an uncached failure means every retry
+  // pays again, and a panel with no visible diagnostic looked exactly like a
+  // loop.
+  //
+  // Failures are now cached for five minutes, which cannot hide a repaired key
+  // for long and collapses a run of retries into one call. The caching rules
+  // and the per-minute cap are pinned in tests/keepaGuards.test.js; the
+  // assertion is not duplicated here.
 });
 
 test('the offers parameter stays off the product call', () => {
