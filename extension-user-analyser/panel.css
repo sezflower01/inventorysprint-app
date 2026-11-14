@@ -229,6 +229,10 @@ a.apx-seller-name:hover { text-decoration: underline; color: #4F46E5; }
 .apx-seller-tag.fbm { background: rgba(245,158,11,0.18); color: #B45309; }
 .apx-seller-tag.amz { background: rgba(239,68,68,0.18); color: #DC2626; }
 .apx-seller-tag.self { background: rgba(79,70,229,0.25); color: #4F46E5; }
+/* Two badges can apply at once (YOU + FBA, FBA + BB), and the row grid has
+   exactly four columns, so they share one cell instead of adding a fifth. */
+.apx-seller-tags { display: flex; gap: 3px; flex: 0 0 auto; justify-content: flex-end; }
+.apx-seller-tag.bb { background: rgba(79,70,229,0.2); color: #4F46E5; }
 .apx-seller-price { font-weight: 600; }
 .apx-sellers-empty { padding: 8px; text-align: center; }
 .apx-inline-retry {

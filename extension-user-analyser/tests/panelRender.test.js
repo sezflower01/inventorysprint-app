@@ -554,28 +554,121 @@ test('the open offer list renders landed cost, and says so', { skip }, () => {
   // Amazon is not an offer on this ASIN. That is an answer, not a gap.
   assert.equal(text('apx-amz'), 'not selling');
 
-  assert.equal(text('apx-sellers-count'), '7', 'the seller count is not the offers read');
+  assert.equal(text('apx-sellers-count'), '7 live', 'the seller count is not the offers read');
 
-  const rows = $('apx-sellers-list').querySelectorAll('.apx-sellers-row');
+  const rows = $('apx-sellers-list').querySelectorAll('.apx-seller-row');
   assert.equal(rows.length, 7, 'the offer rows stopped rendering one per offer');
-  assert.match(rows[0].textContent, /Seller A & B/);
-  assert.match(rows[0].textContent, /Buy Box/, 'the Buy Box offer is no longer marked');
-  assert.match(rows[0].textContent, /FBA/);
+
+  // The row is STRUCTURED now, matching the stylesheet that was ported with
+  // the panel and never built against, so each part can be asserted on its
+  // own element instead of inside one concatenated string.
+  assert.equal(rows[0].querySelector('.apx-seller-name').textContent, 'Seller A & B');
+  assert.ok(rows[0].classList.contains('bb'), 'the Buy Box row is no longer highlighted');
+  assert.ok(rows[0].querySelector('.apx-seller-tag.bb'), 'the Buy Box badge has gone');
+  assert.ok(rows[0].querySelector('.apx-seller-tag.fba'), 'the FBA badge has gone');
+
+  // The storefront link is built from the MARKETPLACE, not from the relative
+  // sold-by href -- resolving that one against an extension page would point
+  // the link at the extension.
+  const link = rows[0].querySelector('a.apx-seller-name');
+  assert.ok(link, 'the seller name is no longer a link to their storefront');
+  assert.match(link.href, /^https:\/\/www\.amazon\.com\/sp\?ie=UTF8&seller=ASYNTH/,
+    'the storefront link is not an absolute amazon.com URL');
+  assert.equal(link.rel, 'noopener noreferrer', 'the external link lost its rel guard');
 
   const fbmRow = Array.from(rows).find((r) => /Seller G/.test(r.textContent));
-  assert.match(fbmRow.textContent, /FBM/);
-  assert.match(fbmRow.textContent, /\$77\.28/, 'the FBM row shows the pre-shipping price');
-  assert.match(fbmRow.textContent, /97% lifetime/,
+  assert.ok(fbmRow.querySelector('.apx-seller-tag.fbm'), 'the FBM badge has gone');
+  assert.equal(fbmRow.querySelector('.apx-seller-price').textContent, '$77.28',
+    'the FBM row shows the pre-shipping price');
+  assert.match(fbmRow.querySelector('.apx-seller-price').title, /68\.95.*8\.33/,
+    'the FBM price tooltip no longer shows what it was built from');
+
+  // A lifetime rating is not comparable with a 12-month one, so the window
+  // survives -- in the tooltip, since the badge only has room for a figure.
+  assert.equal(fbmRow.querySelector('.apx-seller-rating').textContent, '\u2605 97%');
+  assert.match(fbmRow.querySelector('.apx-seller-rating').title, /lifetime/,
     'the lifetime rating window is no longer distinguished from a 12-month one');
 
-  // The 30-item cap must read as a ceiling, never as an exact count.
+  // Below 90% positive is the thing worth noticing on a competitor.
+  const weak = Array.from(rows).find((r) => /Seller H/.test(r.textContent));
+  assert.ok(weak.querySelector('.apx-seller-rating.bad'),
+    'a 77%-positive seller is no longer flagged');
+
+  // The 30-item cap reads as a ceiling, never an exact count. It lives in the
+  // price tooltip because the row has four columns and no stock one.
   const capped = Array.from(rows).find((r) => /SLR E CO/.test(r.textContent));
-  assert.match(capped.textContent, /qty 30\+/, 'the stock cap is shown as an exact figure');
+  assert.match(capped.querySelector('.apx-seller-price').title, /30 or more in stock/,
+    'the stock cap is shown as an exact figure, or has been dropped');
+  const one = Array.from(rows).find((r) => /Seller G/.test(r.textContent));
+  assert.match(one.querySelector('.apx-seller-price').title, /1 unit in stock/,
+    'a single-unit offer is not reported as such');
+
+  // With no cost entered there is no ROI. An ROI from a guessed cost is the
+  // understatement this repo has already shipped once.
+  for (const r of rows) {
+    assert.equal(r.querySelector('.apx-seller-roi').textContent, '\u2014',
+      'an ROI appeared with no cost entered');
+    assert.ok(r.querySelector('.apx-seller-roi.na'), 'the empty ROI is not marked unavailable');
+  }
 
   // Seller names go in as TEXT. This panel runs inside the extension and the
   // names come from a page we do not control.
-  assert.ok(!/<[a-z]/i.test($('apx-sellers-list').innerHTML.replace(/<\/?div[^>]*>/gi, '')),
-    'markup from the page reached the offer rows');
+  const html = $('apx-sellers-list').innerHTML;
+  assert.ok(!/<(script|img|iframe|svg)/i.test(html), 'markup from the page reached the offer rows');
+});
+
+test('ROI per offer answers what YOU would make there, not their margin', { skip }, () => {
+  // The figure that makes an offer list a sourcing tool rather than a price
+  // list: $82 from a rival is only interesting next to what you would earn
+  // at $82. Reverse-engineered from the sibling Analyzer, which showed 34%
+  // at $64.97 and 72% at $82.00 -- a cost of $38.09 and a $4.18 fulfilment
+  // fee at a 15% referral rate reproduce all of its percentages.
+  // The Analyzer showed 34% at $64.97 and 72% at $82.00. A cost of $38.09
+  // with a $4.18 fulfilment fee at 15% referral reproduces every one of its
+  // percentages, so those are the inputs fed in here.
+  const reading = readFixture('09-offers-panel.html', URL_FOR('B0H8QLSNPP'));
+  const { $, window } = renderPanel(wire(reading), {
+    ISUA_PROVIDER_PRODUCT: {
+      ok: true, asin: 'B0H8QLSNPP',
+      rank: { found: false, text: 'not found' },
+      monthlySold: { found: false, text: 'not available' },
+      fees: { found: true, fbaFee: 4.18, referralPct: 15 },
+      diag: { asin: 'B0H8QLSNPP', marketplace: 'US', outcome: 'called', status: 200, tokensConsumed: 1 },
+    },
+    ISUA_PROVIDER_STATE: { ok: true, hasKey: true, masked: '....g4qp', tokensLeft: 204 },
+  });
+  $('apx-cost').value = '38.09';
+  $('apx-cost').dispatchEvent(new window.Event('input'));
+
+  // RENDERED, not just modelled. The ROI column is computed from lastFees,
+  // which only a provider answer sets -- and the offers render on
+  // PAGE_READING, earlier, with no fees in hand. Until the provider answer
+  // re-rendered them the column read an em-dash for ever and the only way to
+  // fill it was to re-read the page. This test exists because the model-only
+  // version of it passed while the panel showed nothing.
+  const roiOf = (name) => {
+    const row = Array.from($('apx-sellers-list').querySelectorAll('.apx-seller-row'))
+      .find((r) => new RegExp(name).test(r.textContent));
+    return row.querySelector('.apx-seller-roi').textContent;
+  };
+  assert.equal(roiOf('Seller A & B'), '34%', 'the ROI column did not fill once fees arrived');
+  assert.equal(roiOf('Seller F'), '56%');
+  assert.equal(roiOf('Seller G'), '61%', 'the FBM row did not use its LANDED price');
+  assert.equal(roiOf('Seller H'), '72%');
+
+  // 30% is the Max Cost target, so a green row and an affordable Max Cost
+  // agree rather than contradicting each other.
+  const good = Array.from($('apx-sellers-list').querySelectorAll('.apx-seller-roi'))
+    .filter((e) => e.classList.contains('good'));
+  assert.equal(good.length, 7, 'the ROI colour bands no longer match the 30% target');
+
+  // The same inputs, and nothing inferred from the rival.
+  const src = srcOf('panel.js');
+  const fn = src.slice(src.indexOf('function offerRoi'), src.indexOf('function stockPhrase'));
+  assert.match(fn, /apx-cost/, 'the ROI no longer uses the cost you entered');
+  assert.match(fn, /lastFees.referralPct/, 'the ROI no longer uses your referral rate');
+  assert.match(fn, /apx-seller-mode|fbm/i, 'the ROI ignores whether you sell FBA or FBM');
+  assert.match(fn, /return null/, 'the ROI no longer declines when an input is missing');
 });
 
 /** renderPanel, but with a seller id already saved in the worker's store. */
@@ -600,7 +693,7 @@ test('the user own offer is marked, excluded, and the exclusion is stated', { sk
   const { $, text } = renderPanelAsSeller(reading, me);
 
   // 7 offers, one of them ours -> 6 competitors.
-  assert.equal(text('apx-sellers-count'), '6',
+  assert.equal(text('apx-sellers-count'), '6 live + you',
     'the user is still being counted among their own competitors');
   assert.match($('apx-sellers-count').title, /one of them yours/,
     'the total no longer explains why the count dropped');
@@ -614,10 +707,13 @@ test('the user own offer is marked, excluded, and the exclusion is stated', { sk
     'the FBA figure no longer says that the user own offer was taken out');
 
   // The row is labelled.
-  const rows = $('apx-sellers-list').querySelectorAll('.apx-sellers-row');
-  const mineRow = Array.from(rows).find((r) => / You$/.test(r.textContent));
-  assert.ok(mineRow, 'the user own offer is not marked in the list');
+  const rows = $('apx-sellers-list').querySelectorAll('.apx-seller-row');
+  const mineRow = Array.from(rows).find((r) => r.querySelector('.apx-seller-tag.self'));
+  assert.ok(mineRow, 'the user own offer is not badged YOU in the list');
+  assert.equal(mineRow.querySelector('.apx-seller-tag.self').textContent, 'YOU');
   assert.equal(rows.length, 7, 'the own offer was dropped from the list instead of marked');
+  assert.equal($('apx-sellers-list').querySelectorAll('.apx-seller-tag.self').length, 1,
+    'more than one offer is badged as the user own');
 
   // And the suppression is SPELLED OUT. An exclusion the user cannot see is
   // worse than none: a stale id would hide a real rival with no trace.
@@ -633,16 +729,17 @@ test('an id set but not on this listing says so, and excludes nothing', { skip }
   const reading = readFixture('09-offers-panel.html', URL_FOR('B0H8QLSNPP'));
   const { $, text } = renderPanelAsSeller(reading, 'ASYNTH99999999');
 
-  assert.equal(text('apx-sellers-count'), '7', 'offers were excluded for an id that matched none');
+  assert.equal(text('apx-sellers-count'), '7 live', 'offers were excluded for an id that matched none');
   const note = $('apx-sellers-list').querySelector('.apx-sellers-note');
   assert.match(note.textContent, /None of these offers is yours/);
-  assert.ok(!/ You$/m.test($('apx-sellers-list').textContent), 'an offer was marked as the user own');
+  assert.equal($('apx-sellers-list').querySelectorAll('.apx-seller-tag.self').length, 0,
+    'an offer was badged as the user own for an id that matched none');
 });
 
 test('with no id set, the panel says what setting one would do', { skip }, () => {
   const reading = readFixture('09-offers-panel.html', URL_FOR('B0H8QLSNPP'));
   const { $, text } = renderPanelAsSeller(reading, null);
-  assert.equal(text('apx-sellers-count'), '7');
+  assert.equal(text('apx-sellers-count'), '7 live');
   const note = $('apx-sellers-list').querySelector('.apx-sellers-note');
   assert.match(note.textContent, /Set your seller ID/,
     'an unconfigured panel does not say that it is counting the user as a rival');

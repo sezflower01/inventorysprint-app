@@ -285,21 +285,61 @@
   // ranking on the displayed price puts it below three FBA offers it is in
   // fact 12 dollars dearer than. On a sourcing panel that is not a rounding
   // error, it is the wrong buy.
-  function offerLine(o) {
-    const bits = [o.sellerName || 'unnamed seller'];
-    bits.push(fmt(o.landed));
-    // null is "the page did not say", which is not FBM.
-    bits.push(o.fba === true ? 'FBA' : (o.fba === false ? 'FBM' : 'fulfilment not stated'));
-    if (o.stars != null) {
-      const r = o.ratings != null ? ' (' + o.ratings.toLocaleString() + ')' : '';
-      const p = o.positivePct != null
-        ? ' ' + o.positivePct + '%' + (o.positiveWindow === 'lifetime' ? ' lifetime' : '')
-        : '';
-      bits.push(o.stars + '\u2605' + r + p);
-    }
-    if (o.maxQty != null) bits.push('qty ' + o.maxQty + (o.maxQtyIsCap ? '+' : ''));
-    if (o.isBuyBox) bits.push('Buy Box');
-    return bits.join(' \u00b7 ');
+  // Amazon host per marketplace, for the storefront link. Built from the
+  // marketplace rather than from the sold-by href, which is RELATIVE on the
+  // page -- resolving it correctly depends on where the panel thinks it is,
+  // and the panel is an extension page, not amazon.com.
+  const AMZ_HOST = {
+    US: 'www.amazon.com', CA: 'www.amazon.ca', MX: 'www.amazon.com.mx',
+    BR: 'www.amazon.com.br', UK: 'www.amazon.co.uk', DE: 'www.amazon.de',
+    FR: 'www.amazon.fr', IT: 'www.amazon.it', ES: 'www.amazon.es',
+    JP: 'www.amazon.co.jp',
+  };
+
+  function storefrontUrl(sellerId, marketplace) {
+    if (!sellerId) return null;
+    const host = AMZ_HOST[String(marketplace || 'US').toUpperCase()] || AMZ_HOST.US;
+    return 'https://' + host + '/sp?ie=UTF8&seller=' + encodeURIComponent(sellerId);
+  }
+
+  // ROI AT SOMEONE ELSE’S PRICE: what this listing would return if you
+  // matched that offer. It is the figure that makes an offer list a sourcing
+  // tool rather than a price list -- $82 from a rival is only interesting
+  // next to what you would earn there.
+  //
+  // Needs your cost AND both fee halves. Any of them missing and there is no
+  // percentage at all: an ROI with a guessed cost or half a fee is the
+  // understatement this repo has already shipped once.
+  //
+  // For an FBM rival the price used is their LANDED cost, delivery included,
+  // because that is the number you would have to match to win the sale. The
+  // fee side is always YOURS -- your referral rate and, unless you sell FBM,
+  // your fulfilment fee. It answers "what would I make there", not "what are
+  // they making".
+  function offerRoi(landed) {
+    if (landed == null) return null;
+    if (!lastFees || !lastFees.found) return null;
+    const cost = money($('apx-cost') && $('apx-cost').value);
+    if (cost == null || cost <= 0) return null;
+    const mode = ($('apx-seller-mode') && $('apx-seller-mode').value) || 'FBA';
+    const fulfil = /fbm/i.test(String(mode)) ? 0 : lastFees.fbaFee;
+    const fees = landed * (lastFees.referralPct / 100) + fulfil;
+    return ((landed - fees - cost) / cost) * 100;
+  }
+
+  /**
+   * How much of it that seller has, for the price tooltip.
+   *
+   * The row format has four columns and no stock one, so this would otherwise
+   * be dropped -- and it is the field that says whether a rival at $64.97 is
+   * one unit or thirty. 30 is Amazon's cap, not a count, so it reads "30 or
+   * more" and never an exact figure.
+   */
+  function stockPhrase(o) {
+    if (o.maxQty == null) return null;
+    return o.maxQty >= 30 && o.maxQtyIsCap
+      ? '30 or more in stock'
+      : o.maxQty + (o.maxQty === 1 ? ' unit' : ' units') + ' in stock';
   }
 
   function putOffer(id, o, absentLabel, absentWhy) {
@@ -456,7 +496,7 @@
       // The number shown is COMPETITORS, so the user’s own offer comes out
       // of it. The total is kept in the tooltip, because a count that
       // dropped from 7 to 6 with no explanation is a bug report.
-      count.textContent = String(others.length);
+      count.textContent = others.length + ' live' + (mine ? ' + you' : '');
       const split = o.fbaCount + ' FBA, ' + o.fbmCount + ' FBM';
       const unknown = o.count - o.fbaCount - o.fbmCount;
       count.title = o.count + ' offers read from the open list'
@@ -486,15 +526,101 @@
     const list = $('apx-sellers-list');
     if (!list) return;
     list.textContent = '';
+    // THE ROW FORMAT IS THE ANALYZER’S, and its CSS was already in
+    // panel.css -- .apx-seller-row, .apx-seller-tag.self for YOU,
+    // .apx-seller-roi with its colour bands -- ported with the stylesheet
+    // and never built against. The markup contract was therefore already
+    // decided; this follows it rather than inventing a second one.
+    const mkt = (lastReading && lastReading.marketplace) || 'US';
     for (const offer of o.offers) {
+      const isMine = !!(mine && offer === mine);
       const row = document.createElement('div');
-      const isMine = mine && offer === mine;
-      row.className = 'apx-sellers-row apx-k' + (isMine ? ' apx-sellers-row-mine' : '');
-      // textContent, never innerHTML: a seller name is third-party text on a
-      // page we do not control, and this panel runs inside the extension.
-      row.textContent = offerLine(offer) + (isMine ? ' \u00b7 You' : '');
-      if (offer.sellerId) row.title = 'Seller ' + offer.sellerId
-        + (isMine ? ' \u2014 your own offer, excluded from the competitor figures.' : '');
+      row.className = 'apx-seller-row' + (offer.isBuyBox ? ' bb' : '');
+
+      const nameWrap = document.createElement('div');
+      nameWrap.className = 'apx-seller-name-wrap';
+      const url = storefrontUrl(offer.sellerId, mkt);
+      // An anchor only when there is a seller id to point at; otherwise a
+      // span, because a link that goes nowhere is worse than plain text.
+      const name = document.createElement(url ? 'a' : 'span');
+      name.className = 'apx-seller-name';
+      // textContent, never innerHTML: a seller name is third-party text from
+      // a page we do not control, and this panel runs inside the extension.
+      name.textContent = offer.sellerName || 'unnamed seller';
+      if (url) {
+        name.href = url;
+        name.target = '_blank';
+        name.rel = 'noopener noreferrer';
+        name.title = 'Open this seller\u2019s storefront \u2014 ' + offer.sellerId;
+      }
+      nameWrap.appendChild(name);
+
+      if (offer.positivePct != null) {
+        const rate = document.createElement('span');
+        // Bands, not a raw number painted neutral: 95%+ is unremarkable,
+        // below 90% is the thing worth noticing on a competitor.
+        const band = offer.positivePct >= 95 ? 'good' : (offer.positivePct >= 90 ? 'warn' : 'bad');
+        rate.className = 'apx-seller-rating ' + band;
+        rate.textContent = '\u2605 ' + offer.positivePct + '%';
+        rate.title = (offer.ratings != null ? offer.ratings.toLocaleString() + ' ratings, ' : '')
+          + offer.positivePct + '% positive '
+          + (offer.positiveWindow === 'lifetime' ? 'over its lifetime' : 'over the last 12 months')
+          + (offer.positiveWindow === 'lifetime'
+              ? ' \u2014 a lifetime figure, not comparable with a 12-month one.' : '.');
+        nameWrap.appendChild(rate);
+      }
+      row.appendChild(nameWrap);
+
+      const tags = document.createElement('span');
+      tags.className = 'apx-seller-tags';
+      const tag = (cls, text, why) => {
+        const t = document.createElement('span');
+        t.className = 'apx-seller-tag ' + cls;
+        t.textContent = text;
+        if (why) t.title = why;
+        tags.appendChild(t);
+      };
+      if (isMine) tag('self', 'YOU',
+        'Your own offer. Excluded from the competitor count and the lowest-price figures.');
+      if (offer.isAmazon) tag('amz', 'AMZ', 'Amazon is selling this itself.');
+      // null is "the page did not say", which is not FBM -- so it gets its
+      // own badge rather than being filed under one.
+      if (offer.fba === true) tag('fba', 'FBA');
+      else if (offer.fba === false) tag('fbm', 'FBM', 'Merchant-fulfilled: the price shown is landed, delivery included.');
+      else tag('', '?', 'This offer\u2019s sold-by link did not say how it is fulfilled.');
+      if (offer.isBuyBox) tag('bb', 'BB', 'Holds the Buy Box.');
+      row.appendChild(tags);
+
+      const price = document.createElement('span');
+      price.className = 'apx-seller-price';
+      price.textContent = fmt(offer.landed);
+      const stock = stockPhrase(offer);
+      price.title = (offer.shipping > 0
+        ? fmt(offer.price) + ' plus ' + fmt(offer.shipping) + ' delivery. The page shows '
+          + 'only ' + fmt(offer.price) + '; this is what it costs to receive.'
+        : 'Delivered, with no separate shipping charge.')
+        + (stock ? ' ' + stock + '.' : '');
+      row.appendChild(price);
+
+      const roiEl = document.createElement('span');
+      const roi = offerRoi(offer.landed);
+      if (roi == null) {
+        roiEl.className = 'apx-seller-roi na';
+        roiEl.textContent = '\u2014';
+        roiEl.title = (!lastFees || !lastFees.found)
+          ? 'Needs both fee halves from your data provider.'
+          : 'Enter your total cost to see what you would make at each price.';
+      } else {
+        // 30% is the same target the Max Cost tile authorises against, so a
+        // green row and an affordable Max Cost mean the same thing.
+        const band = roi >= 30 ? 'good' : (roi >= 15 ? 'warn' : 'bad');
+        roiEl.className = 'apx-seller-roi ' + band;
+        roiEl.textContent = Math.round(roi) + '%';
+        roiEl.title = 'What you would make selling at ' + fmt(offer.landed)
+          + ', using your own cost and fees \u2014 not this seller\u2019s margin.';
+      }
+      row.appendChild(roiEl);
+
       list.appendChild(row);
     }
 
@@ -940,6 +1066,14 @@
     // Same answer, same call: dimensions ride along on the product lookup
     // that was already paid for, so this costs no extra token.
     renderDims(res.dims || null, (lastReading && lastReading.marketplace) || 'US');
+    // AND re-render the offer rows, because their ROI column is computed from
+    // lastFees, which only exists once this answer lands. The offers were
+    // rendered on PAGE_READING -- earlier, from the page, with no fees in hand
+    // -- so without this the ROI column reads an em-dash for ever and the only
+    // way to populate it is to re-read the page. Fourth instance in this file
+    // of a value computed in one place and consumed in another with nothing
+    // connecting them.
+    if (lastReading) renderOffers(lastReading.offers);
 
     // Units: Amazon’s own "bought in past month", passed straight through.
     // Absent is a REAL answer -- Amazon does not publish it for every ASIN --
@@ -1184,8 +1318,16 @@
     setMoney('apx-sim-roi', pct((p / cost) * 100), roiClass((p / cost) * 100));
   }
 
-  $('apx-cost')?.addEventListener('input', renderMoney);
-  $('apx-seller-mode')?.addEventListener('change', renderMoney);
+  // The per-offer ROI column depends on BOTH of these, so they re-render the
+  // offer rows too. Without it the column stayed on its em-dash while the
+  // money tiles above updated as you typed -- two figures from the same two
+  // inputs, one of them live and one of them stale, with nothing to say which.
+  const recomputeMoney = () => {
+    renderMoney();
+    if (lastReading) renderOffers(lastReading.offers);
+  };
+  $('apx-cost')?.addEventListener('input', recomputeMoney);
+  $('apx-seller-mode')?.addEventListener('change', recomputeMoney);
   $('apx-sim-slider')?.addEventListener('input', () => renderSim(lastSale, lastFees && lastFees.found && lastSale != null
     ? lastSale * (lastFees.referralPct / 100) + lastFees.fbaFee
     : null));
