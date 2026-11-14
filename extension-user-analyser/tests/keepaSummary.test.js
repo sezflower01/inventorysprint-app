@@ -296,3 +296,32 @@ test('dimensions are shown in the unit the marketplace sells in', () => {
   // The provider's own figures stay available, so the conversion is checkable.
   assert.match(slice, /mm\./, 'the raw provider figures are no longer in the tooltip');
 });
+
+test('the fee tooltip can be checked against Seller Central line by line', () => {
+  // A fee total you cannot decompose is a number you have to trust. This repo
+  // has shipped a referral fee that was a percentage of the MARKET price
+  // rather than the seller's own -- it hid $4.35 a unit and turned 49% ROI
+  // into a reported 66%. Arithmetically the total looked fine. Naming the
+  // base is what makes that class of error visible.
+  const panel = fs.readFileSync(path.join(ROOT, 'panel.js'), 'utf8');
+  const slice = panel.slice(panel.indexOf('const feesEl'), panel.indexOf('// Max Cost authorises'));
+  assert.ok(slice.length > 0, 'the fee tooltip block has moved');
+
+  assert.match(slice, /Referral/, 'the referral line has gone');
+  assert.match(slice, /referralPct/, 'the referral RATE is no longer shown beside the amount');
+  assert.match(slice, /of your.*sale price/, 'the tooltip no longer names the base the rate was applied to');
+  assert.match(slice, /Fulfilment/, 'the fulfilment amount has gone');
+  assert.match(slice, /Total/, 'the total has gone, so the tile cannot be reconciled with its parts');
+
+  // Every exclusion makes the real cost HIGHER. Dropping one makes the ASIN
+  // look better than it is, which is the direction that loses money.
+  for (const ex of ['storage', 'long-term', 'returns']) {
+    assert.ok(new RegExp(ex, 'i').test(slice), 'the tooltip stopped excluding ' + ex);
+  }
+  assert.match(slice, /this or higher, never lower/,
+    'the tooltip no longer states which direction the exclusions push the figure');
+
+  // FBM has no fulfilment fee, and the seller's own postage is not in here.
+  assert.match(slice, /No fulfilment fee on FBM/);
+  assert.match(slice, /delivery YOU pay/, 'FBM no longer warns that your own postage is excluded');
+});

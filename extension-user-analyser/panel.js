@@ -1022,10 +1022,37 @@
     const feesEl = $('apx-fees');
     setMoney('apx-fees', fmt(fees));
     if (feesEl) {
-      feesEl.title = 'Referral ' + fmt(referral) + ' at ' + lastFees.referralPct + '%'
-        + (isFbm ? ' \u2014 no fulfilment fee on FBM, and your own shipping is NOT included'
-                 : ' + fulfilment ' + fmt(fulfil))
-        + '. From your data provider. Storage and long-term fees are not included.';
+      // Written to be CHECKED against Seller Central line by line, which is
+      // the only way a disagreement tells you which half is wrong. Three
+      // things it has to say that the short version did not:
+      //
+      //   the BASE the percentage was applied to. A referral rate is a
+      //   percentage of something, and this repo has already shipped a fee
+      //   that was a percentage of the MARKET price rather than the
+      //   seller’s -- it hid $4.35 a unit and turned 49% ROI into 66%.
+      //   Naming the base makes that class of error visible instead of
+      //   arithmetically invisible.
+      //
+      //   the TOTAL, so the tile and the tooltip can be reconciled without
+      //   the reader adding up two numbers themselves.
+      //
+      //   what is NOT in it. An understated fee reads as a better deal, so
+      //   every exclusion is a reason the real figure is worse, never
+      //   better. Listing them is not hedging.
+      const parts = ['Referral ' + fmt(referral) + ' \u2014 ' + lastFees.referralPct
+        + '% of your ' + fmt(sale) + ' sale price'];
+      parts.push(isFbm
+        ? 'No fulfilment fee on FBM'
+        : 'Fulfilment ' + fmt(fulfil) + ' \u2014 a flat figure from your data provider');
+      parts.push('Total ' + fmt(fees));
+      const excluded = [
+        'monthly storage', 'long-term storage', 'returns processing',
+        isFbm ? 'the delivery YOU pay to ship it' : null,
+        'any advertising',
+      ].filter(Boolean);
+      parts.push('NOT included: ' + excluded.join(', ')
+        + ' \u2014 so the real cost is this or higher, never lower.');
+      feesEl.title = parts.join('. ') + '.';
     }
 
     // Max Cost authorises what you may pay, so it uses the same 30% ROI
