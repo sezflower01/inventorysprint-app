@@ -25,13 +25,17 @@
 //              once ended up written under another's.
 //
 //   rank data  est/mo sales and price history. Neither can come from Seller
-//              Central at all; they are rank-derived. Planned for 0.2.0.
+//              Central at all; they are rank-derived. The provider IS wired
+//              now, so est/mo fills; the price-history chart is not drawn.
 //
-// Until those are wired, each dependent field reads NOT_READ in place: the
-// tile keeps its size and position and shows no number, no colour and no
+// Until those are wired, each dependent field says so in place: the tile
+// keeps its size and position and shows no number, no colour and no
 // verdict. A blank or a zero would both read as information. The one thing
 // this panel must never do is show a figure computed from somebody else’s
 // seller account.
+//
+// WHICH it says is now two different labels, and the difference is the
+// whole point -- see LOADING and NOT_IN_VERSION below.
 //
 // The label is referred to by its CONSTANT here, never quoted. Quoting it
 // left a third, retired wording in this header while the code said another,
@@ -95,7 +99,10 @@
     'apx-sa-margin', 'apx-sa-sales',
     'apx-sim-sale', 'apx-sim-profit', 'apx-sim-roi',
   ];
-  const NEEDS_AMAZON_CHIPS = ['apx-sa-eligible', 'apx-sa-pl'];
+  // The two gating chips USED to share this list and the one label. They
+  // are blanked separately now, because they are not the same kind of
+  // empty: eligibility is a read this build does not make, private-label
+  // risk is a judgement nobody has defined.
   const VERDICT_PILLS = [
     'apx-dm-profit', 'apx-dm-trend', 'apx-dm-comp', 'apx-dm-elig', 'apx-dm-sales',
   ];
@@ -133,7 +140,28 @@
   // Until then the label states our own position, which is the only thing
   // that is actually known here. The source and the requirement live in the
   // tooltip, where they inform without instructing.
-  const NOT_READ = 'Not read yet';
+  // TWO STATES, because one label was answering two different questions.
+  //
+  // "Not read yet" sat on a tile that fills in two seconds AND on a tile
+  // that will never fill in this build. The user cannot tell those apart,
+  // and asked the only reasonable question: when WILL it be read? A label
+  // that cannot be acted on is the same fault as one that asserts a state
+  // nothing checks -- it just fails quietly instead of loudly.
+  //
+  //   LOADING         an answer is on its way THIS session. Only ever a
+  //                   first paint. If one of these is still showing, the
+  //                   lookup failed and the failure path names the reason
+  //                   in its place.
+  //   NOT_IN_VERSION  nothing in this build computes it. Final, and honest,
+  //                   so the row stops reading as broken.
+  //
+  // A field that is NEITHER -- not loading, not missing from the build, just
+  // not applicable to THIS page -- gets its own inline reason instead of
+  // either global label. Two states are enough for the panel, not for every
+  // field in it; the price simulator on a variation parent is the live
+  // example, and forcing it into one of these two would be a third lie.
+  const LOADING = 'Loading…';
+  const NOT_IN_VERSION = 'Not available in this version';
 
   function setUnavailable(el, text, why) {
     if (!el) return;
@@ -147,9 +175,25 @@
   }
 
   function renderNeedsAmazon() {
-    for (const id of NEEDS_AMAZON) setUnavailable($(id), NOT_READ);
-    for (const id of NEEDS_AMAZON_CHIPS) setUnavailable($(id), NOT_READ);
+    // Provider-fed money tiles. These DO fill, seconds later, so they get
+    // the loading label and not the absent one.
+    for (const id of NEEDS_AMAZON) {
+      setUnavailable($(id), LOADING, 'Asking your data provider for this ASIN.');
+    }
     for (const id of VERDICT_PILLS) setUnavailable($(id), '—');
+
+    // Eligibility: a real read, but not one this build makes. The tooltip
+    // keeps saying that your sign-in is not the thing missing, because that
+    // is the wrong conclusion a reader reaches first.
+    setUnavailable($('apx-sa-eligible'), NOT_IN_VERSION);
+
+    // Private-label risk: deliberately NOT defined for v1, so there is
+    // nothing here to be waiting on. Brand-risk research is the user’s own
+    // and stays manual on purpose; a verdict synthesised from brand plus
+    // seller count would put a number on a judgement nobody made.
+    setUnavailable($('apx-sa-pl'), NOT_IN_VERSION,
+      'Not defined in this version. Brand risk is a judgement this build '
+      + 'does not make, so it shows no verdict rather than a guessed one.');
 
     // Est/mo is the one field no Seller Central call can answer, so it is
     // blanked here with a reason of its own rather than the Seller Central one.
@@ -161,7 +205,7 @@
     // version cannot do what it just did is the same fault as a label
     // asserting a state nothing checks -- it teaches the reader to distrust
     // the tiles that ARE right.
-    setUnavailable($('apx-sa-sales'), NOT_READ,
+    setUnavailable($('apx-sa-sales'), LOADING,
       'Waiting on your data provider. Where Amazon publishes no units figure '
       + 'for a product, this is estimated from its current sales rank and '
       + 'marked with a ~.');
@@ -188,8 +232,10 @@
     // Says only what is true: the chart is not drawn. The old wording blamed
     // missing provider data, which stopped being the reason once the provider
     // was answering -- and it sat directly under a rank the panel had read.
-    setUnavailable($('apx-history-verdict'), NOT_READ,
-      'This version does not draw the price-history chart yet.');
+    setUnavailable($('apx-history-verdict'), NOT_IN_VERSION,
+      'This version does not draw the price-history chart yet. Whether the '
+      + 'provider answer already carries the series is reported on the '
+      + 'diagnostic line at the bottom of the panel.');
     const alerts = $('apx-sa-alerts');
     if (alerts) { alerts.textContent = '—'; alerts.title = ''; }
 
@@ -211,13 +257,13 @@
   // markup of the offers panel, which is not guessable from here.
   function renderSellersPending() {
     const count = $('apx-sellers-count');
-    if (count) { count.textContent = '—'; count.title = 'Not read yet'; }
+    if (count) { count.textContent = '—'; count.title = NOT_IN_VERSION + '.'; }
     const list = $('apx-sellers-list');
     if (list) {
       list.textContent = '';
       const d = document.createElement('div');
       d.className = 'apx-sellers-empty apx-k';
-      d.textContent = 'Not read yet — the seller list is not wired up in this version.';
+      d.textContent = NOT_IN_VERSION + ' — the seller list is not wired up here.';
       d.title = 'It will be read from the offers panel in your own browser session, '
         + 'not from any seller account.';
       list.appendChild(d);
@@ -270,10 +316,12 @@
 
     // Offer-derived prices come from the seller's own API in the original.
     // Here only the Buy Box owner is known, from the page.
-    setUnavailable($('apx-fba'), NOT_READ);
-    setUnavailable($('apx-fbm'), NOT_READ);
-    setUnavailable($('apx-amz'), NOT_READ);
-    setUnavailable($('apx-swing'), NOT_READ);
+    const OFFERS_WHY = 'Needs a read of the offers panel on this page, which '
+      + 'this version does not do. It does NOT need an Amazon connection.';
+    setUnavailable($('apx-fba'), NOT_IN_VERSION, OFFERS_WHY);
+    setUnavailable($('apx-fbm'), NOT_IN_VERSION, OFFERS_WHY);
+    setUnavailable($('apx-amz'), NOT_IN_VERSION, OFFERS_WHY);
+    setUnavailable($('apx-swing'), NOT_IN_VERSION, OFFERS_WHY);
 
     const list = $('apx-sellers-list');
     if (list) {
@@ -285,8 +333,8 @@
         // user to go and do something that would not help -- the whole point of
         // this extension is that no account connection exists. What the full
         // list needs is a read of the offers panel in this browser.
-        ? `Buy Box: ${r.buyBoxSeller.text} — full offer list not read yet`
-        : 'Offer list not read yet';
+        ? `Buy Box: ${r.buyBoxSeller.text} — full offer list not available in this version`
+        : 'Offer list not available in this version';
       list.appendChild(empty);
     }
     const count = $('apx-sellers-count');
@@ -294,7 +342,8 @@
 
     // Dimensions are an SP-API catalogue field in the original.
     for (const id of ['apx-dims-pkg', 'apx-dims-pkg-wt', 'apx-dims-item', 'apx-dims-item-wt']) {
-      setUnavailable($(id), NOT_READ);
+      setUnavailable($(id), NOT_IN_VERSION,
+        'A catalogue field this build does not fetch.');
     }
     const dsrc = $('apx-dims-source');
     if (dsrc) dsrc.textContent = '—';
@@ -521,6 +570,18 @@
     const bits = [];
     bits.push(d.asin + ' (' + (d.marketplace || 'US') + ')');
 
+    // Whether the answer we PAID FOR carried the price/rank series. The
+    // chart canvas has existed in panel.html all along with nothing drawing
+    // to it, and summariseProduct dropped the arrays before the cache was
+    // even written -- so this has been bought and binned on every lookup.
+    // Reported as a shape so the caching decision rests on real sizes.
+    const h = d.history;
+    const histBit = !h ? null
+      : (h.present
+          ? 'history: ' + h.series + ' series, ' + h.points.toLocaleString()
+            + ' pts, ~' + Math.round(h.bytes / 1024) + ' KB'
+          : 'history: absent from the response');
+
     if (d.outcome === 'cached') {
       const mins = Number.isFinite(d.ageMs) ? Math.round(d.ageMs / 60000) : null;
       bits.push('cached' + (mins != null ? ' ' + mins + 'm ago' : '') + ', 0 tokens');
@@ -534,6 +595,10 @@
         : 'cost not reported');
       if (Number.isFinite(d.callsThisMinute)) bits.push(d.callsThisMinute + '/3 this minute');
     }
+
+    // The history note goes LAST but before any error, so the line still
+    // leads with what the lookup cost.
+    if (histBit) bits.push(histBit);
 
     if (d.error) bits.push('error: ' + d.error);
 
@@ -704,12 +769,26 @@
     const isFbm = /fbm/i.test(String(mode));
 
     if (!lastFees || !lastFees.found || sale == null || sale <= 0) {
-      const why = !lastFees
-        ? 'Not read yet.'
-        : (lastFees.found ? 'No sale price was read from this page.'
-            : 'Your data provider did not return ' + ((lastFees.missing || []).join(' or ') || 'the fee fields') + ' for this ASIN.');
+      // THREE different answers reach this one branch, and they used to
+      // render identically as "Not read yet" -- which is how a provider that
+      // returned half a fee answer looked the same as one that had not
+      // replied at all.
+      let label = LOADING;
+      let why = 'Asking your data provider for this ASIN.';
+      if (lastFees && !lastFees.found) {
+        label = 'fees not returned';
+        why = 'Your data provider did not return '
+          + ((lastFees.missing || []).join(' or ') || 'the fee fields')
+          + ' for this ASIN. A fee total built from one half is the exact '
+          + 'understatement that turns a thin margin into a good-looking one, '
+          + 'so nothing is shown instead.';
+      } else if (lastFees && (sale == null || sale <= 0)) {
+        label = 'no price on page';
+        why = 'No sale price was read from this page, so there is nothing for '
+          + 'fees to come out of.';
+      }
       for (const id of ['apx-fees', 'apx-profit', 'apx-roi-out', 'apx-sa-margin', 'apx-sa-maxcost']) {
-        setUnavailable($(id), NOT_READ, why);
+        setUnavailable($(id), label, why);
       }
       renderSim(null, null);
       return;
@@ -753,8 +832,21 @@
   function renderSim(sale, fees) {
     const slider = $('apx-sim-slider');
     const cost = money($('apx-cost') && $('apx-cost').value);
-    if (sale == null || fees == null || !slider) {
-      for (const id of ['apx-sim-sale', 'apx-sim-profit', 'apx-sim-roi']) setUnavailable($(id), NOT_READ);
+    if (!slider) return;
+    if (sale == null || fees == null) {
+      // The one place two states are not enough. Fees still coming is
+      // Loading; a page that shows a price RANGE instead of one price is
+      // neither loading nor missing from the build -- it is a fact about
+      // THIS page, so it says that and nothing more.
+      const loading = fees == null;
+      const label = loading ? LOADING : 'no single price';
+      const why = loading
+        ? 'Asking your data provider for the fee figures.'
+        : 'This page shows a price range rather than one price, so there is '
+          + 'no sale price to simulate from.';
+      for (const id of ['apx-sim-sale', 'apx-sim-profit', 'apx-sim-roi']) {
+        setUnavailable($(id), label, why);
+      }
       return;
     }
     // 0..100 maps to half..double the live price, with 50 sitting on it.

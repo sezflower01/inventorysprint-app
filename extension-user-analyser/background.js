@@ -414,6 +414,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
                 cached: true,
                 diag: { asin, marketplace: mkt, outcome: 'cached', ageMs: age,
                   status: hit.value.status ?? null, tokensConsumed: 0,
+                  history: hit.value.history || null,
                   error: hit.value.ok ? null : (hit.value.message || hit.value.error || null) },
               });
               break;
@@ -439,6 +440,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             tokensConsumed: Number.isFinite(r.tokensConsumed) ? r.tokensConsumed : null,
             tokensLeft: Number.isFinite(r.tokensLeft) ? r.tokensLeft : null,
             callsThisMinute: slot.used,
+            history: r.history || null,
             error: r.ok ? null : (r.message || null) };
 
           if (!r.ok) { sendResponse({ ok: false, code: r.code, error: r.message, diag }); break; }

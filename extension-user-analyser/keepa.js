@@ -260,6 +260,29 @@
       : { found: false, fbaFee: null, referralPct: null,
           missing: [packFee == null ? 'fulfilment fee' : null, refPct == null ? 'referral rate' : null].filter(Boolean) };
 
+    // ── history shape ──
+    // Keepa's /product defaults to history=1 and this file never sends
+    // history=0, so the csv series SHOULD be in every answer already paid
+    // for. panel.html has carried an #apx-history-chart canvas from the
+    // start with nothing drawing to it, and this function dropped p.csv on
+    // the floor -- so the series were bought and binned on every lookup.
+    //
+    // Reported as a SHAPE, not kept as data, deliberately. A 5-year csv
+    // across ~20 series is thousands of points; writing that per ASIN into
+    // chrome.storage.local could blow the quota and would be a worse bug
+    // than the missing chart. Measure first, then decide what to keep.
+    const csv = p.csv && typeof p.csv === 'object' ? p.csv : null;
+    const keys = csv ? Object.keys(csv).filter((k) => Array.isArray(csv[k])) : [];
+    const history = csv && keys.length
+      ? {
+          present: true,
+          series: keys.length,
+          indices: keys.slice(0, 32),
+          points: keys.reduce((n, k) => n + csv[k].length, 0),
+          bytes: JSON.stringify(csv).length,
+        }
+      : { present: false, series: 0, indices: [], points: 0, bytes: 0 };
+
     return {
       ok: true,
       asin: p.asin || null,
@@ -267,6 +290,7 @@
       title: p.title || null,
       rank,
       monthlySold,
+      history,
     };
   }
 

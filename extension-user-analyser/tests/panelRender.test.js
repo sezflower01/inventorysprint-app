@@ -48,9 +48,25 @@ const OLD = path.join(ROOT, '..', 'extension');
 // make every copy change a test failure while catching no real defect; what
 // these tests must catch is a digit or a verdict colour appearing in a field
 // nothing has answered yet.
-const NOT_READ = (fs.readFileSync(path.join(ROOT, 'panel.js'), 'utf8')
-  .match(/const NOT_READ = '([^']+)'/) || [])[1];
-assert.ok(NOT_READ, 'panel.js no longer declares a single NOT_READ label');
+// The panel carries TWO empty-state labels and the difference between them is
+// load-bearing, so both are derived from source rather than restated here. A
+// test that hardcodes the words passes while the panel says something else.
+//
+//   LOADING         an answer is coming this session
+//   NOT_IN_VERSION  nothing in this build computes it
+//
+// The single blanket label they replaced ("Not read yet") answered both
+// questions at once, which is what made "when WILL this be read?" an
+// unanswerable question from the panel alone.
+const PANEL_SRC = fs.readFileSync(path.join(ROOT, 'panel.js'), 'utf8');
+const LOADING = (PANEL_SRC.match(/const LOADING = '([^']+)'/) || [])[1];
+const NOT_IN_VERSION = (PANEL_SRC.match(/const NOT_IN_VERSION = '([^']+)'/) || [])[1];
+assert.ok(LOADING, 'panel.js no longer declares a single LOADING label');
+assert.ok(NOT_IN_VERSION, 'panel.js no longer declares a single NOT_IN_VERSION label');
+assert.notEqual(LOADING, NOT_IN_VERSION, 'the two empty states collapsed back into one label');
+// And the blanket label must not come back alongside them.
+assert.ok(!/const NOT_READ = '/.test(PANEL_SRC),
+  'the blanket not-read label is back, so the two states are no longer the only ones');
 const srcOf = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
 const URL_FOR = (asin) => `https://www.amazon.com/dp/${asin}`;
 
@@ -188,7 +204,9 @@ test('the gating row carries no verdict, no number and no colour', { skip }, () 
     // The eligibility chip in the decision table is backend-derived, so it
     // must say so and must not be coloured either.
     const chip = $('apx-sa-eligible');
-    assert.equal(chip.textContent.trim(), NOT_READ, `${f}: eligibility chip showed something else`);
+    // NOT the loading label: no amount of waiting makes this build read gating,
+    // so a spinner-ish label here would be a promise it cannot keep.
+    assert.equal(chip.textContent.trim(), NOT_IN_VERSION, `${f}: eligibility chip showed something else`);
     assert.ok(chip.classList.contains('apx-sa-unknown'), `${f}: eligibility chip is not in the unknown state`);
   }
 });
@@ -200,7 +218,9 @@ test('no money field ever shows a number we could not compute', { skip }, () => 
   for (const id of ['apx-fees', 'apx-profit', 'apx-roi-out', 'apx-sa-maxcost', 'apx-sa-margin', 'apx-sa-sales']) {
     const el = $(id);
     assert.ok(el, `${id} is missing from the markup`);
-    assert.equal(el.textContent.trim(), NOT_READ, `${id} showed something other than the not-read state`);
+    // These DO fill once the provider answers, so at first paint they must
+    // say so rather than claiming the build cannot produce them.
+    assert.equal(el.textContent.trim(), LOADING, `${id} showed something other than the loading state`);
     assert.ok(!/\d/.test(el.textContent), `${id} rendered a digit`);
     for (const c of ['apx-good', 'apx-bad', 'apx-warn']) {
       assert.ok(!el.classList.contains(c), `${id} carries the verdict class ${c}`);
@@ -418,4 +438,70 @@ test('the reading posted into the panel carries no backend-derived field', { ski
   for (const bad of ['fee', 'roi', 'profit', 'margin', 'refresh_token', 'access_token']) {
     assert.ok(!new RegExp(`\\b${bad}`, 'i').test(fn), `wireFormat passes "${bad}" into the panel`);
   }
+});
+
+test('every empty field is in exactly one of the two states, and the right one', { skip }, () => {
+  // THE LIST. This is the answer to "when will this be read?", enforced
+  // rather than described: a field that moves between these groups has to
+  // move here too, in the same commit, with a reason.
+  const reading = readFixture('01-normal.html', URL_FOR('B07XYZ1234'));
+  const { $ } = renderPanel(wire(reading));
+
+  // Provider-fed. An answer is seconds away; these are a first paint only.
+  const WILL_ARRIVE = [
+    'apx-fees', 'apx-profit', 'apx-roi-out', 'apx-sa-maxcost',
+    'apx-sa-margin', 'apx-sa-sales',
+    'apx-sim-sale', 'apx-sim-profit', 'apx-sim-roi',
+  ];
+
+  // Nothing in this build computes these. Each one is final until a version
+  // ships that changes it, and each has a different blocker:
+  //   eligible / pl        a Seller Central read, and an undefined judgement
+  //   history-verdict      the canvas exists; no chart code does
+  //   fba/fbm/amz/swing    a read of the offers panel on the page
+  //   dims                 a catalogue field this build never fetches
+  const WILL_NOT = [
+    'apx-sa-eligible', 'apx-sa-pl', 'apx-history-verdict',
+    'apx-fba', 'apx-fbm', 'apx-amz', 'apx-swing',
+    'apx-dims-pkg', 'apx-dims-pkg-wt', 'apx-dims-item', 'apx-dims-item-wt',
+  ];
+
+  for (const id of WILL_ARRIVE) {
+    const el = $(id);
+    assert.ok(el, id + ' is missing from the markup');
+    assert.equal(el.textContent.trim(), LOADING,
+      id + ' should be loading: it fills from the provider');
+  }
+  for (const id of WILL_NOT) {
+    const el = $(id);
+    assert.ok(el, id + ' is missing from the markup');
+    assert.equal(el.textContent.trim(), NOT_IN_VERSION,
+      id + ' should say it is absent from this build, not that it is loading');
+  }
+
+  // No overlap, or the classification is not a classification.
+  for (const id of WILL_ARRIVE) {
+    assert.ok(!WILL_NOT.includes(id), id + ' is in both states');
+  }
+
+  // Every empty label carries its reason. A bare "Not available in this
+  // version" with no tooltip is the same dead end as the label it replaced.
+  for (const id of WILL_ARRIVE.concat(WILL_NOT)) {
+    assert.ok(($(id).title || '').trim().length > 0,
+      id + ' shows an empty state with no explanation behind it');
+  }
+});
+
+test('the retired blanket label is gone from the rendered panel', { skip }, () => {
+  // "Not read yet" answered two questions at once and could not be acted on.
+  // It must not survive anywhere -- not in the markup, not in a template, not
+  // in one forgotten branch.
+  for (const f of ['01-normal.html', '02-no-buybox.html', '06-variation-parent.html', '07-sparse.html']) {
+    const reading = readFixture(f, URL_FOR('B07XYZ1234'));
+    const { window } = renderPanel(wire(reading));
+    const body = window.document.body.textContent;
+    assert.ok(!/not read yet/i.test(body), f + ': the retired not-read label is still rendered');
+  }
+  assert.ok(!/not read yet/i.test(srcOf('panel.html')),
+    'panel.html still ships the retired label as static markup');
 });

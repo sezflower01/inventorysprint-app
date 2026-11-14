@@ -165,8 +165,13 @@ test('a failed lookup names a reason on the tiles, not the not-read label', () =
   const bad = fn.slice(0, fn.indexOf('// Rank: the page is preferred'));
   assert.ok(/NEEDS_AMAZON/.test(bad),
     'the failure path no longer touches the dependent tiles, so they keep saying "not read yet"');
-  assert.ok(/NOT_READ/.test(bad) === false,
-    'the failure path writes the not-read label, which cannot be told from never having called');
+  // This used to test for NOT_READ, a constant that no longer exists -- which
+  // made the assertion pass for the wrong reason. The panel now has TWO
+  // empty-state labels and the failure path must write NEITHER: both of them
+  // describe a tile nobody has asked about yet, and this tile was asked about
+  // and refused.
+  assert.ok(!/\b(LOADING|NOT_IN_VERSION)\b/.test(bad),
+    'the failure path writes one of the two empty-state labels, so a refused lookup cannot be told from one that never happened');
 });
 
 test('every lookup reports what it cost, including a failed one', () => {
@@ -183,4 +188,41 @@ test('every lookup reports what it cost, including a failed one', () => {
   // The diagnostic must never carry the key.
   const diag = panel.slice(panel.indexOf('function renderDiag'), panel.indexOf('function renderRank'));
   assert.ok(!/getKey|\bkey\b\s*[:,)]/.test(diag), 'the diagnostic may be logging the key');
+});
+
+test('the series we already pay for are reported, not silently dropped', () => {
+  // Keepa's /product defaults to history=1 and keepa.js never sends
+  // history=0, so every lookup has been buying the price and rank series.
+  // summariseProduct kept six fields and binned the rest, and panel.html has
+  // carried an #apx-history-chart canvas the whole time with nothing drawing
+  // to it. That is a paid-for input thrown away on every call.
+  //
+  // This does NOT assert a chart exists. It asserts the panel can TELL you
+  // whether the data arrived, so the decision to build one rests on a
+  // measurement instead of on the provider's documentation.
+  const keepa = fs.readFileSync(path.join(ROOT, 'keepa.js'), 'utf8');
+  // Comments DISCUSS history=0; code must not SEND it. Strip them first --
+  // the comment explaining this very rule was what tripped this assertion.
+  const keepaCode = keepa.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(/history=0/.test(keepaCode) === false,
+    'keepa.js now opts out of history, so the series stop arriving');
+
+  const summary = keepa.slice(keepa.indexOf('function summariseProduct'),
+    keepa.indexOf('async function productSummary'));
+  assert.ok(/p\.csv/.test(summary), 'summariseProduct no longer looks at the series at all');
+  assert.ok(/present:/.test(summary) && /bytes:/.test(summary),
+    'the history report no longer carries a size, so the caching decision has nothing to stand on');
+
+  // Shape only. Keeping the arrays in the answer is a separate decision that
+  // depends on the measured size -- a 5-year csv per ASIN in
+  // chrome.storage.local could blow the quota, which would be a worse bug
+  // than the missing chart.
+  assert.ok(!/csv,$/m.test(summary),
+    'the raw series are returned now; if that is deliberate, cap or downsample them first');
+
+  // And the worker must pass the report through on BOTH paths, or a cached
+  // answer would look like one that carried nothing.
+  const h = productHandler();
+  assert.equal((h.match(/history:/g) || []).length, 2,
+    'the history report is not carried on both the cached and the called path');
 });
