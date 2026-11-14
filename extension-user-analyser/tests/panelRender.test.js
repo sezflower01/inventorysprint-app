@@ -453,6 +453,10 @@ test('every empty field is in exactly one of the two states, and the right one',
     'apx-fees', 'apx-profit', 'apx-roi-out', 'apx-sa-maxcost',
     'apx-sa-margin', 'apx-sa-sales',
     'apx-sim-sale', 'apx-sim-profit', 'apx-sim-roi',
+    // Dimensions ride along on the SAME product lookup as the fees, so they
+    // arrive with them. They were in the absent group while this build did
+    // not fetch them at all.
+    'apx-dims-pkg', 'apx-dims-pkg-wt', 'apx-dims-item', 'apx-dims-item-wt',
   ];
 
   // Nothing in this build computes these. Each one is final until a version
@@ -466,7 +470,6 @@ test('every empty field is in exactly one of the two states, and the right one',
     // apx-swing is "3M swing" -- a PRICE-HISTORY figure, not an offer spread.
     // It looks like it belongs with the offer rows below and does not.
     'apx-swing',
-    'apx-dims-pkg', 'apx-dims-pkg-wt', 'apx-dims-item', 'apx-dims-item-wt',
   ];
 
   // A THIRD state, and it had to exist. These three fill from the offers

@@ -260,6 +260,46 @@
       : { found: false, fbaFee: null, referralPct: null,
           missing: [packFee == null ? 'fulfilment fee' : null, refPct == null ? 'referral rate' : null].filter(Boolean) };
 
+    // ── dimensions and weight ──
+    //
+    // The provider returns these in MILLIMETRES and GRAMS, and uses -1 for
+    // "no data" -- the same marker that index 3 of stats uses for an
+    // absent sales rank, and the same trap: -1 is a perfectly valid-looking number, so
+    // anything not strictly positive is absent rather than small.
+    //
+    // ⚠️ THE FIELD NAMES AND UNITS HERE ARE FROM THE PROVIDER'S DOCS, NOT
+    // FROM A RESPONSE. Nothing in this repo has yet seen a product answer
+    // that carries them, because the first lookup to report its own shape
+    // only shipped in bec6fb1. So the reader reports WHICH of the eight
+    // fields arrived, on the diagnostic line, and one real lookup confirms
+    // both the names and the scale at once: a trading-card box reading 320
+    // is millimetres, one reading 32 is centimetres, and one reading 0 means
+    // the names are wrong. Until then the tiles stay empty with a reason.
+    //
+    // NO DIMENSIONAL WEIGHT IS COMPUTED. Amazon bills bulky items on
+    // dimensional weight, not actual, and this repo has already been burned
+    // by a fee quote that used the wrong one -- the authority for that is
+    // get_asin_fba_fee_basis, server-side, never a tier table guessed here.
+    const mm = (v) => (Number.isFinite(v) && v > 0 ? v : null);
+    const dimSet = (h, l, w, g) => {
+      const dims = [mm(p[h]), mm(p[l]), mm(p[w])];
+      return {
+        mm: dims.every((x) => x != null) ? dims : null,
+        grams: mm(p[g]),
+        missing: [
+          dims.some((x) => x == null) ? 'dimensions' : null,
+          mm(p[g]) == null ? 'weight' : null,
+        ].filter(Boolean),
+      };
+    };
+    const dims = {
+      pkg: dimSet('packageHeight', 'packageLength', 'packageWidth', 'packageWeight'),
+      item: dimSet('itemHeight', 'itemLength', 'itemWidth', 'itemWeight'),
+      // Exactly which keys the response actually carried, for the diagnostic.
+      keysSeen: ['packageHeight', 'packageLength', 'packageWidth', 'packageWeight',
+        'itemHeight', 'itemLength', 'itemWidth', 'itemWeight'].filter((k) => mm(p[k]) != null),
+    };
+
     // ── history shape ──
     // Keepa's /product defaults to history=1 and this file never sends
     // history=0, so the csv series SHOULD be in every answer already paid
@@ -290,6 +330,7 @@
       title: p.title || null,
       rank,
       monthlySold,
+      dims,
       history,
     };
   }

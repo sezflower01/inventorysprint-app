@@ -342,6 +342,73 @@
     }
   }
 
+  // ── dimensions and weight ───────────────────────────────────────────────
+  //
+  // The provider answers in millimetres and grams. Shown in the unit the
+  // marketplace actually sells in, ALWAYS with the unit printed, because a
+  // bare "12.6 x 9.1 x 3.1" beside a US fee calculation reads as inches to a
+  // US seller and as centimetres to a European one, and those differ by 2.5x.
+  // The provider's own figures stay in the tooltip so the conversion can be
+  // checked rather than trusted.
+  const IMPERIAL = { US: true, CA: true, MX: true, BR: true };
+
+  function renderDims(dims, marketplace) {
+    const src = $('apx-dims-source');
+    const imperial = !!IMPERIAL[String(marketplace || 'US').toUpperCase()];
+
+    const show = (dimId, wtId, set, what) => {
+      const dEl = $(dimId);
+      const wEl = $(wtId);
+      if (!set || (!set.mm && set.grams == null)) {
+        const why = 'Your data provider returned no ' + what + ' for this ASIN.';
+        setUnavailable(dEl, 'not returned', why);
+        setUnavailable(wEl, 'not returned', why);
+        return;
+      }
+      if (set.mm && dEl) {
+        const n = imperial ? set.mm.map((x) => x / 25.4) : set.mm.map((x) => x / 10);
+        dEl.textContent = n.map((x) => x.toFixed(1)).join(' \u00d7 ') + (imperial ? ' in' : ' cm');
+        dEl.classList.remove('apx-sa-unknown');
+        dEl.title = 'Provider figures: ' + set.mm.join(' \u00d7 ') + ' mm.';
+      } else {
+        setUnavailable(dEl, 'not returned',
+          'Your data provider returned no ' + what + ' dimensions for this ASIN.');
+      }
+      if (set.grams != null && wEl) {
+        wEl.textContent = imperial
+          ? (set.grams / 453.59237).toFixed(2) + ' lb'
+          : (set.grams / 1000).toFixed(3) + ' kg';
+        wEl.classList.remove('apx-sa-unknown');
+        // NO DIMENSIONAL WEIGHT. Amazon bills bulky items on dimensional
+        // weight and this is the actual weight; saying so stops the figure
+        // being read as a fee input.
+        wEl.title = 'Provider figure: ' + set.grams + ' g. This is ACTUAL weight. '
+          + 'Amazon bills bulky items on dimensional weight, so do not use this '
+          + 'to work out a fulfilment fee.';
+      } else {
+        setUnavailable(wEl, 'not returned',
+          'Your data provider returned no ' + what + ' weight for this ASIN.');
+      }
+    };
+
+    if (!dims) {
+      for (const id of ['apx-dims-pkg', 'apx-dims-pkg-wt', 'apx-dims-item', 'apx-dims-item-wt']) {
+        setUnavailable($(id), LOADING, 'Asking your data provider for this ASIN.');
+      }
+      if (src) src.textContent = '\u2014';
+      return;
+    }
+    show('apx-dims-pkg', 'apx-dims-pkg-wt', dims.pkg, 'package');
+    show('apx-dims-item', 'apx-dims-item-wt', dims.item, 'item');
+    if (src) {
+      const any = (dims.keysSeen || []).length;
+      src.textContent = any ? 'from your data provider' : '\u2014';
+      src.title = any
+        ? any + ' of 8 dimension fields were returned for this ASIN.'
+        : 'No dimension field was returned for this ASIN.';
+    }
+  }
+
   function renderOffers(o) {
     if (!o) { renderSellersPending(); return; }
     if (o.state === 'loading') { renderOffersLoading(o); return; }
@@ -481,13 +548,14 @@
       if (count) count.textContent = r.sellerCount && r.sellerCount.found ? String(r.sellerCount.text) : '—';
     }
 
-    // Dimensions are an SP-API catalogue field in the original.
-    for (const id of ['apx-dims-pkg', 'apx-dims-pkg-wt', 'apx-dims-item', 'apx-dims-item-wt']) {
-      setUnavailable($(id), NOT_IN_VERSION,
-        'A catalogue field this build does not fetch.');
-    }
-    const dsrc = $('apx-dims-source');
-    if (dsrc) dsrc.textContent = '—';
+    // Dimensions WERE blanked here as an SP-API field this build does not
+    // fetch. They come from the data provider now -- and this block ran
+    // AFTER the provider answer had already filled them, so on a re-read it
+    // wiped them. That is the third instance of this exact overwrite in this
+    // file: a legacy blanking block left in place downstream of the code
+    // that now fills the same elements. It paints the waiting state only,
+    // and only while no answer is in hand.
+    if (!lastRank || !lastRank.ok) renderDims(null, r.marketplace);
 
     const cached = $('apx-cached');
     if (cached) cached.textContent = 'Read from this page in your browser. No seller account was used.';
@@ -716,6 +784,14 @@
     // to it, and summariseProduct dropped the arrays before the cache was
     // even written -- so this has been bought and binned on every lookup.
     // Reported as a shape so the caching decision rests on real sizes.
+    // Which dimension keys the provider actually sent. Printed because the
+    // field names above are from the docs and have never been seen in a real
+    // response: "dims: 0/8 keys" means the names are wrong, not that the ASIN
+    // has no box.
+    const dk = d.dimKeys;
+    const dimBit = !Array.isArray(dk) ? null
+      : (dk.length ? 'dims: ' + dk.length + '/8 keys' : 'dims: no keys returned');
+
     const h = d.history;
     const histBit = !h ? null
       : (h.present
@@ -740,6 +816,7 @@
     // The history note goes LAST but before any error, so the line still
     // leads with what the lookup cost.
     if (histBit) bits.push(histBit);
+    if (dimBit) bits.push(dimBit);
 
     if (d.error) bits.push('error: ' + d.error);
 
@@ -791,6 +868,9 @@
 
     lastFees = res.fees || null;
     renderMoney();
+    // Same answer, same call: dimensions ride along on the product lookup
+    // that was already paid for, so this costs no extra token.
+    renderDims(res.dims || null, (lastReading && lastReading.marketplace) || 'US');
 
     // Units: Amazon’s own "bought in past month", passed straight through.
     // Absent is a REAL answer -- Amazon does not publish it for every ASIN --

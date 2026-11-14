@@ -212,3 +212,87 @@ test('Max Cost targets the same ROI as the Analyzer', () => {
   assert.ok(mine, 'the Max Cost formula has gone');
   assert.equal(mine[1], '1.30', 'the Max Cost ROI target changed');
 });
+
+test('dimensions: -1 is absent, not a small box', () => {
+  // The provider uses -1 for "no data" on these exactly as it does for the
+  // rank, and it is the same trap: -1 is a valid-looking number, so anything
+  // not strictly positive is absent rather than tiny.
+  const full = KEEPA.summariseProduct(body({
+    packageHeight: 80, packageLength: 320, packageWidth: 230, packageWeight: 1180,
+    itemHeight: 70, itemLength: 310, itemWidth: 220, itemWeight: 1100,
+  }));
+  assert.deepEqual(full.dims.pkg.mm, [80, 320, 230]);
+  assert.equal(full.dims.pkg.grams, 1180);
+  assert.deepEqual(full.dims.item.mm, [70, 310, 220]);
+  assert.equal(full.dims.keysSeen.length, 8);
+
+  for (const bad of [-1, 0, null, undefined, 'x']) {
+    const r = KEEPA.summariseProduct(body({
+      packageHeight: bad, packageLength: 320, packageWidth: 230, packageWeight: bad,
+    }));
+    assert.equal(r.dims.pkg.mm, null, 'a ' + bad + ' dimension produced a box');
+    assert.equal(r.dims.pkg.grams, null, 'a ' + bad + ' weight produced a weight');
+    assert.ok(r.dims.pkg.missing.includes('dimensions'), 'the missing half is not named');
+    assert.ok(r.dims.pkg.missing.includes('weight'));
+  }
+
+  // A PARTIAL box is no box. Two of three sides cannot be shown as
+  // dimensions, and filling the third from somewhere would be a guess.
+  const partial = KEEPA.summariseProduct(body({
+    packageHeight: 80, packageLength: 320, packageWeight: 1180,
+  }));
+  assert.equal(partial.dims.pkg.mm, null, 'two sides out of three rendered as a box');
+  assert.equal(partial.dims.pkg.grams, 1180, 'the weight was dropped with the dimensions');
+});
+
+test('dimensions: the field names are unverified, so the shape is reported', () => {
+  // ⚠️ The eight field names come from the provider's DOCS. No response in
+  // this repo has carried them, so keysSeen exists to settle it on the first
+  // real lookup: 8/8 means the names are right, 0/8 means they are not, and
+  // a trading-card box reading 320 is millimetres while one reading 32 is
+  // centimetres. Until then the tiles stay empty with a reason, and that is
+  // why this test checks the REPORTING rather than the values.
+  const none = KEEPA.summariseProduct(body());
+  assert.deepEqual(none.dims.keysSeen, [], 'keys were reported that did not arrive');
+  assert.equal(none.dims.pkg.mm, null);
+
+  const some = KEEPA.summariseProduct(body({ packageWeight: 1180, itemWeight: 1100 }));
+  assert.deepEqual(some.dims.keysSeen, ['packageWeight', 'itemWeight'],
+    'keysSeen no longer names exactly which fields arrived');
+
+  // And the worker must pass it to the diagnostic on both paths.
+  const bg = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
+  assert.equal((bg.match(/dimKeys:/g) || []).length, 2,
+    'the dimension-key report is not carried on both the cached and called path');
+});
+
+test('no dimensional weight is ever computed here', () => {
+  // Amazon bills bulky items on DIMENSIONAL weight, not actual, and this repo
+  // has already shipped a fee quote that used the wrong one. The authority is
+  // get_asin_fba_fee_basis, server-side. A girth or volume calculation
+  // appearing in this file is that bug coming back.
+  const src = fs.readFileSync(path.join(ROOT, 'keepa.js'), 'utf8');
+  const code = src.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(!/139|166|dimWeight|dimensionalWeight|girth/i.test(code),
+    'keepa.js is computing a dimensional weight or a divisor');
+
+  const panel = fs.readFileSync(path.join(ROOT, 'panel.js'), 'utf8');
+  const slice = panel.slice(panel.indexOf('function renderDims'), panel.indexOf('function renderOffers(o)'));
+  assert.ok(!/dimWeight|dimensionalWeight|girth/i.test(slice.replace(/\/\/[^\n]*/g, '')),
+    'the panel is computing a dimensional weight');
+  // The weight tooltip must say which weight it is, or it reads as a fee input.
+  assert.match(slice, /ACTUAL weight/, 'the weight no longer states that it is the actual weight');
+});
+
+test('dimensions are shown in the unit the marketplace sells in', () => {
+  // A bare "12.6 x 9.1 x 3.1" beside a US fee calculation reads as inches to
+  // a US seller and centimetres to a European one, and those differ by 2.5x.
+  const panel = fs.readFileSync(path.join(ROOT, 'panel.js'), 'utf8');
+  const slice = panel.slice(panel.indexOf('function renderDims'), panel.indexOf('function renderOffers(o)'));
+  assert.match(slice, /25\.4/, 'the millimetre-to-inch conversion has gone');
+  assert.match(slice, /453\.59/, 'the gram-to-pound conversion has gone');
+  assert.match(slice, /' in'|" in"/, 'the inch unit is no longer printed');
+  assert.match(slice, /' cm'|" cm"/, 'the centimetre unit is no longer printed');
+  // The provider's own figures stay available, so the conversion is checkable.
+  assert.match(slice, /mm\./, 'the raw provider figures are no longer in the tooltip');
+});
