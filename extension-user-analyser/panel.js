@@ -68,7 +68,7 @@
     $('apx-version').textContent = '';
   }
 
-  // ── fields that need an Amazon connection ───────────────────────────────
+  // ── fields that need the user signed in to Seller Central ────────────────────
   //
   // Listed explicitly rather than derived, so that adding a tile is a
   // decision about where its number comes from and not an oversight.
@@ -92,14 +92,26 @@
   // in this browser -- which is the reason this extension exists apart from the
   // Analyzer. Until that call is wired these fields are simply not read yet,
   // and the label should say that and nothing more.
-  const NOT_READ = 'Not checked yet';
+  // The label on every tile that waits on Seller Central. It names the
+  // REQUIREMENT, not our implementation status: “Not checked yet” described
+  // this code's state, which is not something the user can act on.
+  //
+  // The honest caveat lives in the tooltip and in the paragraph under the
+  // decision strip: being signed in is necessary but not yet sufficient,
+  // because the read itself is not wired up. Without that caveat this label
+  // would send an already-signed-in user to sign in again.
+  const NOT_READ = 'Sign in to Seller Central';
 
   function setUnavailable(el, text, why) {
     if (!el) return;
     el.textContent = text;
     el.classList.remove(...VERDICT_CLASSES);
     el.classList.add('apx-sa-unknown');
-    el.title = why || 'Not read yet — this comes from your own Seller Central session.';
+    el.title = why
+      || 'Read from your own Amazon Seller Central session, in this browser. '
+       + 'Sign in to Seller Central in this tab’s browser — no account connection '
+       + 'is needed. This version does not make that read yet, so signing in will '
+       + 'not fill this field on its own.';
   }
 
   function renderNeedsAmazon() {
@@ -122,10 +134,11 @@
     const why = $('apx-dm-why');
     if (why) {
       why.textContent =
-        'Gating and fees are read from your own Amazon Seller Central session, '
-        + 'in this browser — no account connection is needed. That call is not '
-        + 'wired up yet, so nothing below is a verdict. Everything above was '
-        + 'read from this page and is already correct.';
+        'Please sign in to Amazon Seller Central in this browser. Gating and fees '
+        + 'are read from your own Seller Central session — no account connection is '
+        + 'needed, and no seller credentials are used. That read is not wired up in '
+        + 'this version yet, so nothing below is a verdict. Everything above was read '
+        + 'from this page, or from your own data provider key, and is already correct.';
     }
     const fd = $('apx-final-decision');
     if (fd) { fd.className = 'apx-final-decision unknown'; }
@@ -197,6 +210,7 @@
     // Price goes to the read-only Sale input, same as the original.
     const sale = $('apx-sale');
     if (sale) sale.value = r.price && r.price.found ? String(r.price.text) : '';
+    lastSale = r.price && r.price.found ? money(r.price.text) : null;
 
     // Status pill: the gating statement, with no verdict attached. readPage's
     // gatingNotice() exists precisely because this cannot be answered from a
@@ -221,8 +235,12 @@
       const empty = document.createElement('div');
       empty.className = 'apx-sellers-empty apx-k';
       empty.textContent = r.buyBoxSeller && r.buyBoxSeller.found
-        ? `Buy Box: ${r.buyBoxSeller.text} — the full offer list needs an Amazon connection`
-        : 'The offer list needs an Amazon connection';
+        // NOT “needs an Amazon connection”. It does not, and saying so told the
+        // user to go and do something that would not help -- the whole point of
+        // this extension is that no account connection exists. What the full
+        // list needs is a read of the offers panel in this browser.
+        ? `Buy Box: ${r.buyBoxSeller.text} — full offer list not read yet`
+        : 'Offer list not read yet';
       list.appendChild(empty);
     }
     const count = $('apx-sellers-count');
@@ -309,7 +327,7 @@
     const pass = passEl();
     showAuthError('');
     if (mode === 'signup') {
-      if (intro) intro.textContent = 'Create an InventorySprint account. No Amazon connection needed to read product pages.';
+      if (intro) intro.textContent = 'Create an InventorySprint account. Reading product pages needs no Amazon connection — just be signed in to Amazon Seller Central in this browser.';
       if (submit) submit.textContent = 'Create account';
       if (toggle) toggle.textContent = 'I already have an account';
       // Tells a password manager to offer a NEW password rather than fill an
@@ -438,21 +456,25 @@
       }
     }
 
+    lastFees = res.fees || null;
+    renderMoney();
+
     // Units: Amazon’s own "bought in past month", passed straight through.
     // Absent is a REAL answer -- Amazon does not publish it for every ASIN --
     // and it is not the same as "not checked".
-    if (res.monthlySold && res.monthlySold.found) {
-      if (sales) {
-        sales.textContent = res.monthlySold.text;
-        sales.classList.remove('apx-sa-unknown');
-        sales.title = 'Units bought in the past month, as published by Amazon'
+    const est = estMonthly(res.monthlySold, res.rank);
+    if (est && sales) {
+      sales.textContent = est.text;
+      sales.classList.remove('apx-sa-unknown');
+      sales.title = est.estimated
+        ? 'ESTIMATED from sales rank, using the same formula as the Analyzer. '
+          + 'Amazon does not publish a units figure for this ASIN. The estimate is '
+          + 'category-blind, so treat it as an order of magnitude, not a number.'
+        : 'Units bought in the past month, as published by Amazon'
           + (res.cached ? ' (cached)' : '');
-      }
     } else {
       setUnavailable(sales, 'not available',
-        'Amazon does not publish a monthly units figure for this ASIN. This panel '
-        + 'will not substitute an estimate derived from rank, because no source '
-        + 'stands behind that number.');
+        'Neither a published units figure nor a sales rank came back for this ASIN.');
     }
   }
 
@@ -481,6 +503,141 @@
       renderRank({ ok: false, error: 'Could not reach the extension worker.' });
     }
   }
+
+  // ── money ──────────────────────────────────────────────────
+  //
+  // Every formula here is copied from extension/panel.js so the two panels
+  // cannot disagree about the same ASIN. A test pins the Est/mo coefficients
+  // to that file, because a silent drift between the two would be invisible
+  // until a seller compared them and stopped trusting both.
+
+  let lastFees = null;   // { found, fbaFee, referralPct } from the provider
+  let lastSale = null;   // the page price, as a number
+
+  const money = (s) => {
+    const n = parseFloat(String(s == null ? '' : s).replace(/[^0-9.\-]/g, ''));
+    return Number.isFinite(n) ? n : null;
+  };
+  const fmt = (n) => (n == null ? '\u2014' : '$' + n.toFixed(2));
+  const pct = (n) => (n == null ? '\u2014' : n.toFixed(0) + '%');
+
+  /**
+   * Units a month. Amazon’s own published figure when there is one; otherwise
+   * the SAME power-law fallback extension/panel.js uses, so the two panels
+   * agree. It is a heuristic with no citation and it is category-blind -- a
+   * rank of 263,045 means something different in Tools than in Books -- so it
+   * is labelled as an estimate wherever it is shown, and the published figure
+   * always wins when Amazon supplies one.
+   */
+  function estMonthly(published, rank) {
+    if (published && published.found) return { value: published.value, text: published.text, estimated: false };
+    if (!(rank && rank.found && rank.value > 0)) return null;
+    const n = Math.max(1, Math.round(100000 * Math.pow(rank.value, -0.6)));
+    return { value: n, text: '~' + n.toLocaleString(), estimated: true };
+  }
+
+  function setMoney(id, text, cls) {
+    const el = $(id);
+    if (!el) return;
+    el.textContent = text;
+    el.classList.remove('apx-sa-unknown', 'apx-good', 'apx-warn', 'apx-bad');
+    if (cls) el.classList.add(cls);
+  }
+
+  const roiClass = (r) => (r == null ? null : r >= 30 ? 'apx-good' : r >= 15 ? 'apx-warn' : 'apx-bad');
+  const marginClass = (m) => (m == null ? null : m >= 20 ? 'apx-good' : m >= 10 ? 'apx-warn' : 'apx-bad');
+
+  /**
+   * Fees, and everything that follows from them.
+   *
+   * FBM deliberately drops the fulfilment fee and says so: the seller’s own
+   * shipping and packing replace it, and this panel does not know that cost.
+   * Leaving the FBA fee in would overstate fees; silently dropping it without
+   * a note would understate them.
+   */
+  function renderMoney() {
+    const sale = lastSale != null ? lastSale : money($('apx-sale') && $('apx-sale').value);
+    const cost = money($('apx-cost') && $('apx-cost').value);
+    const mode = ($('apx-seller-mode') && $('apx-seller-mode').value) || 'FBA';
+    const isFbm = /fbm/i.test(String(mode));
+
+    if (!lastFees || !lastFees.found || sale == null || sale <= 0) {
+      const why = !lastFees
+        ? 'Not read yet.'
+        : (lastFees.found ? 'No sale price was read from this page.'
+            : 'Your data provider did not return ' + ((lastFees.missing || []).join(' or ') || 'the fee fields') + ' for this ASIN.');
+      for (const id of ['apx-fees', 'apx-profit', 'apx-roi-out', 'apx-sa-margin', 'apx-sa-maxcost']) {
+        setUnavailable($(id), NOT_READ, why);
+      }
+      renderSim(null, null);
+      return;
+    }
+
+    const referral = sale * (lastFees.referralPct / 100);
+    const fulfil = isFbm ? 0 : lastFees.fbaFee;
+    const fees = referral + fulfil;
+
+    const feesEl = $('apx-fees');
+    setMoney('apx-fees', fmt(fees));
+    if (feesEl) {
+      feesEl.title = 'Referral ' + fmt(referral) + ' at ' + lastFees.referralPct + '%'
+        + (isFbm ? ' \u2014 no fulfilment fee on FBM, and your own shipping is NOT included'
+                 : ' + fulfilment ' + fmt(fulfil))
+        + '. From your data provider. Storage and long-term fees are not included.';
+    }
+
+    // Max Cost authorises what you may pay, so it uses the same 30% ROI
+    // target as the Analyzer. It does not depend on the cost you entered.
+    setMoney('apx-sa-maxcost', fmt(Math.max(0, (sale - fees) / 1.30)), 'apx-good');
+
+    if (cost == null || cost <= 0) {
+      for (const id of ['apx-profit', 'apx-roi-out', 'apx-sa-margin']) {
+        setUnavailable($(id), '\u2014', 'Enter your total cost.');
+      }
+      renderSim(sale, fees);
+      return;
+    }
+
+    const profit = sale - fees - cost;
+    const roi = (profit / cost) * 100;
+    const margin = (profit / sale) * 100;
+    setMoney('apx-profit', fmt(profit), profit >= 0 ? 'apx-good' : 'apx-bad');
+    setMoney('apx-roi-out', pct(roi), roiClass(roi));
+    setMoney('apx-sa-margin', pct(margin), marginClass(margin));
+    renderSim(sale, fees);
+  }
+
+  /** The slider walks the sale price; fees follow it, because referral is a %. */
+  function renderSim(sale, fees) {
+    const slider = $('apx-sim-slider');
+    const cost = money($('apx-cost') && $('apx-cost').value);
+    if (sale == null || fees == null || !slider) {
+      for (const id of ['apx-sim-sale', 'apx-sim-profit', 'apx-sim-roi']) setUnavailable($(id), NOT_READ);
+      return;
+    }
+    // 0..100 maps to half..double the live price, with 50 sitting on it.
+    const f = Number(slider.value);
+    const simSale = sale * (f <= 50 ? 0.5 + (f / 50) * 0.5 : 1 + ((f - 50) / 50));
+    const mode = ($('apx-seller-mode') && $('apx-seller-mode').value) || 'FBA';
+    const fulfil = /fbm/i.test(String(mode)) ? 0 : (lastFees ? lastFees.fbaFee : 0);
+    const simFees = simSale * (lastFees.referralPct / 100) + fulfil;
+    setMoney('apx-sim-sale', fmt(simSale));
+    const v = $('apx-sim-val');
+    if (v) v.textContent = fmt(simSale);
+    if (cost == null || cost <= 0) {
+      for (const id of ['apx-sim-profit', 'apx-sim-roi']) setUnavailable($(id), '\u2014', 'Enter your total cost.');
+      return;
+    }
+    const p = simSale - simFees - cost;
+    setMoney('apx-sim-profit', fmt(p), p >= 0 ? 'apx-good' : 'apx-bad');
+    setMoney('apx-sim-roi', pct((p / cost) * 100), roiClass((p / cost) * 100));
+  }
+
+  $('apx-cost')?.addEventListener('input', renderMoney);
+  $('apx-seller-mode')?.addEventListener('change', renderMoney);
+  $('apx-sim-slider')?.addEventListener('input', () => renderSim(lastSale, lastFees && lastFees.found && lastSale != null
+    ? lastSale * (lastFees.referralPct / 100) + lastFees.fbaFee
+    : null));
 
   // ── the API-key gate ────────────────────────────────────────────────────
   //

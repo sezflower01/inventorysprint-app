@@ -230,9 +230,30 @@
       };
     }
 
+    // ── fees ──
+    // Read ONLY if the provider actually sent them. There is no default and
+    // no assumed referral rate: this repo has already been burned by a fee
+    // figure that was too low (a referral quoted against the wrong price hid
+    // $4.35 a unit and turned a 49% ROI into a reported 66%). A fee tile that
+    // says "not found" costs the user a lookup; one that is too low costs
+    // them the purchase.
+    //
+    // Both halves are required. A pick-and-pack with no referral percentage
+    // cannot produce a fee total, and filling the gap with a nominal 15%
+    // would be exactly the understatement described above.
+    const packFee = p.fbaFees && Number.isFinite(p.fbaFees.pickAndPackFee)
+      ? p.fbaFees.pickAndPackFee
+      : null;
+    const refPct = Number.isFinite(p.referralFeePercent) ? p.referralFeePercent : null;
+    const fees = (packFee != null && packFee >= 0 && refPct != null && refPct > 0)
+      ? { found: true, fbaFee: packFee / 100, referralPct: refPct }
+      : { found: false, fbaFee: null, referralPct: null,
+          missing: [packFee == null ? 'fulfilment fee' : null, refPct == null ? 'referral rate' : null].filter(Boolean) };
+
     return {
       ok: true,
       asin: p.asin || null,
+      fees,
       title: p.title || null,
       rank,
       monthlySold,

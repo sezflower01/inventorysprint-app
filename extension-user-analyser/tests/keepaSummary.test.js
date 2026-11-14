@@ -139,3 +139,67 @@ test('the offers parameter stays off the product call', () => {
   const slice = src.slice(src.indexOf('async function product('), src.indexOf('function summariseProduct'));
   assert.ok(!/offers\s*:/.test(slice), 'the product call now asks for offers');
 });
+
+test('fees are read only when BOTH halves arrived', () => {
+  // A fulfilment fee with no referral rate cannot make a fee total, and
+  // filling the gap with a nominal 15% is the exact understatement that once
+  // turned a 49% ROI into a reported 66% in this repo.
+  const withFees = (over) => body(over);
+
+  let r = KEEPA.summariseProduct(withFees({ fbaFees: { pickAndPackFee: 437 }, referralFeePercent: 15 }));
+  assert.equal(r.fees.found, true);
+  // Provider amounts are integer cents. Reading 437 as dollars would quote a
+  // $437 fulfilment fee; reading it as 4.37 is the only correct scale.
+  assert.equal(r.fees.fbaFee, 4.37);
+  assert.equal(r.fees.referralPct, 15);
+
+  for (const over of [
+    { fbaFees: { pickAndPackFee: 437 } },
+    { referralFeePercent: 15 },
+    { fbaFees: {}, referralFeePercent: 15 },
+    { fbaFees: { pickAndPackFee: 437 }, referralFeePercent: 0 },
+    {},
+  ]) {
+    r = KEEPA.summariseProduct(withFees(over));
+    assert.equal(r.fees.found, false, JSON.stringify(over));
+    assert.equal(r.fees.fbaFee, null, JSON.stringify(over));
+    assert.ok(Array.isArray(r.fees.missing), 'a partial fee answer must say what was missing');
+  }
+});
+
+test('a zero fulfilment fee is a real answer, not a missing one', () => {
+  // Some products genuinely carry no pick-and-pack. Treating 0 as absent
+  // would blank the whole fee tile for them.
+  const r = KEEPA.summariseProduct(body({ fbaFees: { pickAndPackFee: 0 }, referralFeePercent: 8 }));
+  assert.equal(r.fees.found, true);
+  assert.equal(r.fees.fbaFee, 0);
+});
+
+test('the two panels agree on the units formula', () => {
+  // Est/mo falls back to a power law when Amazon publishes no figure. The
+  // Analyzer has its own copy of that formula. If the two drift, the same
+  // ASIN shows two different numbers in two panels on the same screen, and
+  // the seller has no way to tell which to believe -- so they stop believing
+  // both. Nothing else pins these constants together.
+  const RX = /Math\.round\(\s*(\d+)\s*\*\s*Math\.pow\([^,]+,\s*(-?[\d.]+)\s*\)\s*\)/;
+
+  const mine = fs.readFileSync(path.join(ROOT, 'panel.js'), 'utf8').match(RX);
+  assert.ok(mine, 'this panel no longer carries the units formula');
+
+  const theirsPath = path.join(ROOT, '..', 'extension', 'panel.js');
+  if (!fs.existsSync(theirsPath)) return; // the sibling is not checked out
+  const theirs = fs.readFileSync(theirsPath, 'utf8').match(RX);
+  assert.ok(theirs, 'the Analyzer no longer carries the units formula -- check whether it changed source');
+
+  assert.equal(mine[1], theirs[1], 'the coefficient drifted from the Analyzer');
+  assert.equal(mine[2], theirs[2], 'the exponent drifted from the Analyzer');
+});
+
+test('Max Cost targets the same ROI as the Analyzer', () => {
+  // Max Cost authorises what the user may pay. A divisor that drifts here
+  // authorises overpaying, silently.
+  const RX = /\(\s*sale\s*-\s*(?:unit)?[Ff]ees\s*\)\s*\/\s*([\d.]+)/;
+  const mine = fs.readFileSync(path.join(ROOT, 'panel.js'), 'utf8').match(RX);
+  assert.ok(mine, 'the Max Cost formula has gone');
+  assert.equal(mine[1], '1.30', 'the Max Cost ROI target changed');
+});

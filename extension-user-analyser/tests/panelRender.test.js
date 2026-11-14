@@ -43,6 +43,14 @@ try {
 const ROOT = path.join(__dirname, '..');
 const FIX = path.join(__dirname, 'fixtures');
 const OLD = path.join(ROOT, '..', 'extension');
+
+// The not-read label, read from panel.js. Asserting the WORDING here would
+// make every copy change a test failure while catching no real defect; what
+// these tests must catch is a digit or a verdict colour appearing in a field
+// nothing has answered yet.
+const NOT_READ = (fs.readFileSync(path.join(ROOT, 'panel.js'), 'utf8')
+  .match(/const NOT_READ = '([^']+)'/) || [])[1];
+assert.ok(NOT_READ, 'panel.js no longer declares a single NOT_READ label');
 const srcOf = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
 const URL_FOR = (asin) => `https://www.amazon.com/dp/${asin}`;
 
@@ -180,7 +188,7 @@ test('the gating row carries no verdict, no number and no colour', { skip }, () 
     // The eligibility chip in the decision table is backend-derived, so it
     // must say so and must not be coloured either.
     const chip = $('apx-sa-eligible');
-    assert.equal(chip.textContent.trim(), 'Not checked yet', `${f}: eligibility chip showed something else`);
+    assert.equal(chip.textContent.trim(), NOT_READ, `${f}: eligibility chip showed something else`);
     assert.ok(chip.classList.contains('apx-sa-unknown'), `${f}: eligibility chip is not in the unknown state`);
   }
 });
@@ -192,7 +200,7 @@ test('no money field ever shows a number we could not compute', { skip }, () => 
   for (const id of ['apx-fees', 'apx-profit', 'apx-roi-out', 'apx-sa-maxcost', 'apx-sa-margin', 'apx-sa-sales']) {
     const el = $(id);
     assert.ok(el, `${id} is missing from the markup`);
-    assert.equal(el.textContent.trim(), 'Not checked yet', `${id} showed something other than the not-read state`);
+    assert.equal(el.textContent.trim(), NOT_READ, `${id} showed something other than the not-read state`);
     assert.ok(!/\d/.test(el.textContent), `${id} rendered a digit`);
     for (const c of ['apx-good', 'apx-bad', 'apx-warn']) {
       assert.ok(!el.classList.contains(c), `${id} carries the verdict class ${c}`);
