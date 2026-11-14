@@ -92,15 +92,30 @@
   // in this browser -- which is the reason this extension exists apart from the
   // Analyzer. Until that call is wired these fields are simply not read yet,
   // and the label should say that and nothing more.
-  // The label on every tile that waits on Seller Central. It names the
-  // REQUIREMENT, not our implementation status: “Not checked yet” described
-  // this code's state, which is not something the user can act on.
+  // The label on every tile that waits on the Seller Central read.
   //
-  // The honest caveat lives in the tooltip and in the paragraph under the
-  // decision strip: being signed in is necessary but not yet sufficient,
-  // because the read itself is not wired up. Without that caveat this label
-  // would send an already-signed-in user to sign in again.
-  const NOT_READ = 'Sign in to Seller Central';
+  // IT MUST NOT NAME AN ACTION, and this went wrong twice in one day:
+  //
+  //   “Connect Amazon”      wrong mechanism. There is no OAuth connection
+  //                        and there will not be one, so this sent the user
+  //                        looking for a button that does not exist.
+  //
+  //   “Sign in to Seller    right mechanism, but UNCONDITIONAL. Nothing in
+  //    Central”             this extension checks the session, so an
+  //                        already-signed-in user read it as broken
+  //                        detection -- reported within minutes.
+  //
+  // Detection cannot be added cheaply either: the two browser cookie APIs
+  // are both banned by a test in tests/noOwnerFallback (deliberately -- reading
+  // a seller’s Amazon session is the thing this extension must never do), so
+  // the session can only be inferred from a RESPONSE. That is the same
+  // request as the gating read itself, so the state and the data arrive
+  // together or not at all.
+  //
+  // Until then the label states our own position, which is the only thing
+  // that is actually known here. The source and the requirement live in the
+  // tooltip, where they inform without instructing.
+  const NOT_READ = 'Not read yet';
 
   function setUnavailable(el, text, why) {
     if (!el) return;
@@ -108,10 +123,9 @@
     el.classList.remove(...VERDICT_CLASSES);
     el.classList.add('apx-sa-unknown');
     el.title = why
-      || 'Read from your own Amazon Seller Central session, in this browser. '
-       + 'Sign in to Seller Central in this tab’s browser — no account connection '
-       + 'is needed. This version does not make that read yet, so signing in will '
-       + 'not fill this field on its own.';
+      || 'Comes from your own Amazon Seller Central session in this browser — '
+       + 'no account connection, and no seller credentials. This version does not '
+       + 'make that read yet, so being signed in is not what is missing.';
   }
 
   function renderNeedsAmazon() {
@@ -134,11 +148,12 @@
     const why = $('apx-dm-why');
     if (why) {
       why.textContent =
-        'Please sign in to Amazon Seller Central in this browser. Gating and fees '
-        + 'are read from your own Seller Central session — no account connection is '
-        + 'needed, and no seller credentials are used. That read is not wired up in '
-        + 'this version yet, so nothing below is a verdict. Everything above was read '
-        + 'from this page, or from your own data provider key, and is already correct.';
+        'Gating comes from your own Amazon Seller Central session in this browser, '
+        + 'while you are signed in to it — no account connection, and no seller '
+        + 'credentials. This version does not make that read yet, so nothing in the '
+        + 'two rows above is a verdict and your sign-in is not what is missing. '
+        + 'Everything else was read from this page or from your own data provider '
+        + 'key, and is already correct.';
     }
     const fd = $('apx-final-decision');
     if (fd) { fd.className = 'apx-final-decision unknown'; }
