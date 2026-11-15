@@ -1756,6 +1756,49 @@
     }
     const input = $('apx-me-input');
     if (input) input.value = mySellerId || '';
+
+    // THE KEY CANNOT BE SAVED UNTIL THE SELLER ID IS. It used to be optional,
+    // so the key saved on its own and the offer list spent the first session
+    // counting the user as their own competitor -- the very thing the id
+    // exists to prevent, at the one moment nobody would think to check.
+    //
+    // Disabled WITH THE REASON on it, because a dead button that does not say
+    // why is the dead end this panel keeps being rebuilt to avoid. The
+    // ordering is also written into both step labels, since the seller field
+    // sits below the key field and position alone would imply the opposite.
+    const keySave = $('apx-keepa-save');
+    if (keySave) {
+      keySave.disabled = !mySellerId;
+      keySave.title = mySellerId
+        ? ''
+        : 'Save your seller ID first — without it the offer list counts your '
+          + 'own offer as a competitor.';
+    }
+  }
+
+  /**
+   * "Saved" on the button, then back to its own label when the field changes.
+   *
+   * The status line below already said "You: A1...", and that was not enough:
+   * it sits outside the form, so a save with no visible change to the thing
+   * just clicked reads as a click that did not land. Confirmation belongs on
+   * the control that was used.
+   */
+  function flashSaved(btn, restore) {
+    if (!btn) return;
+    btn.textContent = 'Saved';
+    btn.dataset.saved = '1';
+    const input = $('apx-me-input');
+    if (input && !input.dataset.revertWired) {
+      input.dataset.revertWired = '1';
+      // Reverts on EDIT, not on a timer: a label that changes back by itself
+      // after two seconds is indistinguishable from one that never changed,
+      // and the user may well have looked away.
+      input.addEventListener('input', () => {
+        const b = $('apx-me-save');
+        if (b && b.dataset.saved) { b.textContent = restore; delete b.dataset.saved; }
+      });
+    }
   }
 
   function wireMySeller() {
@@ -1790,6 +1833,19 @@
         if (err) err.textContent = '';
         mySellerId = res.sellerId;
         renderMySeller();
+        // Confirm on the button that was clicked -- and UNconfirm on Clear.
+        //
+        // Guarding only the setting of it was not enough: Clear goes through
+        // this same path with sellerId null, so a "Saved" left over from the
+        // previous save sat above a now-empty field, claiming the opposite of
+        // what had just happened.
+        const meBtn = $('apx-me-save');
+        if (res.sellerId) {
+          flashSaved(meBtn, 'Save seller ID');
+        } else if (meBtn) {
+          meBtn.textContent = 'Save seller ID';
+          delete meBtn.dataset.saved;
+        }
         // If the gate was reopened only to change this, go back. On first
         // run the key is still being entered, so stay put.
         if (gate && gate.classList.contains('apx-gate-seller-only')) {

@@ -840,3 +840,64 @@ test('the seller id is asked for with the key, not at the bottom', { skip }, () 
   assert.ok(d.getElementById('apx-gate-done'),
     'there is no way out of the gate when it is reopened to change the id');
 });
+
+test('the key cannot be saved before the seller ID is', { skip }, () => {
+  // The seller ID used to be optional, so the key saved on its own and the
+  // offer list spent its first session counting the user as their own
+  // competitor -- the exact thing the id exists to prevent, at the one moment
+  // nobody would think to check it.
+  const { window } = renderPanel(null, { ISUA_GET_MY_SELLER: { ok: true, sellerId: null } });
+  const d = window.document;
+  const keySave = d.getElementById('apx-keepa-save');
+
+  assert.equal(keySave.disabled, true, 'the key can be saved with no seller ID stored');
+  // DISABLED WITH THE REASON ON IT. A dead button that does not say why is the
+  // dead end this panel keeps being rebuilt to avoid.
+  assert.match(keySave.title, /seller ID first/i, 'the disabled key button gives no reason');
+  assert.match(keySave.title, /competitor/i, 'the reason does not say what it costs');
+
+  // The ordering is written into both labels, because the seller field sits
+  // BELOW the key field and position alone implies the opposite.
+  assert.match(d.getElementById('apx-me-label').textContent, /Step 1/);
+  assert.match(d.getElementById('apx-keepa-intro').textContent, /Step 2/);
+  assert.ok(!/optional/i.test(d.getElementById('apx-me-label').textContent),
+    'the seller ID still calls itself optional while gating the key');
+});
+
+test('a stored seller ID unlocks the key for a returning user', { skip }, () => {
+  const { window } = renderPanel(null,
+    { ISUA_GET_MY_SELLER: { ok: true, sellerId: 'ASYNTH00000002' } });
+  const keySave = window.document.getElementById('apx-keepa-save');
+  assert.equal(keySave.disabled, false, 'a user who already set their id cannot save a key');
+  assert.equal(keySave.title, '', 'the disabled reason is shown on an enabled button');
+});
+
+test('the seller button says Saved, and stops saying it when it is not true', { skip }, () => {
+  // The status line below already read "You: A1...", and that was not enough:
+  // it sits outside the form, so a save with no visible change to the control
+  // just clicked reads as a click that did not land.
+  let stored = null;
+  const { window } = renderPanel(null, {
+    ISUA_GET_MY_SELLER: { ok: true, sellerId: null },
+    // The harness answers by type, so this stands in for the worker's own
+    // validation; the real one is tested against background.js separately.
+    ISUA_SET_MY_SELLER: { ok: true, sellerId: 'ASYNTH00000002' },
+  });
+  const d = window.document;
+  const btn = d.getElementById('apx-me-save');
+  const input = d.getElementById('apx-me-input');
+  assert.equal(btn.textContent, 'Save seller ID');
+
+  input.value = 'asynth00000002';
+  d.getElementById('apx-me-form').dispatchEvent(new window.Event('submit', { cancelable: true }));
+  assert.equal(btn.textContent, 'Saved', 'the button does not confirm the save');
+
+  // REVERTS ON EDIT, not on a timer. A label that changes back by itself after
+  // a couple of seconds is indistinguishable from one that never changed, and
+  // the user may well have looked away.
+  input.value = 'asynth0000000';
+  input.dispatchEvent(new window.Event('input'));
+  assert.equal(btn.textContent, 'Save seller ID',
+    'the button still says Saved over an edited field');
+  void stored;
+});

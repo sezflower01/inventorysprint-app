@@ -84,7 +84,8 @@
            browser and nowhere else -- not to our servers, not into the zip,
            and there is no default anywhere in this extension. -->
       <div id="apx-keepa-gate" class="apx-card hidden">
-        <p id="apx-keepa-intro">Paste your own data-provider API key to start. It stays in this browser.</p>
+        <p id="apx-keepa-intro"><strong>Step 2 &mdash; your data-provider API key.</strong>
+           It stays in this browser. Save your seller ID below first.</p>
         <form id="apx-keepa-form" class="apx-signin-form">
           <input id="apx-keepa-key" type="password" placeholder="API key" autocomplete="off"
                  spellcheck="false" autocapitalize="off" required />
@@ -108,9 +109,20 @@
              Optional on purpose. Everything else in the panel works
              without it; it only stops your own offer being read as a
              rival. -->
-        <p class="apx-k" id="apx-me-label">Your Amazon seller ID &mdash; optional.
-           It is the <code>seller=</code> value in your own storefront link,
-           and it stays in this browser.</p>
+        <!-- REQUIRED, AND REQUIRED FIRST. It was optional, and the key could
+             be saved without it, which meant the offer list spent its first
+             session counting the user as their own competitor. The key save is
+             held until this is stored.
+
+             It still sits BELOW the key field, because that is where it was
+             asked for and because the key is the thing people arrive holding.
+             So the order has to be stated rather than implied by position --
+             a disabled Save key with no reason beside it is the dead end this
+             panel keeps trying not to be. -->
+        <p class="apx-k" id="apx-me-label"><strong>Step 1 &mdash; your Amazon seller ID.</strong>
+           It is the <code>seller=</code> value in your own storefront link. It
+           stays in this browser, and your own offer is excluded from the
+           competitor figures once it is set.</p>
         <form id="apx-me-form" class="apx-signin-form">
           <input id="apx-me-input" type="text" placeholder="A1B2C3D4E5F6G7" autocomplete="off"
                  spellcheck="false" autocapitalize="characters" maxlength="14" />
