@@ -318,6 +318,13 @@
           present: true,
           series: keys.length,
           indices: keys.slice(0, 32),
+          // PER-SERIES LENGTHS, which is the only thing that settles the
+          // STRIDE. Some of this provider’s series are [time, value] pairs
+          // and the ones carrying shipping are [time, value, shipping]
+          // triples; a chart drawn with the wrong stride looks plausible and
+          // is wrong, which is the failure this repo keeps meeting. A length
+          // divisible by 3 and not by 2 proves a triple.
+          lengths: keys.slice(0, 32).map((key) => [Number(key), csv[key].length]),
           points: keys.reduce((n, k) => n + csv[k].length, 0),
           bytes: JSON.stringify(csv).length,
         }

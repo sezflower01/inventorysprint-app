@@ -362,13 +362,27 @@
   // "Lowest FBA $64.97" from that partial list would put a number on screen
   // that silently changes a second later, with nothing to tell the user it
   // had -- so the half-built state says Loading and shows no figures.
-  function renderOffersLoading(o) {
-    const waiting = (o && o.totalOthers != null)
-      ? 'Reading the offer list: ' + (o.count || 0) + ' of ' + (o.totalOthers + 1) + ' offers so far.'
-      : 'Reading the offer list.';
-    const why = waiting + ' No figure is shown yet, because one computed from '
-      + 'half the offers would change under you without saying so.';
-    for (const id of ['apx-fba', 'apx-fbm', 'apx-amz']) setUnavailable($(id), LOADING, why);
+  // THE DRAWER IS OPEN AND NOTHING WAS READ. Two causes, and they are not
+  // interchangeable: an empty container is a timing matter the user fixes
+  // with Recheck, while offer blocks that refuse to parse are Amazon having
+  // moved the markup -- which no amount of Rechecking will fix and which the
+  // user should be able to report rather than fight.
+  //
+  // Neither says "Loading". Nothing is loading: this panel reads the page
+  // once, on open and on Recheck, and has no observer watching for more.
+  // A spinner here was a promise the code could not keep, and it kept it for
+  // as long as the user was willing to stare at it.
+  function renderOffersUnread(o) {
+    const unreadable = o.state === 'unreadable';
+    const label = unreadable ? "can't read the list" : 'list is empty';
+    const why = unreadable
+      ? 'The offer list is open and ' + o.blocks + ' offer'
+        + (o.blocks === 1 ? '' : 's') + ' are in it, but none could be read. '
+        + 'Amazon has probably changed the markup \u2014 Recheck will not help. '
+        + 'The console line beginning \u201coffers\u201d has the details to report.'
+      : 'The offer list is open but has no offers in it yet. Press Recheck.';
+
+    for (const id of ['apx-fba', 'apx-fbm', 'apx-amz']) setUnavailable($(id), label, why);
     const count = $('apx-sellers-count');
     if (count) { count.textContent = '\u2014'; count.title = why; }
     const list = $('apx-sellers-list');
@@ -376,8 +390,7 @@
       list.textContent = '';
       const d = document.createElement('div');
       d.className = 'apx-sellers-empty apx-k';
-      d.textContent = LOADING;
-      d.title = why;
+      d.textContent = why;
       list.appendChild(d);
     }
   }
@@ -451,7 +464,16 @@
 
   function renderOffers(o) {
     if (!o) { renderSellersPending(); return; }
-    if (o.state === 'loading') { renderOffersLoading(o); return; }
+    // Always logged, successful or not: when the offer list does not render,
+    // the first question is whether the container was there and how many
+    // blocks were in it, and that is not answerable from the panel alone.
+    try {
+      console.info('[InventorySprint Analyser] offers', JSON.stringify({
+        state: o.state, blocks: o.blocks, parsed: o.count,
+        counterSays: o.totalOthers, complete: o.complete,
+      }));
+    } catch (_) {}
+    if (o.state === 'unreadable' || o.state === 'empty') { renderOffersUnread(o); return; }
     if (!o.found) { renderSellersPending(); return; }
 
     // EXCLUDE THE USER’S OWN OFFER FROM THE COMPETITIVE FIGURES.
@@ -1024,6 +1046,16 @@
       : (h.present
           ? 'history: ' + h.series + ' series, ' + h.points.toLocaleString()
             + ' pts, ~' + Math.round(h.bytes / 1024) + ' KB'
+            // The per-series lengths, as index:length pairs. The series COUNT
+            // and the byte total do not reveal the STRIDE, and a chart cannot
+            // be drawn without it: some of this provider's series are
+            // [time, value] pairs and the ones carrying shipping are
+            // [time, value, shipping] triples. Guess wrong and the chart looks
+            // plausible and is wrong, which is the failure mode this repo
+            // keeps meeting. A length divisible by 3 and not by 2 proves it.
+            + (Array.isArray(h.lengths) && h.lengths.length
+                ? ' [' + h.lengths.map((p) => p[0] + ':' + p[1]).join(' ') + ']'
+                : '')
           : 'history: absent from the response');
 
     if (d.outcome === 'cached') {

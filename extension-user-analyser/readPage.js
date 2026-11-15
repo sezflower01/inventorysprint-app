@@ -404,8 +404,30 @@
   //            a read taken in that window sees one offer out of seven.
   //   read     everything the counter promised is present.
   //
-  // LOADING IS BOUNDED BY THE PARSE, NOT BY THE COUNTER, and getting that
-  // backwards produced a panel stuck on "Loading..." for ever.
+  // THERE IS NO LOADING STATE, because there is nothing in flight.
+  //
+  // This reads a DOM snapshot, once, when the page is read or Recheck is
+  // pressed. Nothing watches the drawer afterwards -- there is deliberately
+  // no MutationObserver in this extension, so no state can resolve itself.
+  // "Loading..." therefore promised something the code will never do, and a
+  // panel showing it sat there for ever: the earlier fix bounded the wait
+  // against the drawer’s counter and left this second unbounded path, where
+  // the container exists and nothing in it parses.
+  //
+  // So an unsuccessful read reports WHY, in terms that separate the three
+  // causes, because they want three different responses:
+  //
+  //   closed      no #all-offers-display at all. Open the offer list.
+  //   empty       the container is there with no offer blocks in it. Either
+  //               it was read in the moment between opening and filling, or
+  //               this ASIN has none. Press Recheck.
+  //   unreadable  offer blocks ARE there and not one of them parsed. That is
+  //               not a user problem, it is Amazon having changed the markup,
+  //               and it is the only one of the three that needs a code fix.
+  //               Reported with the block count so it can be acted on.
+  //
+  // LOADING WAS ALSO BOUNDED AGAINST THE COUNTER, and that was the first
+  // half of this bug.
   //
   // The counter says how many offers EXIST. It does not say how many are in
   // the DOM. Amazon ships the first few and fetches the rest only when the
@@ -420,17 +442,17 @@
   // So: one parsed offer is enough to be READ. Whether the read is COMPLETE
   // is a separate question, answered by comparing against the counter and
   // reported rather than waited on.
-  function offersState(panel, parsedCount) {
+  function offersState(panel, blockCount, parsedCount) {
     if (!panel) return 'closed';
-    if (!parsedCount) return 'loading';
-    return 'read';
+    if (parsedCount) return 'read';
+    return blockCount ? 'unreadable' : 'empty';
   }
 
   function readOffers(doc) {
     const panel = doc.querySelector('#all-offers-display');
     const base = {
       found: false, text: 'not found', source: SRC_PAGE, state: 'closed',
-      count: 0, totalOthers: null, complete: false, missing: 0, offers: [],
+      count: 0, blocks: 0, totalOthers: null, complete: false, missing: 0, offers: [],
       buyBox: null, fbaLow: null, fbmLow: null, amazon: null,
       fbaCount: 0, fbmCount: 0, amazonSold: false,
     };
@@ -460,16 +482,17 @@
     const rawTotal = totalEl ? parseInt(totalEl.getAttribute('value'), 10) : NaN;
     const totalOthers = Number.isInteger(rawTotal) ? rawTotal : null;
 
-    const state = offersState(panel, offers.length);
+    const state = offersState(panel, blocks.length, offers.length);
     if (state !== 'read') {
-      // The partial offers are returned so a caller could show them, but every
-      // DERIVED figure stays null: "lowest FBA" computed from two of seven
-      // offers is a number that will change under the user without warning,
-      // and they would have no way to tell it had.
       return Object.assign({}, base, {
         state: state,
-        text: state === 'loading' ? 'loading' : 'not found',
+        text: 'not found',
         count: offers.length,
+        // How many candidate offer elements were FOUND, as against parsed.
+        // The gap between these two numbers is the whole diagnosis: zero
+        // blocks is a drawer that has not filled, blocks-but-no-parse is
+        // markup that has moved under us.
+        blocks: blocks.length,
         totalOthers: totalOthers,
         offers: offers,
       });
@@ -487,6 +510,7 @@
       text: offers.length + (offers.length === 1 ? ' offer' : ' offers'),
       source: SRC_PAGE,
       count: offers.length,
+      blocks: blocks.length,
       totalOthers: totalOthers,
       // Whether every offer the counter promises is actually in the DOM.
       // False means the shopper has not expanded "See N more options", so

@@ -346,16 +346,51 @@ test('10 partial: a drawer with offers is READ, however many are missing', { ski
   assert.equal(o.fbaCount, 1);
 });
 
-test('loading means the drawer is open and genuinely empty', { skip }, () => {
-  // The only remaining route to "loading", and it is narrow on purpose: the
-  // drawer exists and not one offer has parsed. Anything else resolves, so
-  // the state cannot strand the panel.
-  const html = fs.readFileSync(path.join(FIX, '10-offers-loading.html'), 'utf8')
-    .replace(/<div id="aod-sticky-pinned-container"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/, '');
-  const o = readPage.readOffers(new JSDOM(html).window.document);
-  assert.equal(o.state, 'loading', 'an empty open drawer no longer reports as loading');
-  assert.equal(o.count, 0);
-  assert.equal(o.found, false);
+test('an unsuccessful read says WHICH of the three ways it failed', { skip }, () => {
+  // THERE IS NO "LOADING" ANY MORE, and that was the second half of the
+  // stuck-panel bug. This reads a DOM snapshot once, on open and on Recheck;
+  // nothing observes the drawer afterwards, so no state can resolve itself. A
+  // spinner was a promise the code could not keep, and it kept it for as long
+  // as the user was willing to stare at it.
+  //
+  // The three failures want three different responses, so they are three
+  // states and the block count is what separates them.
+
+  // 1. closed: no container. The user opens the offer list.
+  const closed = readPage.readOffers(load('01-normal.html'));
+  assert.equal(closed.state, 'closed');
+  assert.equal(closed.blocks, 0);
+
+  // 2. empty: container, no offer blocks. Read in the moment between opening
+  //    and filling, or an ASIN with none. Recheck fixes it.
+  const empty = new JSDOM('<div id="all-offers-display">'
+    + '<div id="all-offers-display-spinner"></div></div>').window.document;
+  const e = readPage.readOffers(empty);
+  assert.equal(e.state, 'empty', 'an open-but-empty drawer is no longer distinguished');
+  assert.equal(e.blocks, 0);
+  assert.equal(e.count, 0);
+
+  // 3. unreadable: blocks ARE there and none parsed. NOT a user problem --
+  //    Amazon has moved the markup, Recheck will not help, and this is the
+  //    only one of the three that needs a code change. The block count is
+  //    reported so it can be acted on rather than guessed at.
+  const broken = fs.readFileSync(path.join(FIX, '09-offers-panel.html'), 'utf8')
+    .replace(/seller=ASYNTH\w+/g, 'x')
+    .replace(/data-csa-c-price-to-pay="[\d.]+"/g, '');
+  const u = readPage.readOffers(new JSDOM(broken).window.document);
+  assert.equal(u.state, 'unreadable', 'markup that moved is reported as an empty drawer');
+  assert.equal(u.blocks, 7, 'the blocks found are not counted, so the diagnosis is lost');
+  assert.equal(u.count, 0);
+
+  for (const o of [closed, e, u]) assert.equal(o.found, false);
+
+  // And the word must not come back anywhere in the reader or the panel.
+  for (const f of ['readPage.js', 'panel.js']) {
+    const code = fs.readFileSync(path.join(__dirname, '..', f), 'utf8')
+      .replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.ok(!/'loading'|"loading"/.test(code),
+      f + ' has a loading state again, which nothing can resolve');
+  }
 });
 
 test('a single-offer product is a complete read, not a stuck spinner', { skip }, () => {
