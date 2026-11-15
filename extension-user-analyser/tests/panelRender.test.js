@@ -1093,3 +1093,53 @@ test('a reply that never comes stops saying Loading', { skip }, async () => {
   }
   void window;
 });
+
+test('a reply with no answer in it is a failure, not progress', { skip }, () => {
+  // HOW THE CHIP STALLED. renderGating(null) painted the in-flight state, so
+  // every falsy answer painted it too -- and a worker replying with no value
+  // hands the callback `undefined`, which landed in that branch and claimed
+  // the read was still running. For ever, with no deadline able to help,
+  // because the deadline had already been cleared by the reply arriving.
+  //
+  // In-flight is now a named sentinel the caller asks for. Nothing arriving
+  // from the worker can claim it.
+  const reading = readFixture('01-normal.html', URL_FOR('B07XYZ1234'));
+  for (const [label, res] of [['undefined', undefined], ['null', null], ['false', false]]) {
+    const { $ } = renderPanel(wire(reading), { ISUA_GATING: res });
+    const chip = $('apx-sa-eligible');
+    assert.notEqual(chip.textContent, 'Loading…',
+      'a ' + label + ' reply is shown as still loading');
+    assert.match(chip.textContent, /no answer/i, 'a ' + label + ' reply does not say what happened');
+    for (const c of ['apx-sa-good', 'apx-sa-bad']) {
+      assert.ok(!chip.classList.contains(c), 'a ' + label + ' reply is coloured like a verdict');
+    }
+  }
+
+  // The pending state must not be reachable by any falsy value.
+  const panel = srcOf('panel.js');
+  assert.match(panel, /const PENDING = Symbol\(/, 'the pending sentinel has gone');
+  assert.match(panel, /if \(res === PENDING\)/, 'pending is matched loosely again');
+});
+
+test('the why-paragraph does not deny a feature that now works', { skip }, () => {
+  // It said "this version does not make that read yet" and "your sign-in is
+  // not what is missing" -- printed on screen beside a row that was actively
+  // reading Seller Central. A paragraph explaining a feature's absence, under
+  // the working feature, is the same fault as a label asserting a state
+  // nothing checks.
+  const reading = readFixture('01-normal.html', URL_FOR('B07XYZ1234'));
+  const { $ } = renderPanel(wire(reading),
+    { ISUA_GATING: { ok: false, state: 'signed_out', error: 'Sign in.' } });
+  const why = $('apx-dm-why').textContent;
+
+  assert.ok(!/does not make that read/i.test(why), 'the paragraph still denies the gating read');
+  assert.ok(!/sign-in is not what is missing/i.test(why),
+    'the paragraph still tells the user their sign-in cannot be the problem');
+  // And it must still say where eligibility comes from, and that no
+  // credentials are involved -- that was the part worth keeping.
+  assert.match(why, /Seller Central session/);
+  assert.match(why, /no seller credentials/);
+  assert.match(why, /Recheck/, 'the paragraph no longer names the fix for a signed-out session');
+  // Private-label risk IS still absent, so that claim stays.
+  assert.match(why, /Private-label risk is not assessed/);
+});

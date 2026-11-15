@@ -223,13 +223,25 @@
     setUnavailable($('apx-fd-confidence'), '—');
     const why = $('apx-dm-why');
     if (why) {
+      // THIS PARAGRAPH WENT STALE THE DAY GATING SHIPPED. It said "this
+      // version does not make that read yet" and "your sign-in is not what is
+      // missing" -- both true for weeks, both false now, and both still on
+      // screen beside a row that was actively reading Seller Central. A
+      // paragraph explaining why a feature is absent, printed under the
+      // working feature, is the same fault as a label asserting a state
+      // nothing checks: it teaches the reader to distrust the parts that are
+      // right.
+      //
+      // It is first paint only -- the decision strip is still blank at this
+      // point -- so it describes what is being read and what is not, without
+      // claiming either way about the ASIN.
       why.textContent =
-        'Gating comes from your own Amazon Seller Central session in this browser, '
-        + 'while you are signed in to it — no account connection, and no seller '
-        + 'credentials. This version does not make that read yet, so nothing in the '
-        + 'two rows above is a verdict and your sign-in is not what is missing. '
-        + 'Everything else was read from this page or from your own data provider '
-        + 'key, and is already correct.';
+        'Eligibility comes from your own Amazon Seller Central session in this '
+        + 'browser, while you are signed in to it — no account connection, and no '
+        + 'seller credentials. If it says you are not signed in, signing in there '
+        + 'and pressing Recheck is the fix. Private-label risk is not assessed in '
+        + 'this version. Everything else was read from this page or from your own '
+        + 'data provider key.';
     }
     const fd = $('apx-final-decision');
     if (fd) { fd.className = 'apx-final-decision unknown'; }
@@ -712,16 +724,32 @@
     el.title = why || '';
   }
 
+  /** Asked for by name, so no accidental falsy value can claim it. */
+  const PENDING = Symbol('gating-pending');
+
   function renderGating(res) {
     const chip = $('apx-sa-eligible');
     const others = $('apx-sa-conditions');
     const pill = $('apx-elig');
 
-    if (!res) {
+    // IN FLIGHT AND GOT-NOTHING USED TO BE THE SAME BRANCH, and that is how
+    // the chip stalled on “Loading…”. renderGating(null) painted the
+    // in-flight state, so ANY falsy answer painted it too -- and a worker
+    // that replies with no value at all hands the callback `undefined`,
+    // which landed here and claimed the read was still running. For ever.
+    //
+    // A pending state is now something only the caller can ask for, by name.
+    // Anything falsy arriving from the worker is an answer that said nothing,
+    // which is a failure and must look like one.
+    if (res === PENDING) {
       setUnavailable(chip, LOADING,
         'Reading your own Seller Central session for this ASIN.');
       setUnavailable(others, LOADING, 'Reading your own Seller Central session.');
       return;
+    }
+    if (!res) {
+      res = { ok: false, state: 'no_answer',
+        error: 'The worker replied with no answer at all.' };
     }
 
     // The three states that are NOT a verdict, each with the one action that
@@ -850,7 +878,7 @@
     // already on screen.
     if (gatingFor === tag) return;
     gatingFor = tag;
-    renderGating(null);
+    renderGating(PENDING);
 
     let settled = false;
     const finish = (res) => {
