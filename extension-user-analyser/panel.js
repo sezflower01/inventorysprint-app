@@ -471,6 +471,12 @@
       console.info('[InventorySprint Analyser] offers', JSON.stringify({
         state: o.state, blocks: o.blocks, parsed: o.count,
         counterSays: o.totalOthers, complete: o.complete,
+        // WHERE the offers were looked for. The page can carry an empty
+        // #all-offers-display ahead of the populated one, and reading the
+        // wrong one reported an empty drawer while seven offers were on
+        // screen. panels > 1 or scopedTo "document" means the page is not the
+        // shape the fixtures assume, which is worth seeing before it breaks.
+        panels: o.panels, scopedTo: o.scopedTo,
       }));
     } catch (_) {}
     if (o.state === 'unreadable' || o.state === 'empty') { renderOffersUnread(o); return; }

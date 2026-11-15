@@ -442,21 +442,71 @@
   // So: one parsed offer is enough to be READ. Whether the read is COMPLETE
   // is a separate question, answered by comparing against the counter and
   // reported rather than waited on.
-  function offersState(panel, blockCount, parsedCount) {
-    if (!panel) return 'closed';
+  function offersState(hasScope, blockCount, parsedCount) {
+    // Parsed offers are read, whatever they were found inside. Checking the
+    // container first meant a populated drawer outside it reported "closed".
     if (parsedCount) return 'read';
+    if (!hasScope) return 'closed';
     return blockCount ? 'unreadable' : 'empty';
   }
 
+  /** How many offer blocks a root contains, pinned included. */
+  function countBlocksIn(root) {
+    const pinned = root.querySelector('#aod-pinned-offer')
+      || root.querySelector('#aod-sticky-pinned-offer');
+    return root.querySelectorAll('#aod-offer').length + (pinned ? 1 : 0);
+  }
+
+  /**
+   * WHICH ELEMENT TO READ THE OFFERS OUT OF, and getting this wrong left the
+   * panel reporting an empty drawer while seven offers were on screen.
+   *
+   * It used to be doc.querySelector('#all-offers-display') -- the FIRST match
+   * -- with every block search scoped inside it. Amazon injects the drawer
+   * through a portal (the markup is littered with &&&Portal&Delimiter&&&
+   * markers), and the page can hold an EMPTY #all-offers-display ahead of the
+   * populated one. Searching the empty one finds nothing, for ever, and
+   * Recheck cannot help because the scope is wrong on every read.
+   *
+   * That is the same wrong assumption as the duplicate pinned offer and the
+   * seven elements sharing id="aod-offer": this markup does not honour one
+   * element per id, and any code here that assumes it will be wrong eventually.
+   *
+   * So: take every candidate container, use whichever actually holds offers,
+   * and if none does, search the whole document -- because a drawer rendered
+   * outside the container entirely is the next shape this could take.
+   */
+  function pickOfferScope(doc) {
+    const panels = Array.from(doc.querySelectorAll('#all-offers-display'));
+    let best = null;
+    let bestN = 0;
+    for (const p of panels) {
+      const n = countBlocksIn(p);
+      if (n > bestN) { best = p; bestN = n; }
+    }
+    if (best) return { scope: best, panels: panels.length, scopedTo: 'container' };
+
+    // No container holds an offer. Either none is populated yet, or the drawer
+    // is somewhere else. The document answers both without guessing which.
+    if (countBlocksIn(doc)) {
+      return { scope: doc, panels: panels.length, scopedTo: 'document' };
+    }
+    return { scope: panels[0] || null, panels: panels.length, scopedTo: 'container' };
+  }
+
   function readOffers(doc) {
-    const panel = doc.querySelector('#all-offers-display');
+    const { scope, panels, scopedTo } = pickOfferScope(doc);
     const base = {
       found: false, text: 'not found', source: SRC_PAGE, state: 'closed',
       count: 0, blocks: 0, totalOthers: null, complete: false, missing: 0, offers: [],
       buyBox: null, fbaLow: null, fbmLow: null, amazon: null,
       fbaCount: 0, fbmCount: 0, amazonSold: false,
+      // Reported so the next "it says empty but I can see offers" is one
+      // console line rather than three rounds of guessing: how many
+      // containers the page has, and which root the offers were read from.
+      panels: panels, scopedTo: scopedTo,
     };
-    if (!panel) return base;
+    if (!scope) return base;
 
     const blocks = [];
     // THE PINNED OFFER IS IN THE DOM TWICE on the live drawer: a hidden
@@ -466,11 +516,11 @@
     // inflates the FBA count by one. The real block wins; the sticky one is
     // only used when it is the ONLY pinned offer present, which is how a
     // half-built drawer looks.
-    const pinned = panel.querySelector('#aod-pinned-offer')
-      || panel.querySelector('#aod-sticky-pinned-offer');
+    const pinned = scope.querySelector('#aod-pinned-offer')
+      || scope.querySelector('#aod-sticky-pinned-offer');
     if (pinned) blocks.push([pinned, true]);
     // querySelectorAll, because the id is on every block (see note 3 above).
-    for (const el of panel.querySelectorAll('#aod-offer')) blocks.push([el, false]);
+    for (const el of scope.querySelectorAll('#aod-offer')) blocks.push([el, false]);
 
     const offers = [];
     for (const [el, isBB] of blocks) {
@@ -478,11 +528,14 @@
       if (o) offers.push(o);
     }
 
-    const totalEl = panel.querySelector('#aod-total-offer-count');
+    // Read from the SAME scope as the offers. Taking it from a different
+    // container than the blocks came from is how "3 of 7" could end up
+    // comparing one drawer's offers against another drawer's counter.
+    const totalEl = scope.querySelector('#aod-total-offer-count');
     const rawTotal = totalEl ? parseInt(totalEl.getAttribute('value'), 10) : NaN;
     const totalOthers = Number.isInteger(rawTotal) ? rawTotal : null;
 
-    const state = offersState(panel, blocks.length, offers.length);
+    const state = offersState(!!scope, blocks.length, offers.length);
     if (state !== 'read') {
       return Object.assign({}, base, {
         state: state,
@@ -511,6 +564,12 @@
       source: SRC_PAGE,
       count: offers.length,
       blocks: blocks.length,
+      // Carried on the SUCCESS path too, not just the failures. "It worked"
+      // and "it worked by falling back to a document-wide search because the
+      // page had two containers" are different facts, and the second one is
+      // how the next layout change gets noticed before it breaks.
+      panels: panels,
+      scopedTo: scopedTo,
       totalOthers: totalOthers,
       // Whether every offer the counter promises is actually in the DOM.
       // False means the shopper has not expanded "See N more options", so

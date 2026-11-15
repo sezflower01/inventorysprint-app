@@ -521,3 +521,64 @@ test('the lazy-loaded drawer: what actually stranded the panel', { skip }, () =>
   assert.match(slice, /none yet/, 'a partial list reports a flat "none" again');
   assert.match(slice, /See more options/, 'the panel no longer says how to load the rest');
 });
+
+test('an empty #all-offers-display ahead of the real one must not win', { skip }, () => {
+  // THE LIVE FAILURE, 2026-11-14/15. The panel read "The offer list is open
+  // but has no offers in it yet" with seven offers visible on screen, and
+  // Recheck could not fix it because the scope was wrong on every read.
+  //
+  // readOffers took doc.querySelector('#all-offers-display') -- the FIRST
+  // match -- and scoped every block search inside it. Amazon injects the
+  // drawer through a portal (the markup is full of &&&Portal&Delimiter&&&
+  // markers) and the page can hold an EMPTY container ahead of the populated
+  // one. Searching the empty one finds nothing, for ever.
+  //
+  // Same wrong assumption as the duplicate pinned offer and the seven
+  // elements sharing id="aod-offer": this markup does not honour one element
+  // per id, and code here that assumes it will be wrong eventually.
+  const populated = fs.readFileSync(path.join(FIX, '09-offers-panel.html'), 'utf8');
+  const inner = populated.slice(populated.indexOf('<div id="all-offers-display"'));
+  const decoyFirst = '<html><body><div id="all-offers-display">'
+    + '<div id="all-offers-display-spinner" class="aok-hidden"></div></div>' + inner;
+
+  const o = readPage.readOffers(new JSDOM(decoyFirst).window.document);
+  assert.equal(o.panels, 2, 'the fixture no longer reproduces two containers');
+  assert.equal(o.state, 'read', 'an empty container ahead of the real one strands the read again');
+  assert.equal(o.count, 7, 'the offers were read out of the empty container');
+  assert.equal(o.fbaLow.landed, 64.97);
+  assert.equal(o.scopedTo, 'container', 'the populated container was not chosen');
+});
+
+test('offers rendered outside any container are still read', { skip }, () => {
+  // The next shape this could take: the drawer injected somewhere that is not
+  // an #all-offers-display at all. Falling back to the document costs nothing
+  // when a container exists and is the difference between working and not
+  // when one does not.
+  const html = fs.readFileSync(path.join(FIX, '09-offers-panel.html'), 'utf8')
+    .replace(/<div id="all-offers-display"[^>]*>/, '<div id="somewhere-else">');
+  const o = readPage.readOffers(new JSDOM(html).window.document);
+  assert.equal(o.panels, 0, 'the container is still present, so this tests nothing');
+  assert.equal(o.state, 'read', 'a drawer outside the container is reported as closed');
+  assert.equal(o.count, 7);
+  assert.equal(o.scopedTo, 'document', 'the document fallback was not used');
+
+  // Parsed offers are READ whatever they were found inside. Checking the
+  // container first is what made this case report "closed".
+  assert.equal(o.found, true);
+});
+
+test('the scope is reported on success, not only on failure', { skip }, () => {
+  // "It worked" and "it worked by falling back to a document-wide search
+  // because the page had two containers" are different facts. The second is
+  // how the next layout change gets noticed before it breaks something.
+  const o = readPage.readOffers(load('09-offers-panel.html'));
+  assert.equal(o.state, 'read');
+  assert.equal(o.panels, 1, 'the container count is missing from a successful read');
+  assert.equal(o.scopedTo, 'container');
+
+  const panel = fs.readFileSync(path.join(__dirname, '..', 'panel.js'), 'utf8');
+  const slice = panel.slice(panel.indexOf("'[InventorySprint Analyser] offers'"),
+    panel.indexOf("if (o.state === 'unreadable'"));
+  assert.match(slice, /panels: o\.panels/, 'the console line no longer says how many containers there were');
+  assert.match(slice, /scopedTo: o\.scopedTo/, 'the console line no longer says which root was read');
+});
