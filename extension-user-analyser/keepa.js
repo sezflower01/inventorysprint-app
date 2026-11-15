@@ -280,10 +280,43 @@
     const packFee = p.fbaFees && Number.isFinite(p.fbaFees.pickAndPackFee)
       ? p.fbaFees.pickAndPackFee
       : null;
-    const refPct = Number.isFinite(p.referralFeePercent) ? p.referralFeePercent : null;
+
+    // THE DOCUMENTED NAME IS referralFeePercentage. This read only
+    // referralFeePercent, which is not in the provider's Product Object
+    // documentation at all -- and it works, because the live response carries
+    // it as an undocumented alias. Fees resolved on two real ASINs, so the
+    // alias is definitely there; relying on it alone is the problem, since an
+    // undocumented field is the one that disappears without a changelog.
+    // Documented name first, alias second.
+    const refPct = Number.isFinite(p.referralFeePercentage) ? p.referralFeePercentage
+      : (Number.isFinite(p.referralFeePercent) ? p.referralFeePercent : null);
+
+    // ⚠️ THE VARIABLE CLOSING FEE, which this was silently omitting.
+    //
+    // Amazon charges a flat per-item closing fee on MEDIA -- books, DVDs,
+    // music, video games -- on top of the referral and fulfilment fees. It is
+    // not part of fbaFees: the provider documents that object as "the FBA
+    // pick & pack fee" and nothing else, and exposes the closing fee as its
+    // own top-level field. So every media ASIN was understated by the whole
+    // closing fee, and understating a fee is the direction that loses money:
+    // it inflates Profit, ROI, Margin and the Max Cost the panel AUTHORISES.
+    //
+    // Reported as its own number rather than folded into the fulfilment fee,
+    // so the Fees tooltip can be checked against Seller Central line by line.
+    // "undefined if not applicable" per the documentation, which is why absent
+    // is a normal answer for a non-media product and NOT a missing half.
+    const closing = Number.isFinite(p.variableClosingFee) && p.variableClosingFee > 0
+      ? p.variableClosingFee
+      : null;
+
     const fees = (packFee != null && packFee >= 0 && refPct != null && refPct > 0)
-      ? { found: true, fbaFee: packFee / 100, referralPct: refPct }
-      : { found: false, fbaFee: null, referralPct: null,
+      ? { found: true, fbaFee: packFee / 100, referralPct: refPct,
+          closingFee: closing == null ? 0 : closing / 100,
+          // So the panel can say "there is no closing fee on this" rather than
+          // leaving the reader to wonder whether it was read at all.
+          closingFeeStated: closing != null }
+      : { found: false, fbaFee: null, referralPct: null, closingFee: null,
+          closingFeeStated: false,
           missing: [packFee == null ? 'fulfilment fee' : null, refPct == null ? 'referral rate' : null].filter(Boolean) };
 
     // ── dimensions and weight ──

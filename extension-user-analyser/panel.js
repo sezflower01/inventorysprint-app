@@ -339,15 +339,40 @@
   // fee side is always YOURS -- your referral rate and, unless you sell FBM,
   // your fulfilment fee. It answers "what would I make there", not "what are
   // they making".
+  // THE CLOSING FEE APPLIES EVERYWHERE OR IT IS WORSE THAN NOWHERE.
+//
+  // Amazon charges a flat per-item closing fee on media -- books, DVDs,
+  // music, games -- and the provider exposes it separately from the pick &
+  // pack fee, which is why the panel was omitting it entirely. On a book that
+  // understated the fees and therefore inflated Profit, ROI, Margin and the
+  // Max Cost the panel AUTHORISES: the direction that loses money.
+  //
+  // There were FOUR places computing a fee total independently -- the tile,
+  // the simulator, the slider and the per-offer ROI column. Adding it to
+  // three of them would have been the worst outcome of all: two figures from
+  // the same inputs disagreeing, with nothing to say which was right. One
+  // function now, used by all four.
+  //
+  // It is charged on FBM too. The closing fee is a referral-side charge, not
+  // a fulfilment one, so unlike the pick & pack fee it does not vanish when
+  // the seller ships the item themselves.
+  function feesAt(price, isFbm) {
+    if (!lastFees || !lastFees.found || price == null) return null;
+    const referral = price * (lastFees.referralPct / 100);
+    const fulfil = isFbm ? 0 : lastFees.fbaFee;
+    const closing = lastFees.closingFee || 0;
+    return { referral, fulfil, closing, total: referral + fulfil + closing };
+  }
+
   function offerRoi(landed) {
     if (landed == null) return null;
     if (!lastFees || !lastFees.found) return null;
     const cost = money($('apx-cost') && $('apx-cost').value);
     if (cost == null || cost <= 0) return null;
     const mode = ($('apx-seller-mode') && $('apx-seller-mode').value) || 'FBA';
-    const fulfil = /fbm/i.test(String(mode)) ? 0 : lastFees.fbaFee;
-    const fees = landed * (lastFees.referralPct / 100) + fulfil;
-    return ((landed - fees - cost) / cost) * 100;
+    const f = feesAt(landed, /fbm/i.test(String(mode)));
+    if (!f) return null;
+    return ((landed - f.total - cost) / cost) * 100;
   }
 
   /**
@@ -1642,12 +1667,19 @@
     if (est && sales) {
       sales.textContent = est.text;
       sales.classList.remove('apx-sa-unknown');
-      sales.title = est.estimated
-        ? 'ESTIMATED from sales rank, using the same formula as the Analyzer. '
-          + 'Amazon does not publish a units figure for this ASIN. The estimate is '
-          + 'category-blind, so treat it as an order of magnitude, not a number.'
-        : 'Units bought in the past month, as published by Amazon'
-          + (res.cached ? ' (cached)' : '');
+      // The deep-tail warning REPLACES the general one rather than sitting
+      // beside it: two caveats on one tile and the reader keeps neither.
+      sales.title = est.rough
+        ? est.roughWhy
+        : (est.estimated
+            ? 'ESTIMATED from sales rank, using the same formula as the Analyzer. '
+              + 'Amazon does not publish a units figure for this ASIN. The estimate is '
+              + 'category-blind, so treat it as an order of magnitude, not a number.'
+            : 'Units bought in the past month, as published by Amazon'
+              + (res.cached ? ' (cached)' : ''));
+      // A rough figure is not a verdict-grade number, so it does not get to
+      // look like one.
+      if (est.rough) sales.classList.add('apx-sa-unknown');
     } else {
       setUnavailable(sales, 'not available',
         'Neither a published units figure nor a sales rank came back for this ASIN.');
@@ -1724,7 +1756,33 @@
     if (published && published.found) return { value: published.value, text: published.text, estimated: false };
     if (!(rank && rank.found && rank.value > 0)) return null;
     const n = Math.max(1, Math.round(100000 * Math.pow(rank.value, -0.6)));
-    return { value: n, text: '~' + n.toLocaleString(), estimated: true };
+
+    // A POWER LAW IS NOT EQUALLY WRONG EVERYWHERE, and the tile has to say so.
+    //
+    // Near the top of a category the curve is fitted against plenty of real
+    // sales. Deep in the tail it is extrapolation: a book at rank 868,711
+    // produced "~28 a month", which is a shape-of-the-curve answer, not a
+    // measurement, and on a sourcing panel a precise-looking 28 invites being
+    // multiplied by a margin.
+    //
+    // 200,000 is the line asked for. Above it the tile reads "rough" instead
+    // of a figure that implies it was counted, and the number stays in the
+    // tooltip for anyone who wants the order of magnitude. Amazon's own
+    // published figure, when it exists, never comes through here at all.
+    const ROUGH_ABOVE_RANK = 200000;
+    const rough = rank.value > ROUGH_ABOVE_RANK;
+    return {
+      value: n,
+      text: rough ? '~' + n.toLocaleString() + ' (rough)' : '~' + n.toLocaleString(),
+      estimated: true,
+      rough: rough,
+      roughWhy: rough
+        ? 'Rank ' + rank.value.toLocaleString() + ' is deep in the category, where '
+          + 'this is extrapolation from the shape of the curve rather than a fit '
+          + 'against real sales. Treat ~' + n.toLocaleString() + ' as an order of '
+          + 'magnitude, not a monthly figure.'
+        : null,
+    };
   }
 
   function setMoney(id, text, cls) {
@@ -1778,9 +1836,11 @@
       return;
     }
 
-    const referral = sale * (lastFees.referralPct / 100);
-    const fulfil = isFbm ? 0 : lastFees.fbaFee;
-    const fees = referral + fulfil;
+    const f = feesAt(sale, isFbm);
+    const referral = f.referral;
+    const fulfil = f.fulfil;
+    const closing = f.closing;
+    const fees = f.total;
 
     const feesEl = $('apx-fees');
     setMoney('apx-fees', fmt(fees));
@@ -1807,6 +1867,11 @@
       parts.push(isFbm
         ? 'No fulfilment fee on FBM'
         : 'Fulfilment ' + fmt(fulfil) + ' \u2014 a flat figure from your data provider');
+      // Named whether it applies or not. "No closing fee on this product" is
+      // information; silence is indistinguishable from not having looked.
+      parts.push(closing > 0
+        ? 'Closing fee ' + fmt(closing) + ' \u2014 Amazon\u2019s per-item media charge, and it applies on FBM too'
+        : 'No closing fee on this product');
       parts.push('Total ' + fmt(fees));
       const excluded = [
         'monthly storage', 'long-term storage', 'returns processing',
@@ -1864,8 +1929,8 @@
     const f = Number(slider.value);
     const simSale = sale * (f <= 50 ? 0.5 + (f / 50) * 0.5 : 1 + ((f - 50) / 50));
     const mode = ($('apx-seller-mode') && $('apx-seller-mode').value) || 'FBA';
-    const fulfil = /fbm/i.test(String(mode)) ? 0 : (lastFees ? lastFees.fbaFee : 0);
-    const simFees = simSale * (lastFees.referralPct / 100) + fulfil;
+    const simF = feesAt(simSale, /fbm/i.test(String(mode)));
+    const simFees = simF ? simF.total : 0;
     setMoney('apx-sim-sale', fmt(simSale));
     const v = $('apx-sim-val');
     if (v) v.textContent = fmt(simSale);
@@ -1902,7 +1967,7 @@
   $('apx-cost')?.addEventListener('input', recomputeMoney);
   $('apx-seller-mode')?.addEventListener('change', recomputeMoney);
   $('apx-sim-slider')?.addEventListener('input', () => renderSim(lastSale, lastFees && lastFees.found && lastSale != null
-    ? lastSale * (lastFees.referralPct / 100) + lastFees.fbaFee
+    ? (feesAt(lastSale, false) || { total: 0 }).total
     : null));
 
   // ── the API-key gate ────────────────────────────────────────────────────

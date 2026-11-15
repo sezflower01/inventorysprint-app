@@ -684,9 +684,28 @@ test('ROI per offer answers what YOU would make there, not their margin', { skip
   const src = srcOf('panel.js');
   const fn = src.slice(src.indexOf('function offerRoi'), src.indexOf('function stockPhrase'));
   assert.match(fn, /apx-cost/, 'the ROI no longer uses the cost you entered');
-  assert.match(fn, /lastFees.referralPct/, 'the ROI no longer uses your referral rate');
   assert.match(fn, /apx-seller-mode|fbm/i, 'the ROI ignores whether you sell FBA or FBM');
   assert.match(fn, /return null/, 'the ROI no longer declines when an input is missing');
+
+  // THE FEE TOTAL IS ONE FUNCTION NOW, and that is the point rather than an
+  // incidental refactor. Four places computed it independently -- this
+  // column, the Fees tile, the simulator and the slider -- so adding the
+  // media closing fee to three of them would have left two figures from the
+  // same inputs disagreeing with nothing to say which was right.
+  assert.match(fn, /feesAt\(/, 'the ROI computes its own fee total again');
+  const feesAt = src.slice(src.indexOf('function feesAt'), src.indexOf('function offerRoi'));
+  assert.match(feesAt, /lastFees\.referralPct/, 'the fee total no longer uses your referral rate');
+  assert.match(feesAt, /lastFees\.closingFee/, 'the media closing fee is no longer charged');
+  // Charged on FBM too: it is a referral-side charge, not a fulfilment one,
+  // so unlike pick-and-pack it does not vanish when you ship it yourself.
+  const fulfilLine = (feesAt.match(/const fulfil = [^;]+;/) || [''])[0];
+  assert.match(fulfilLine, /isFbm \? 0/, 'the fulfilment fee is no longer waived on FBM');
+  assert.ok(!/isFbm[^;]*closing|closing[^;]*isFbm/.test(feesAt),
+    'the closing fee is being waived on FBM, which Amazon does not do');
+
+  // And every one of the four call sites goes through it.
+  assert.equal((src.match(/feesAt\(/g) || []).length >= 5, true,
+    'a fee total is being computed somewhere outside feesAt');
 });
 
 /** renderPanel, but with a seller id already saved in the worker's store. */

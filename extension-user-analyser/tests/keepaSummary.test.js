@@ -451,3 +451,82 @@ test('the readPage comment no longer claims marketplaces that do not exist', () 
   assert.match(src, /The extension supports\s*\n?\s*\/\/\s*one marketplace|supports\s+one marketplace/,
     'the correction naming one marketplace has gone');
 });
+
+test('the media closing fee is read, and is its own number', () => {
+  // AMAZON CHARGES A FLAT PER-ITEM CLOSING FEE ON MEDIA -- books, DVDs, music,
+  // games -- and the panel was omitting it entirely. The provider documents
+  // fbaFees as "the FBA pick & pack fee" and nothing else, and exposes the
+  // closing fee as its own top-level variableClosingFee. So every media ASIN
+  // was understated by the whole closing fee, which inflates Profit, ROI,
+  // Margin and the Max Cost the panel AUTHORISES: the direction that costs
+  // money.
+  const withClosing = KEEPA.summariseProduct(body({
+    fbaFees: { pickAndPackFee: 437 }, referralFeePercentage: 15, variableClosingFee: 181,
+  }));
+  assert.equal(withClosing.fees.found, true);
+  assert.equal(withClosing.fees.closingFee, 1.81, 'the closing fee is not read, or not in cents');
+  assert.equal(withClosing.fees.closingFeeStated, true);
+  // Kept SEPARATE from the fulfilment fee so the tooltip can be checked
+  // against Seller Central line by line.
+  assert.equal(withClosing.fees.fbaFee, 4.37, 'the closing fee was folded into fulfilment');
+
+  // "undefined if not applicable" per the documentation, so absent is the
+  // normal answer for a non-media product -- NOT a missing half that should
+  // make the whole fee answer unreadable.
+  for (const absent of [undefined, null, 0, -1]) {
+    const r = KEEPA.summariseProduct(body({
+      fbaFees: { pickAndPackFee: 437 }, referralFeePercentage: 15, variableClosingFee: absent,
+    }));
+    assert.equal(r.fees.found, true, JSON.stringify(absent) + ' broke the whole fee answer');
+    assert.equal(r.fees.closingFee, 0, JSON.stringify(absent) + ' produced a closing fee');
+    assert.equal(r.fees.closingFeeStated, false,
+      JSON.stringify(absent) + ' is reported as a stated zero rather than absent');
+  }
+});
+
+test('the referral rate prefers the documented field name', () => {
+  // The provider DOCUMENTS referralFeePercentage. This code only ever read
+  // referralFeePercent, which appears nowhere in that documentation -- and it
+  // worked, because the live response carries it as an undocumented alias.
+  // Fees resolved on two real ASINs, so the alias is certainly there; relying
+  // on it alone is the problem, because an undocumented field is the one that
+  // disappears without a changelog.
+  const documented = KEEPA.summariseProduct(body({
+    fbaFees: { pickAndPackFee: 437 }, referralFeePercentage: 12,
+  }));
+  assert.equal(documented.fees.referralPct, 12, 'the documented field name is not read');
+
+  const alias = KEEPA.summariseProduct(body({
+    fbaFees: { pickAndPackFee: 437 }, referralFeePercent: 15,
+  }));
+  assert.equal(alias.fees.referralPct, 15, 'the live alias stopped being read');
+
+  // Documented wins, so a response carrying both cannot be read two ways.
+  const bothOf = KEEPA.summariseProduct(body({
+    fbaFees: { pickAndPackFee: 437 }, referralFeePercentage: 12, referralFeePercent: 15,
+  }));
+  assert.equal(bothOf.fees.referralPct, 12, 'the undocumented alias outranks the documented field');
+});
+
+test('a deep-tail rank estimate is labelled rough, not printed as a figure', () => {
+  // A book at rank 868,711 produced "~28 a month". That is the shape of the
+  // curve, not a measurement, and a precise-looking 28 on a sourcing panel
+  // invites being multiplied by a margin.
+  const src = fs.readFileSync(path.join(ROOT, 'panel.js'), 'utf8');
+  // A FORWARD WINDOW, not a slice between two names. Slicing to
+  // 'function renderDims' gave an empty string, because renderDims is defined
+  // EARLIER in the file than this is -- the fourth time a between-two-names
+  // slice in these tests has silently matched nothing and passed.
+  const at = src.indexOf('const ROUGH_ABOVE_RANK');
+  assert.ok(at > -1, 'the deep-tail threshold has gone');
+  const fn = src.slice(at, at + 1400);
+  assert.match(fn, /ROUGH_ABOVE_RANK = 200000/, 'the deep-tail threshold changed');
+  assert.match(fn, /\(rough\)/, 'the tile no longer marks a deep-tail estimate');
+  assert.match(fn, /order of\s*'?\s*\+?\s*'?\s*magnitude/,
+    'the explanation no longer says what the number is worth');
+
+  // The threshold is a comparison on the rank, not on the estimate -- a low
+  // estimate from a GOOD rank is a real answer and must not be marked rough.
+  assert.match(fn, /rank\.value > ROUGH_ABOVE_RANK/,
+    'roughness is being decided from something other than the rank');
+});
