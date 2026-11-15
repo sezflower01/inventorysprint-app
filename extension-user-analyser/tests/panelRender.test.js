@@ -466,6 +466,10 @@ test('every empty field is in exactly one of the two states, and the right one',
     // arrive with them. They were in the absent group while this build did
     // not fetch them at all.
     'apx-dims-pkg', 'apx-dims-pkg-wt', 'apx-dims-item', 'apx-dims-item-wt',
+    // The price-history chart and the 3M spread are drawn from series that
+    // ride in on the same product lookup as the fees, so they arrive with
+    // them. They were in the absent group while nothing charted them.
+    'apx-history-verdict', 'apx-swing',
   ];
 
   // Nothing in this build computes these. Each one is final until a version
@@ -475,10 +479,7 @@ test('every empty field is in exactly one of the two states, and the right one',
   //   fba/fbm/amz/swing    a read of the offers panel on the page
   //   dims                 a catalogue field this build never fetches
   const WILL_NOT = [
-    'apx-sa-eligible', 'apx-sa-pl', 'apx-history-verdict',
-    // apx-swing is "3M swing" -- a PRICE-HISTORY figure, not an offer spread.
-    // It looks like it belongs with the offer rows below and does not.
-    'apx-swing',
+    'apx-sa-eligible', 'apx-sa-pl',
   ];
 
   // A THIRD state, and it had to exist. These three fill from the offers

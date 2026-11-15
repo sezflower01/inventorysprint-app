@@ -325,10 +325,74 @@
           // is wrong, which is the failure this repo keeps meeting. A length
           // divisible by 3 and not by 2 proves a triple.
           lengths: keys.slice(0, 32).map((key) => [Number(key), csv[key].length]),
+          // Decoded on the measurement, not on the documentation. The live
+          // lengths were 100 and 434 -- both divisible by 2 and NEITHER by 3 --
+          // which PROVES a [time, value] stride for the series that matter.
+          // The triple-stride series (the *_SHIPPING ones, including Buy Box)
+          // never appeared at all, which is a separate finding: see below.
+          stride: 2,
           points: keys.reduce((n, k) => n + csv[k].length, 0),
           bytes: JSON.stringify(csv).length,
         }
       : { present: false, series: 0, indices: [], points: 0, bytes: 0 };
+
+    // ── the charted price series ──
+    //
+    // WHAT THE LIVE RESPONSE ACTUALLY CONTAINED, measured 2026-11-15 on
+    // B0H8QLSNPP: indices 0, 1, 2, 3, 4, 11, 34, 35. Lengths 2, 100, 2, 434,
+    // 2, 18, 12, 10.
+    //
+    // THREE OF THE FOUR SERIES THE PANEL’S LEGEND NAMES WERE NOT THERE:
+    // Buy Box (18), FBA (10) and FBM (7) are all absent, and Amazon (0) had
+    // exactly one point. All three missing ones are offer-derived, and this
+    // build deliberately does not request offers -- the parameter must be 0
+    // or >= 20 and costs more tokens. So the legend promises a chart this
+    // call cannot draw, and the honest response is to chart what IS there
+    // and mark the rest absent, rather than relabel index 1 as "Buy Box".
+    //
+    // Index 1 (the general marketplace NEW price) is the series with real
+    // data, and on a long-lived ASIN it carries years of it.
+    //
+    // DOWNSAMPLED TO THE CANVAS. The chart is 320 pixels wide, so more than
+    // 320 points cannot be seen -- and the cache is chrome.storage.local,
+    // which is a few megabytes for everything. Keeping full history for a
+    // ten-year ASIN to draw 320 columns would spend the quota on pixels
+    // nobody can look at. First and last points are always kept so the span
+    // is never shortened by the thinning.
+    //
+    // Times stay as the provider’s own minute counter and prices as integer
+    // cents: converting here would store wider numbers for no gain, and the
+    // panel has to pick a timezone anyway.
+    const CHART_SERIES = [
+      [18, 'Buy Box'], [0, 'Amazon'], [10, 'FBA'], [7, 'FBM'], [1, 'New'],
+    ];
+    const MAX_POINTS = 320;
+
+    function decodeSeries(arr) {
+      const out = [];
+      for (let i = 0; i + 1 < arr.length; i += 2) {
+        const t = arr[i];
+        const v = arr[i + 1];
+        // -1 is the provider’s "no data", the same marker the rank uses, and
+        // plotting it draws a line down to minus one cent.
+        if (!Number.isFinite(t) || !Number.isFinite(v) || v < 0) continue;
+        out.push([t, v]);
+      }
+      if (out.length <= MAX_POINTS) return out;
+      const step = (out.length - 1) / (MAX_POINTS - 1);
+      const thin = [];
+      for (let i = 0; i < MAX_POINTS; i++) thin.push(out[Math.round(i * step)]);
+      return thin;
+    }
+
+    const series = [];
+    for (const [idx, label] of CHART_SERIES) {
+      const arr = csv && Array.isArray(csv[idx]) ? csv[idx] : null;
+      if (!arr || !arr.length) { series.push({ index: idx, label, points: [] }); continue; }
+      series.push({ index: idx, label, points: decodeSeries(arr) });
+    }
+    history.series_data = series;
+    history.charted = series.filter((s) => s.points.length).length;
 
     return {
       ok: true,

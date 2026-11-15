@@ -325,3 +325,75 @@ test('the fee tooltip can be checked against Seller Central line by line', () =>
   assert.match(slice, /No fulfilment fee on FBM/);
   assert.match(slice, /delivery YOU pay/, 'FBM no longer warns that your own postage is excluded');
 });
+
+test('the series stride is 2, and it was measured rather than assumed', () => {
+  // A chart drawn on the wrong stride looks entirely plausible and is wrong,
+  // which is the failure this repo keeps meeting. The live response had
+  // lengths 100 and 434 -- both divisible by 2 and NEITHER by 3 -- which
+  // proves [time, value] pairs for the series that carry real data. The
+  // triple-stride series (the *_SHIPPING ones, Buy Box among them) never
+  // appeared at all, which is why no triple was there to find.
+  const csv = {};
+  csv[1] = [];
+  for (let i = 0; i < 50; i++) csv[1].push(1000 + i, 6497 + i);
+  const r = KEEPA.summariseProduct(body({ csv }));
+  assert.equal(r.history.stride, 2, 'the measured stride is no longer recorded');
+
+  const s1 = r.history.series_data.find((x) => x.index === 1);
+  assert.equal(s1.points.length, 50, 'the pair stride is not being used to decode');
+  assert.deepEqual(s1.points[0], [1000, 6497]);
+  assert.deepEqual(s1.points[49], [1049, 6546]);
+});
+
+test('-1 in a price series is no data, not minus one cent', () => {
+  // The same marker the rank uses, and the same trap: plotting it draws the
+  // line down off the bottom of the chart.
+  const csv = { 1: [100, 6497, 101, -1, 102, 6597] };
+  const r = KEEPA.summariseProduct(body({ csv }));
+  const s1 = r.history.series_data.find((x) => x.index === 1);
+  assert.equal(s1.points.length, 2, 'a no-data marker was plotted as a price');
+  assert.deepEqual(s1.points.map((p) => p[1]), [6497, 6597]);
+});
+
+test('absent legend series are reported absent, never substituted', () => {
+  // THE FINDING THAT CHANGED THE DELIVERABLE. Three of the four series the
+  // legend names -- Buy Box (18), FBA (10), FBM (7) -- were absent from the
+  // live response, because all three are offer-derived and this build does
+  // not request offers. Relabelling index 1 as "Buy Box" would have produced
+  // a chart that looked right and lied, so each is carried as an empty series
+  // and the legend greys it with the reason.
+  const csv = { 1: [100, 6497, 101, 6597] };
+  const r = KEEPA.summariseProduct(body({ csv }));
+  const byIndex = Object.fromEntries(r.history.series_data.map((x) => [x.index, x]));
+
+  for (const idx of [18, 10, 7, 0]) {
+    assert.ok(byIndex[idx], 'series ' + idx + ' is no longer reported at all');
+    assert.equal(byIndex[idx].points.length, 0, 'series ' + idx + ' acquired data from somewhere');
+  }
+  assert.equal(byIndex[1].points.length, 2);
+  assert.equal(r.history.charted, 1, 'the count of drawable series is wrong');
+
+  // The labels must stay attached to their own index.
+  assert.equal(byIndex[18].label, 'Buy Box');
+  assert.equal(byIndex[1].label, 'New');
+});
+
+test('history is downsampled to the canvas, keeping both ends', () => {
+  // The chart is 320 pixels wide, so more than 320 points cannot be seen --
+  // and the cache is chrome.storage.local, a few megabytes for everything.
+  // Keeping a ten-year history to draw 320 columns spends the quota on pixels
+  // nobody can look at.
+  const csv = { 1: [] };
+  for (let i = 0; i < 5000; i++) csv[1].push(1000 + i, 5000 + i);
+  const r = KEEPA.summariseProduct(body({ csv }));
+  const s1 = r.history.series_data.find((x) => x.index === 1);
+
+  assert.equal(s1.points.length, 320, 'the series is no longer capped to the canvas width');
+  // Both ends survive, or the thinning would silently shorten the span.
+  assert.deepEqual(s1.points[0], [1000, 5000], 'the first point was thinned away');
+  assert.deepEqual(s1.points[319], [5999, 9999], 'the last point was thinned away');
+
+  // And the stored form stays small enough to cache per ASIN.
+  const bytes = JSON.stringify(r.history.series_data).length;
+  assert.ok(bytes < 24000, 'the cached series grew to ' + bytes + ' bytes per ASIN');
+});

@@ -173,6 +173,11 @@ body { background: linear-gradient(180deg, #F5F6FA 0%, #EAF2FC 100%); color: var
   margin-top: 6px; font-size: 10px; color: var(--muted);
 }
 .apx-hl-item { display: inline-flex; align-items: center; gap: 4px; }
+/* A legend entry with no data behind it. Three of these four series were
+   absent from the live response, and a coloured dot beside a name the chart
+   never draws reads as a line the viewer failed to find. */
+.apx-hl-item.apx-hl-absent { opacity: 0.4; text-decoration: line-through; }
+.apx-hl-item.apx-hl-absent .apx-hl-dot { background: var(--muted) !important; }
 .apx-hl-dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
 .apx-history-verdict {
   margin-top: 8px; padding: 6px 10px; border-radius: 8px;

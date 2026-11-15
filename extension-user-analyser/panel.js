@@ -232,10 +232,10 @@
     // Says only what is true: the chart is not drawn. The old wording blamed
     // missing provider data, which stopped being the reason once the provider
     // was answering -- and it sat directly under a rank the panel had read.
-    setUnavailable($('apx-history-verdict'), NOT_IN_VERSION,
-      'This version does not draw the price-history chart yet. Whether the '
-      + 'provider answer already carries the series is reported on the '
-      + 'diagnostic line at the bottom of the panel.');
+    // The chart IS drawn now, from the series that ride in on the product
+    // lookup, so this is a first paint rather than a permanent absence.
+    setUnavailable($('apx-history-verdict'), LOADING,
+      'Waiting on your data provider for the price history.');
     const alerts = $('apx-sa-alerts');
     if (alerts) { alerts.textContent = '—'; alerts.title = ''; }
 
@@ -462,6 +462,213 @@
     }
   }
 
+  // ── the price-history chart ──────────────────────────────────────────────
+  //
+  // THE STRIDE WAS MEASURED, NOT ASSUMED. The provider stores some series as
+  // [time, value] pairs and the ones carrying shipping as
+  // [time, value, shipping] triples, and a chart drawn on the wrong stride
+  // looks entirely plausible and is wrong -- the failure this repo keeps
+  // meeting. The live lengths were 100 and 434: both divisible by 2, neither
+  // by 3, which proves pairs. No triple-stride series appeared at all.
+  //
+  // THREE OF THE FOUR LEGEND SERIES WERE ABSENT from that response -- Buy Box,
+  // FBA and FBM are offer-derived and this build does not request offers. So
+  // the chart draws the series that exist and the legend greys the ones that
+  // do not, with the reason on hover. Relabelling the New price as "Buy Box"
+  // would have produced a chart that looked right and lied.
+  const SERIES_COLOUR = {
+    18: '#34d399', 0: '#f97316', 10: '#60a5fa', 7: '#a78bfa', 1: '#e879f9',
+  };
+
+  // The provider counts minutes from its own epoch. Converted here rather
+  // than in the worker so the stored form stays narrow, and the decoded span
+  // is printed on the diagnostic line so this constant is CHECKED against a
+  // real answer instead of trusted: a 2026 product whose history starts in
+  // 2011 means this number is wrong.
+  const PROVIDER_EPOCH_MIN = 21564000;
+  const toMs = (min) => (min + PROVIDER_EPOCH_MIN) * 60000;
+
+  let historyRangeDays = 90;
+
+  function seriesInRange(series, days) {
+    const now = Date.now();
+    const from = days === 'SINCE_LISTED' ? 0 : now - days * 86400000;
+    const out = [];
+    for (const sr of series) {
+      const pts = sr.points
+        .map(([t, v]) => [toMs(t), v / 100])
+        .filter(([ms]) => ms >= from && ms <= now + 86400000);
+      if (pts.length) out.push({ index: sr.index, label: sr.label, points: pts });
+    }
+    return out;
+  }
+
+  // The 90-day spread, from the same series the chart draws. Fixed at three
+  // months whatever range the chart is showing, because the tile is labelled
+  // "3M swing" and a figure that silently followed the tab would contradict
+  // its own label.
+  function renderSwing(all) {
+    const el = $('apx-swing');
+    if (!el) return;
+    const pick = seriesInRange(all || [], 90);
+    const main = pick.find((x) => x.index === 18) || pick.find((x) => x.index === 1) || null;
+    if (!main || main.points.length < 2) {
+      setUnavailable(el, 'not enough history',
+        'Fewer than two price points in the last 90 days, so there is no spread '
+        + 'to report.');
+      return;
+    }
+    const vals = main.points.map((p) => p[1]);
+    const lo = Math.min(...vals);
+    const hi = Math.max(...vals);
+    el.textContent = fmt(hi - lo);
+    el.classList.remove('apx-sa-unknown');
+    el.title = main.label + ' ranged ' + fmt(lo) + ' to ' + fmt(hi)
+      + ' over the last 90 days, across ' + main.points.length + ' price points.';
+  }
+
+  function renderHistory(history) {
+    const cv = $('apx-history-chart');
+    const verdict = $('apx-history-verdict');
+    const all = (history && Array.isArray(history.series_data)) ? history.series_data : null;
+
+    // THE LEGEND DESCRIBES WHAT IS ON THE CANVAS, which is not the same as
+    // what the provider returned.
+    //
+    // The first version greyed an entry only when the series was missing from
+    // the response, so Amazon showed as present with one data point 200 days
+    // old while the chart was on its 3-month range and drew no Amazon line at
+    // all. A legend entry for a line that is not there sends the viewer
+    // looking for it and makes them doubt the lines that ARE there.
+    //
+    // Three distinct reasons, because they want different responses: a longer
+    // range, a different build, or nothing.
+    const legendFor = (drawn) => {
+      for (const el of document.querySelectorAll('.apx-hl-item')) {
+        const idx = Number(el.getAttribute('data-series'));
+        const sr = all ? all.find((x) => x.index === idx) : null;
+        const inData = !!(sr && sr.points.length);
+        const inView = !!(drawn && drawn.some((x) => x.index === idx));
+        el.classList.toggle('apx-hl-absent', !inView);
+        el.title = inView
+          ? sr.points.length + (sr.points.length === 1 ? ' point' : ' points')
+            + ' from your data provider.'
+          : inData
+            // Present but outside the selected range: a longer range shows it.
+            ? 'Your data provider has ' + sr.points.length + ' point'
+              + (sr.points.length === 1 ? '' : 's') + ' for this series, none of '
+              + 'them inside the range selected. Try a longer one.'
+            : (idx === 18 || idx === 10 || idx === 7
+                ? 'Your data provider returns this series only with offer data, '
+                  + 'which this version does not request \u2014 it costs extra tokens.'
+                : 'Your data provider returned no history for this series.');
+      }
+    };
+    legendFor(null);
+
+    if (!cv || !cv.getContext) return;
+    const ctx = cv.getContext('2d');
+    const W = cv.width;
+    const H = cv.height;
+    ctx.clearRect(0, 0, W, H);
+
+    if (!all) {
+      if (verdict) {
+        setUnavailable(verdict, LOADING,
+          'Waiting on your data provider for the price history.');
+      }
+      return;
+    }
+
+    const shown = seriesInRange(all, historyRangeDays);
+    // Now that the drawn set is known, the legend can describe it.
+    legendFor(shown);
+    if (!shown.length) {
+      if (verdict) {
+        const anyAtAll = all.some((x) => x.points.length);
+        setUnavailable(verdict, anyAtAll ? 'nothing in this range' : 'no history returned',
+          anyAtAll
+            ? 'Your data provider has history for this ASIN, but none inside the '
+              + 'range selected. Try a longer one.'
+            : 'Your data provider returned no price history for this ASIN.');
+      }
+      return;
+    }
+
+    // Bounds across every drawn series, so they share one scale and can be
+    // compared by eye. A per-series scale would make the cheapest line look
+    // the same as the dearest.
+    let tMin = Infinity, tMax = -Infinity, vMin = Infinity, vMax = -Infinity;
+    for (const sr of shown) {
+      for (const [t, v] of sr.points) {
+        if (t < tMin) tMin = t;
+        if (t > tMax) tMax = t;
+        if (v < vMin) vMin = v;
+        if (v > vMax) vMax = v;
+      }
+    }
+    // A flat series has zero span, and dividing by it puts every point on one
+    // edge or produces NaN coordinates that silently draw nothing.
+    const tSpan = tMax - tMin || 1;
+    const vPad = (vMax - vMin) * 0.1 || Math.max(vMax * 0.05, 0.5);
+    const lo = Math.max(0, vMin - vPad);
+    const hi = vMax + vPad;
+    const vSpan = hi - lo || 1;
+    const PAD = { l: 34, r: 6, t: 8, b: 16 };
+    const px = (t) => PAD.l + ((t - tMin) / tSpan) * (W - PAD.l - PAD.r);
+    const py = (v) => H - PAD.b - ((v - lo) / vSpan) * (H - PAD.t - PAD.b);
+
+    // Axis labels: cheapest and dearest, which are the two numbers anyone
+    // reads off a price chart.
+    ctx.font = '9px system-ui, sans-serif';
+    ctx.fillStyle = '#94a3b8';
+    ctx.textAlign = 'left';
+    ctx.fillText('$' + hi.toFixed(2), 2, PAD.t + 7);
+    ctx.fillText('$' + lo.toFixed(2), 2, H - PAD.b);
+    ctx.strokeStyle = 'rgba(148,163,184,0.25)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(PAD.l, PAD.t);
+    ctx.lineTo(PAD.l, H - PAD.b);
+    ctx.lineTo(W - PAD.r, H - PAD.b);
+    ctx.stroke();
+
+    for (const sr of shown) {
+      ctx.strokeStyle = SERIES_COLOUR[sr.index] || '#94a3b8';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      // A STEP line, not a sloped one. These are price CHANGES: the price
+      // held flat between two points and did not drift linearly towards the
+      // next one, and a sloped line claims movement that never happened.
+      let started = false;
+      let prevY = 0;
+      for (const [t, v] of sr.points) {
+        const x = px(t);
+        const y = py(v);
+        if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, prevY); ctx.lineTo(x, y); }
+        prevY = y;
+      }
+      // Carry the last price to the right edge: it is still in force.
+      if (started) ctx.lineTo(W - PAD.r, prevY);
+      ctx.stroke();
+    }
+
+    renderSwing(all);
+
+    // The verdict says only what the drawn series support.
+    if (verdict) {
+      const main = shown.find((x) => x.index === 18) || shown.find((x) => x.index === 1) || shown[0];
+      const vals = main.points.map((p) => p[1]);
+      const min = Math.min(...vals);
+      const max = Math.max(...vals);
+      const days = Math.max(1, Math.round((tMax - tMin) / 86400000));
+      verdict.textContent = main.label + ' ' + fmt(min) + '\u2013' + fmt(max)
+        + ' over ' + days + (days === 1 ? ' day' : ' days');
+      verdict.classList.remove('apx-sa-unknown');
+      verdict.title = main.points.length + ' price points, ' + main.label
+        + '. The flat steps are real: a price holds until it changes.';
+    }
+  }
   function renderOffers(o) {
     if (!o) { renderSellersPending(); return; }
     // Always logged, successful or not: when the offer list does not render,
@@ -761,9 +968,14 @@
     // the spread across today's offers. It sits beside the three offer cards
     // and belongs with the chart, which is why it was grouped wrongly here in
     // the first place.
-    setUnavailable($('apx-swing'), NOT_IN_VERSION,
-      'The three-month price spread needs the price-history series, which '
-      + 'this version does not chart yet. It is not an offer-list figure.');
+    // The three-month spread WAS blanked as needing a price history this
+    // build did not have. It has one now, and it is the same series the chart
+    // draws -- so this is computed rather than declared missing, and only when
+    // the provider answer is actually in hand.
+    if (!lastRank || !lastRank.ok) {
+      setUnavailable($('apx-swing'), LOADING,
+        'Waiting on your data provider for the price history.');
+    }
 
     // THE FALLBACK, and it must not run when the offer list is open.
     //
@@ -1061,6 +1273,20 @@
             // keeps meeting. A length divisible by 3 and not by 2 proves it.
             + (Array.isArray(h.lengths) && h.lengths.length
                 ? ' [' + h.lengths.map((p) => p[0] + ':' + p[1]).join(' ') + ']'
+            // THE DECODED SPAN, so the provider-epoch constant is checked
+            // against a real answer instead of trusted. A 2026 product whose
+            // history starts in 2011 means the constant is wrong -- and that
+            // is invisible on a chart, which would simply look fine.
+            + (() => {
+                const all = (h.series_data || []).filter((x) => x.points.length);
+                if (!all.length) return '';
+                let lo = Infinity, hi = -Infinity;
+                for (const sr of all) for (const [t] of sr.points) {
+                  if (t < lo) lo = t; if (t > hi) hi = t;
+                }
+                const d = (m) => new Date((m + 21564000) * 60000).toISOString().slice(0, 10);
+                return ' ' + d(lo) + '..' + d(hi);
+              })()
                 : '')
           : 'history: absent from the response');
 
@@ -1136,6 +1362,9 @@
     // Same answer, same call: dimensions ride along on the product lookup
     // that was already paid for, so this costs no extra token.
     renderDims(res.dims || null, (lastReading && lastReading.marketplace) || 'US');
+    // Same answer again: the history rode in with the fees and the
+    // dimensions, so the chart costs no extra call.
+    renderHistory(res.history || null);
     // AND re-render the offer rows, because their ROI column is computed from
     // lastFees, which only exists once this answer lands. The offers were
     // rendered on PAGE_READING -- earlier, from the page, with no fees in hand
@@ -1396,6 +1625,19 @@
     renderMoney();
     if (lastReading) renderOffers(lastReading.offers);
   };
+  // The range tabs. They redraw from the series already in hand -- no lookup
+  // and no token, because the history arrived with the fees.
+  for (const tab of document.querySelectorAll('.apx-range-tab')) {
+    tab.addEventListener('click', () => {
+      const raw = tab.getAttribute('data-range');
+      historyRangeDays = raw === 'SINCE_LISTED' ? 'SINCE_LISTED' : Number(raw);
+      for (const t of document.querySelectorAll('.apx-range-tab')) {
+        t.classList.toggle('active', t === tab);
+      }
+      renderHistory(lastRank && lastRank.history);
+    });
+  }
+
   $('apx-cost')?.addEventListener('input', recomputeMoney);
   $('apx-seller-mode')?.addEventListener('change', recomputeMoney);
   $('apx-sim-slider')?.addEventListener('input', () => renderSim(lastSale, lastFees && lastFees.found && lastSale != null

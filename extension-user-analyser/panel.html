@@ -315,11 +315,20 @@
             <canvas id="apx-history-chart" width="320" height="180"></canvas>
             <div id="apx-history-tooltip" class="apx-history-tooltip" hidden></div>
           </div>
+          <!-- The legend is keyed by the PROVIDER'S OWN SERIES INDEX, because
+               three of these four were absent from the live response and the
+               panel has to be able to say which. Buy Box (18), FBA (10) and
+               FBM (7) are all offer-derived and this build does not request
+               offers; index 1, the general marketplace New price, is the one
+               that actually carries history. An entry with no data is greyed
+               and says why on hover, rather than being drawn from whichever
+               series happens to be present. -->
           <div class="apx-history-legend">
-            <span class="apx-hl-item"><i class="apx-hl-dot" style="background:#34d399"></i>Buy Box</span>
-            <span class="apx-hl-item"><i class="apx-hl-dot" style="background:#f97316"></i>Amazon</span>
-            <span class="apx-hl-item"><i class="apx-hl-dot" style="background:#60a5fa"></i>FBA</span>
-            <span class="apx-hl-item"><i class="apx-hl-dot" style="background:#a78bfa"></i>FBM</span>
+            <span class="apx-hl-item" data-series="18"><i class="apx-hl-dot" style="background:#34d399"></i>Buy Box</span>
+            <span class="apx-hl-item" data-series="0"><i class="apx-hl-dot" style="background:#f97316"></i>Amazon</span>
+            <span class="apx-hl-item" data-series="10"><i class="apx-hl-dot" style="background:#60a5fa"></i>FBA</span>
+            <span class="apx-hl-item" data-series="7"><i class="apx-hl-dot" style="background:#a78bfa"></i>FBM</span>
+            <span class="apx-hl-item" data-series="1"><i class="apx-hl-dot" style="background:#e879f9"></i>New</span>
           </div>
           <div id="apx-history-verdict" class="apx-history-verdict apx-sa-unknown">—</div>
         </section>
