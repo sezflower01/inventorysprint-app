@@ -1483,12 +1483,23 @@
     const toggle = $('apx-me-change');
     const err = $('apx-me-error');
     const input = $('apx-me-input');
-    if (toggle && form) {
+    const gate = $('apx-keepa-gate');
+
+    // The field lives in the gate now, so "Change" reopens the gate rather
+    // than revealing a second copy down here. In seller-only mode the key
+    // half is hidden: the key is already saved, and showing an empty key
+    // field invites retyping it for nothing.
+    if (toggle && gate) {
       toggle.addEventListener('click', () => {
-        form.classList.toggle('hidden');
-        if (!form.classList.contains('hidden') && input) input.focus();
+        gate.classList.add('apx-gate-seller-only');
+        show('keepa');
+        if (input) input.focus();
       });
     }
+    $('apx-gate-done')?.addEventListener('click', () => {
+      gate?.classList.remove('apx-gate-seller-only');
+      showSignedIn();
+    });
     const save = (value) => {
       toHost({ type: 'NOOP' });
       chrome.runtime.sendMessage({ type: 'ISUA_SET_MY_SELLER', sellerId: value }, (res) => {
@@ -1499,7 +1510,12 @@
         if (err) err.textContent = '';
         mySellerId = res.sellerId;
         renderMySeller();
-        if (form) form.classList.add('hidden');
+        // If the gate was reopened only to change this, go back. On first
+        // run the key is still being entered, so stay put.
+        if (gate && gate.classList.contains('apx-gate-seller-only')) {
+          gate.classList.remove('apx-gate-seller-only');
+          showSignedIn();
+        }
         // Re-render against the reading already in hand. No lookup, no
         // token: the offers were read from the page and are still held.
         if (lastReading) renderOffers(lastReading.offers);

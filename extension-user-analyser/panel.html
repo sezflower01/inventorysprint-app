@@ -91,10 +91,40 @@
           <div id="apx-keepa-error" class="apx-signin-error"></div>
           <button id="apx-keepa-save" type="submit" class="apx-primary">Save key</button>
         </form>
+        <!-- YOUR OWN SELLER ID, asked for at the same moment as the key.
+
+             It used to live at the very bottom of the panel, behind a
+             toggle, which put a setup step after everything it affects: the
+             offer list counted you as your own competitor until you
+             scrolled past the whole panel and found it. Setup belongs
+             together.
+
+             A SEPARATE FORM, not a second field in the key form, because
+             the key input is `required` -- one form would refuse to save a
+             seller id until a key was typed, and refuse to save a key
+             until... nothing, but it would still validate both at once.
+             Two forms save independently, which is what the two facts are.
+
+             Optional on purpose. Everything else in the panel works
+             without it; it only stops your own offer being read as a
+             rival. -->
+        <p class="apx-k" id="apx-me-label">Your Amazon seller ID &mdash; optional.
+           It is the <code>seller=</code> value in your own storefront link,
+           and it stays in this browser.</p>
+        <form id="apx-me-form" class="apx-signin-form">
+          <input id="apx-me-input" type="text" placeholder="A1B2C3D4E5F6G7" autocomplete="off"
+                 spellcheck="false" autocapitalize="characters" maxlength="14" />
+          <div id="apx-me-error" class="apx-signin-error"></div>
+          <button id="apx-me-save" type="submit" class="apx-primary">Save seller ID</button>
+          <button id="apx-me-clear" type="button" class="apx-strip-link">Clear</button>
+        </form>
         <p class="apx-k" id="apx-keepa-note">
           Each user needs their own paid subscription. The key is checked once
           before it is saved, and the panel shows how many tokens it has left.
         </p>
+        <!-- Only shown when the gate was reopened to change the seller id,
+             so there is a way back that is not "re-enter your key". -->
+        <button type="button" id="apx-gate-done" class="apx-strip-link">Done</button>
       </div>
 
       <div id="apx-signin" class="apx-card hidden">
@@ -373,24 +403,14 @@
           <span id="apx-keepa-status" class="apx-k"></span>
           <button type="button" id="apx-keepa-change" class="apx-strip-link">Change key</button>
         </p>
-        <!-- The user’s own seller id. Typed once, stored in this browser,
-             and used only to stop their own offer being counted as a rival.
-             There is no way to read it from the page and no way to read it
-             from the session without cookies, which this extension does not
-             touch -- so it is asked for plainly. -->
+        <!-- The seller id itself is entered in the gate at the top, beside
+             the key. This is the readout plus a way back to it -- the input
+             is not duplicated here, because two inputs for one stored value
+             is two places for it to disagree. -->
         <p class="apx-meta-row apx-k">
           <span id="apx-me-status" class="apx-k"></span>
-          <button type="button" id="apx-me-change" class="apx-strip-link">Your seller ID</button>
+          <button type="button" id="apx-me-change" class="apx-strip-link">Change</button>
         </p>
-        <form id="apx-me-form" class="apx-signin-form hidden">
-          <input id="apx-me-input" type="text" placeholder="A1B2C3D4E5F6G7" autocomplete="off"
-                 spellcheck="false" autocapitalize="characters" maxlength="14" />
-          <div id="apx-me-error" class="apx-signin-error"></div>
-          <button id="apx-me-save" type="submit" class="apx-primary">Save</button>
-          <button id="apx-me-clear" type="button" class="apx-strip-link">Clear</button>
-          <p class="apx-k">It is the <code>seller=</code> value in your own storefront
-             link. It stays in this browser and is never sent anywhere.</p>
-        </form>
       </div>
     </main>
   </div>

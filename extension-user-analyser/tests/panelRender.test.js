@@ -799,3 +799,43 @@ test('"but your own" appears only when your own offer is that kind', { skip }, (
   assert.match($('apx-fbm').title, /See more options/,
     'the FBM line no longer says how to load the rest');
 });
+
+test('the seller id is asked for with the key, not at the bottom', { skip }, () => {
+  // It used to sit at the very end of the panel behind a toggle, which put a
+  // setup step after everything it affects: the offer list counted the user as
+  // their own competitor until they scrolled past the whole panel and found
+  // it. Setup belongs together, so this pins the placement.
+  const { window } = renderPanel(null);
+  const d = window.document;
+
+  const gate = d.getElementById('apx-keepa-gate');
+  const form = d.getElementById('apx-me-form');
+  assert.ok(gate && form, 'the gate or the seller form has gone');
+  assert.ok(gate.contains(form), 'the seller field is no longer in the first-run gate');
+
+  // Directly after the key form, not somewhere else inside the gate.
+  const order = Array.from(gate.children).map((e) => e.id).filter(Boolean);
+  assert.ok(order.indexOf('apx-me-form') > order.indexOf('apx-keepa-form'),
+    'the seller field is above the key field');
+  assert.equal(order.indexOf('apx-me-form') - order.indexOf('apx-keepa-form'), 2,
+    'something has come between the key field and the seller field');
+
+  // A SEPARATE FORM. The key input is `required`, so one shared form would
+  // refuse to save a seller id until a key had been typed.
+  assert.ok(!d.getElementById('apx-keepa-form').contains(d.getElementById('apx-me-input')),
+    'the seller input is inside the key form, whose required key would block it');
+  assert.ok(d.getElementById('apx-keepa-key').required,
+    'the key input is no longer required, which is the reason the forms are split');
+
+  // And exactly one input for one stored value -- two would be two places for
+  // it to disagree.
+  assert.equal(d.querySelectorAll('#apx-me-input').length, 1,
+    'the seller input is duplicated');
+  assert.ok(!d.querySelector('.apx-meta-row #apx-me-input'),
+    'an input came back at the bottom of the panel');
+
+  // The footer keeps the readout and a way back to the field.
+  assert.ok(d.getElementById('apx-me-status'), 'the seller-id readout has gone');
+  assert.ok(d.getElementById('apx-gate-done'),
+    'there is no way out of the gate when it is reopened to change the id');
+});
