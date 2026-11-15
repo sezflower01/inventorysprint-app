@@ -294,11 +294,17 @@
   // marketplace rather than from the sold-by href, which is RELATIVE on the
   // page -- resolving it correctly depends on where the panel thinks it is,
   // and the panel is an extension page, not amazon.com.
+  // US, Canada, Mexico and Brazil: the account’s marketplaces and no others.
+  // This listed ten; six of them were for countries this account does not
+  // sell in, and all nine non-US entries were unreachable because the
+  // marketplace is always the literal 'US'.
+  //
+  // Only the US host is reachable today. The other three are listed so the
+  // storefront link is correct the day the injection list grows, and because
+  // a half-written map is worse than a complete small one.
   const AMZ_HOST = {
-    US: 'www.amazon.com', CA: 'www.amazon.ca', MX: 'www.amazon.com.mx',
-    BR: 'www.amazon.com.br', UK: 'www.amazon.co.uk', DE: 'www.amazon.de',
-    FR: 'www.amazon.fr', IT: 'www.amazon.it', ES: 'www.amazon.es',
-    JP: 'www.amazon.co.jp',
+    US: 'www.amazon.com',
+    CA: 'www.amazon.ca', MX: 'www.amazon.com.mx', BR: 'www.amazon.com.br',
   };
 
   function storefrontUrl(sellerId, marketplace) {
@@ -408,6 +414,15 @@
   // US seller and as centimetres to a European one, and those differ by 2.5x.
   // The provider's own figures stay in the tooltip so the conversion can be
   // checked rather than trusted.
+  // ⚠️ ALL FOUR ARE MARKED IMPERIAL AND ONLY THE US ONE IS VERIFIED.
+  //
+  // Amazon US lists inches and pounds. Canada, Mexico and Brazil are each
+  // metric countries whose Amazon sites may well show centimetres and
+  // kilograms -- this map asserts otherwise for all three on no evidence,
+  // which is exactly the kind of plausible-looking wrongness the unit suffix
+  // was added to prevent. It is harmless today because nothing but US is
+  // reachable, and it must be CHECKED on a real page in each country before
+  // that changes rather than trusted because it is written down.
   const IMPERIAL = { US: true, CA: true, MX: true, BR: true };
 
   function renderDims(dims, marketplace) {
@@ -1063,7 +1078,10 @@
 
   // ── page-read fields ────────────────────────────────────────────────────
 
-  const MARKET_NAME = { US: 'US', CA: 'CA', MX: 'MX', BR: 'BR', UK: 'UK', DE: 'DE', FR: 'FR', IT: 'IT', ES: 'ES', JP: 'JP' };
+  // The four this account sells in. Anything else falls through to the raw
+  // code rather than being silently renamed, so an unexpected marketplace is
+  // visible in the panel instead of looking supported.
+  const MARKET_NAME = { US: 'US', CA: 'CA', MX: 'MX', BR: 'BR' };
 
   /** Never guess: a field that was not found says so, and says nothing else. */
   function put(id, field, fallback) {

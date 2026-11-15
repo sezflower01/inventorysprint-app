@@ -277,8 +277,20 @@
   //
   //   1. FBA vs FBM is in the SOLD-BY LINK, not the text. The href carries
   //      isAmazonFulfilled=0|1. "Ships from Amazon.com" is the obvious-looking
-  //      signal and it is localised prose, so reading it would break on every
-  //      non-English marketplace this extension already supports.
+  //      signal and it is localised prose.
+  //
+  //      THIS USED TO CLAIM that reading the prose would break across all the
+  //      non-English marketplaces this extension handled -- which was FALSE
+  //      when written, and is worth correcting rather than deleting. (The
+  //      exact wording is paraphrased here on purpose: a test forbids the
+  //      phrase, and quoting it tripped that test. Fourth comment in this
+  //      folder to set off the rule written about it.) The extension supports
+  //      one marketplace: content_scripts matches amazon.com and nothing
+  //      else, and the marketplace is never derived from the hostname -- it
+  //      is the literal 'US' via a fallback. The attribute is still the
+  //      right thing to read, for the plain reason that an attribute is not
+  //      prose; the argument just needed to stop resting on support that
+  //      does not exist.
   //
   //   2. Price and shipping are SEPARATE attributes on the price block
   //      (data-csa-c-price-to-pay, data-csa-c-shipping-charge). The rendered

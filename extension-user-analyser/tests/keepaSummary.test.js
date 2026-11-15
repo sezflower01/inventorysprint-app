@@ -397,3 +397,57 @@ test('history is downsampled to the canvas, keeping both ends', () => {
   const bytes = JSON.stringify(r.history.series_data).length;
   assert.ok(bytes < 24000, 'the cached series grew to ' + bytes + ' bytes per ASIN');
 });
+
+test('the marketplace maps cover this account and no more', () => {
+  // They listed ten, six of them countries this account does not sell in. All
+  // nine non-US entries were unreachable anyway: content_scripts matches
+  // amazon.com only, and the marketplace is never derived from the hostname --
+  // it is the literal 'US' through a fallback. So the extra entries advertised
+  // support that did not exist in two independent ways.
+  const WANT = ['BR', 'CA', 'MX', 'US'];
+
+  const keepa = fs.readFileSync(path.join(ROOT, 'keepa.js'), 'utf8');
+  const dom = keepa.match(/const DOMAIN = \{([^}]+)\}/)[1];
+  assert.deepEqual(dom.match(/\b[A-Z]{2}\b/g).sort(), WANT, 'the provider domain map changed');
+  // Only US is honoured, whatever the map lists.
+  assert.match(keepa, /const ENABLED_MARKETS = \['US'\]/,
+    'a marketplace was enabled without the fee, currency and gating work');
+
+  const panel = fs.readFileSync(path.join(ROOT, 'panel.js'), 'utf8');
+  for (const [name, rx] of [
+    ['AMZ_HOST', /const AMZ_HOST = \{([\s\S]*?)\};/],
+    ['IMPERIAL', /const IMPERIAL = \{([^}]+)\}/],
+    ['MARKET_NAME', /const MARKET_NAME = \{([^}]+)\}/],
+  ]) {
+    const body = panel.match(rx)[1];
+    const keys = [...new Set((body.match(/\b([A-Z]{2}):/g) || []).map((k) => k.slice(0, 2)))].sort();
+    assert.deepEqual(keys, WANT, name + ' lists marketplaces this account does not sell in');
+  }
+
+  // THE UNVERIFIED FIGURES MUST STAY FLAGGED. Sending the wrong provider
+  // domain id returns a real answer about the WRONG COUNTRY, and asserting
+  // Canada is imperial on no evidence is the same plausible-looking kind of
+  // wrong. Both warnings are load-bearing until someone checks them.
+  const domComment = keepa.slice(Math.max(0, keepa.indexOf('const DOMAIN') - 900), keepa.indexOf('const DOMAIN'));
+  // The ids were CHECKED against the provider’s own published table, so what
+  // must survive is the citation rather than a warning. A map with no source
+  // is a map someone will “correct” from memory.
+  assert.match(domComment, /VERIFIED AGAINST THE PROVIDER/,
+    'the domain ids lost the record of where they were checked');
+  assert.match(domComment, /com.mx/, 'the published table has gone from the comment');
+  assert.match(domComment, /api-docs/, 'the citation has gone');
+  const impComment = panel.slice(Math.max(0, panel.indexOf('const IMPERIAL') - 900), panel.indexOf('const IMPERIAL'));
+  assert.match(impComment, /ONLY THE US ONE IS VERIFIED/,
+    'the unverified imperial-units assumption lost its warning');
+});
+
+test('the readPage comment no longer claims marketplaces that do not exist', () => {
+  // It said the fulfilment attribute mattered because reading localised prose
+  // "would break on every non-English marketplace this extension already
+  // supports". The extension supports one.
+  const src = fs.readFileSync(path.join(ROOT, 'readPage.js'), 'utf8');
+  assert.ok(!/already supports/.test(src),
+    'the claim about supported marketplaces is back');
+  assert.match(src, /The extension supports\s*\n?\s*\/\/\s*one marketplace|supports\s+one marketplace/,
+    'the correction naming one marketplace has gone');
+});

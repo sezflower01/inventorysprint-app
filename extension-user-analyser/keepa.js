@@ -45,7 +45,33 @@
   const BASE = 'https://api.keepa.com';
 
   // Keepa's own domain ids. Only the ones this extension can reach.
-  const DOMAIN = { US: 1, UK: 2, DE: 3, FR: 4, JP: 5, CA: 6, IT: 8, ES: 9, MX: 11, BR: 12 };
+  // THE ACCOUNT’S MARKETPLACES, and only those: US, Canada, Mexico, Brazil.
+  //
+  // This listed ten, including UK, DE, FR, IT, ES and JP, which this account
+  // does not sell in and never will. Nine of the ten were unreachable anyway
+  // -- the marketplace is always the literal 'US' -- so the extra entries
+  // advertised support that did not exist in two independent ways.
+  //
+  // VERIFIED AGAINST THE PROVIDER’S OWN DOCUMENTATION on 2026-11-15, not
+  // carried over from the old map. Sending a wrong domain id does not error:
+  // it returns a real answer about the WRONG COUNTRY, which looks entirely
+  // plausible, so these were checked rather than trusted.
+  //
+  // keepa.com/api-docs/product.html, section “Domain IDs”, reachable only in a
+  // real browser because the docs render client-side -- a plain fetch of that
+  // page returns the title and nothing else. The published table:
+  //
+  //     1 com      4 fr       8 it       11 com.mx
+  //     2 co.uk    5 co.jp    9 es       12 com.br
+  //     3 de       6 ca      10 in
+  //
+  // There is no 7. India (10) exists and is not in this account’s set.
+  //
+  // ENABLED_MARKETS, not this map, is what the code honours.
+  const DOMAIN = { US: 1, CA: 6, MX: 11, BR: 12 };
+
+  /** Only US is wired. The rest need their own fee, currency and gating work. */
+  const ENABLED_MARKETS = ['US'];
 
   async function getKey() {
     try {
