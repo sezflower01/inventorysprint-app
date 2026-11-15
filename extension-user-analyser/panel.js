@@ -987,7 +987,12 @@
     const mine = mySellerId
       ? o.offers.find((x) => x.sellerId === mySellerId) || null
       : null;
-    const others = mine ? o.offers.filter((x) => x !== mine) : o.offers;
+    // TWO EXCLUSIONS, and both have to be here or the panel contradicts the
+    // reader. The reader already drops non-new offers from its own lowest-
+    // price figures; if the panel then recomputed over every offer to take
+    // out the user’s own, it would quietly put the used ones back.
+    const competing = o.offers.filter((x) => x.isNew !== false);
+    const others = mine ? competing.filter((x) => x !== mine) : competing;
     const cheapestOf = (list) => list.reduce(
       (best, x) => (x.landed != null && (!best || x.landed < best.landed) ? x : best), null);
     const rivalFba = cheapestOf(others.filter((x) => x.fba === true));
@@ -1019,8 +1024,18 @@
           + (mine ? ' (one yours)' : '');
       }
       const split = o.fbaCount + ' FBA, ' + o.fbmCount + ' FBM';
-      const unknown = o.count - o.fbaCount - o.fbmCount;
+      const unknown = o.newCount - o.fbaCount - o.fbmCount;
+      // WHAT THE NUMBER COUNTS, said explicitly, because it is now two
+      // subtractions away from the offers on screen: the used ones and your
+      // own. A count that quietly differs from the visible rows is a bug
+      // report waiting to happen.
       count.title = o.count + ' offers read from the open list'
+        + (o.excludedByCondition
+            ? ', ' + o.excludedByCondition + ' of them not new condition and left out of these figures'
+            : '')
+        + (o.conditionUnknown
+            ? ', ' + o.conditionUnknown + ' with no condition shown (counted anyway)'
+            : '')
         + (mine ? ', one of them yours' : '') + ' \u2014 ' + split
         + (unknown > 0 ? ', ' + unknown + ' with no fulfilment stated' : '')
         + (o.amazonSold ? '. Amazon is one of them.' : '. Amazon is not selling this.')
@@ -1122,6 +1137,22 @@
       else if (offer.fba === false) tag('fbm', 'FBM', 'Merchant-fulfilled: the price shown is landed, delivery included.');
       else tag('', '?', 'This offer\u2019s sold-by link did not say how it is fulfilled.');
       if (offer.isBuyBox) tag('bb', 'BB', 'Holds the Buy Box.');
+      // CONDITION, badged only when it is NOT plain New -- a New badge on
+      // every row of a typical listing is noise, and the thing worth seeing
+      // is the row that is a different good. On a book the drawer mixes used
+      // copies in freely, and a $19.00 row at 33% beside a $36.55 row at
+      // 219% with nothing to distinguish them is a trap.
+      if (offer.isNew === false) {
+        tag('cond', offer.condition || 'not New',
+          'Condition: ' + (offer.condition || 'not New')
+          + '. Excluded from the competitor count and the lowest-price figures, which are about new-condition competition.');
+      } else if (offer.isNew === null) {
+        // Kept in the figures, because a heading that did not parse is not
+        // evidence of condition -- and dropping an offer on a failed read is
+        // how a real competitor vanishes without trace.
+        tag('', 'condition not shown',
+          'This offer\u2019s condition could not be read from the page, so it is still counted. It is NOT evidence that the offer is used.');
+      }
       row.appendChild(tags);
 
       const price = document.createElement('span');
@@ -1162,6 +1193,14 @@
     // that silently skipped an offer and have no way to know.
     const note = document.createElement('div');
     note.className = 'apx-sellers-note apx-k';
+    if (o.excludedByCondition) {
+      const cond = document.createElement('div');
+      cond.className = 'apx-sellers-note apx-k';
+      cond.textContent = o.excludedByCondition + ' offer'
+        + (o.excludedByCondition === 1 ? ' is' : 's are') + ' not in new condition and are left out of the competitor count and the lowest-price figures.';
+      cond.title = 'They are still listed above with their condition, because \u201cwhy is it cheaper elsewhere?\u201d deserves an answer rather than silence.';
+      list.appendChild(cond);
+    }
     if (!o.complete) {
       const more = document.createElement('div');
       more.className = 'apx-sellers-note apx-k';

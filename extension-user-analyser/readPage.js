@@ -379,6 +379,30 @@
     // so primeStated says whether the PAGE said it, and nothing more.
     const primeStated = !!block.querySelector('.a-icon-prime');
 
+    // ── CONDITION, which the drawer mixes freely and the rows did not show ──
+    //
+    // On a book, #aod-offer-list returns used copies alongside new ones. The
+    // panel showed a $19.00 row at 33% ROI next to a $36.55 row at 219% with
+    // nothing to say they are different goods, and computed "lowest FBM"
+    // from the used one -- a price no new-condition seller has to beat.
+    //
+    // CLASSIFIED BY WHETHER IT IS NEW, not by matching used wordings. Amazon
+    // has a family of them -- used, collectible and refurbished, each with
+    // sub-grades -- and the exact strings are not in any capture here. Asking
+    // "is this exactly New?" needs none of them, so nothing is guessed: the
+    // literal heading text is carried through and displayed as-is.
+    //
+    // THREE OUTCOMES, and the third is not the second. isNew null means the
+    // heading was not found, which is not evidence the offer is used -- so
+    // such an offer is KEPT in the figures and marked, because dropping an
+    // offer on the strength of a failed read is how a real competitor
+    // disappears.
+    const headEl = block.querySelector('#aod-offer-heading');
+    const conditionText = headEl
+      ? (headEl.textContent.replace(/\s+/g, ' ').trim() || null)
+      : null;
+    const isNew = conditionText == null ? null : /^new$/i.test(conditionText);
+
     const name = link ? link.textContent.replace(/\s+/g, ' ').trim() : null;
     if (!name && price == null) return null; // not an offer block at all
 
@@ -402,6 +426,11 @@
       maxQtyIsCap: stock.atLeast,
       deliveryProgram: deliveryProgram,
       primeStated: primeStated,
+      // The heading exactly as the page wrote it, so a grade the reader has
+      // never seen still reaches the screen instead of being normalised away.
+      condition: conditionText,
+      // true / false / null -- stated New, stated something else, not stated.
+      isNew: isNew,
       isBuyBox: !!isBuyBox,
     };
   }
@@ -511,6 +540,7 @@
     const base = {
       found: false, text: 'not found', source: SRC_PAGE, state: 'closed',
       count: 0, blocks: 0, totalOthers: null, complete: false, missing: 0, offers: [],
+      newCount: 0, excludedByCondition: 0, conditionUnknown: 0,
       buyBox: null, fbaLow: null, fbmLow: null, amazon: null,
       fbaCount: 0, fbmCount: 0, amazonSold: false,
       // Reported so the next "it says empty but I can see offers" is one
@@ -565,7 +595,19 @@
 
     const cheapest = (list) => list.reduce(
       (best, o) => (o.landed != null && (!best || o.landed < best.landed) ? o : best), null);
-    const amazon = offers.find((o) => o.isAmazon) || null;
+
+    // THE FIGURES ARE ABOUT NEW-CONDITION COMPETITION, because that is what
+    // the user sells. A used copy at a third of the price is not a rival for
+    // a new listing, and averaging it in produced a "lowest FBM" that nobody
+    // selling new has to beat.
+    //
+    // isNew === false is excluded. isNew === null is KEPT: an unread heading
+    // is not evidence of condition, and dropping an offer on a failed read is
+    // how a real competitor disappears silently.
+    const newish = offers.filter((o) => o.isNew !== false);
+    const excludedByCondition = offers.length - newish.length;
+    const conditionUnknown = offers.filter((o) => o.isNew === null).length;
+    const amazon = newish.find((o) => o.isAmazon) || null;
 
     return {
       found: true,
@@ -589,17 +631,23 @@
       // delivery ascending, so what is missing is always the expensive end.
       complete: totalOthers == null || offers.length >= totalOthers + 1,
       missing: totalOthers == null ? 0 : Math.max(0, (totalOthers + 1) - offers.length),
+      // EVERY offer, so the rows can show the used ones with their grade --
+      // hiding them would answer "why is this cheap elsewhere?" with silence.
       offers: offers,
+      // New-condition only, which is what the headline figures are about.
+      newCount: newish.length,
+      excludedByCondition: excludedByCondition,
+      conditionUnknown: conditionUnknown,
       buyBox: offers.find((o) => o.isBuyBox) || null,
-      fbaLow: cheapest(offers.filter((o) => o.fba === true)),
-      fbmLow: cheapest(offers.filter((o) => o.fba === false)),
+      fbaLow: cheapest(newish.filter((o) => o.fba === true)),
+      fbmLow: cheapest(newish.filter((o) => o.fba === false)),
       amazon: amazon,
       // fba === null is "the page did not say", so it counts towards neither.
       // The two counts therefore need not add up to count, and that is the
       // point: a missing discriminator is visible instead of being bundled
       // into FBM, which is what a simple !fba test would have done.
-      fbaCount: offers.filter((o) => o.fba === true).length,
-      fbmCount: offers.filter((o) => o.fba === false).length,
+      fbaCount: newish.filter((o) => o.fba === true).length,
+      fbmCount: newish.filter((o) => o.fba === false).length,
       amazonSold: !!amazon,
     };
   }

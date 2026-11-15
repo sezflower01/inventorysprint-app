@@ -234,6 +234,10 @@ a.apx-seller-name:hover { text-decoration: underline; color: #4F46E5; }
 .apx-seller-tag.fbm { background: rgba(245,158,11,0.18); color: #B45309; }
 .apx-seller-tag.amz { background: rgba(239,68,68,0.18); color: #DC2626; }
 .apx-seller-tag.self { background: rgba(79,70,229,0.25); color: #4F46E5; }
+/* A condition that is not New. Deliberately the warning colour: the row is
+   a different good from the rest of the list, which is the thing a reader
+   scanning prices needs to notice before they compare them. */
+.apx-seller-tag.cond { background: rgba(245,158,11,0.22); color: #B45309; }
 /* Two badges can apply at once (YOU + FBA, FBA + BB), and the row grid has
    exactly four columns, so they share one cell instead of adding a fifth. */
 /* The gate reopened just to change the seller id: the key is already saved,

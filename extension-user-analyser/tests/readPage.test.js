@@ -582,3 +582,74 @@ test('the scope is reported on success, not only on failure', { skip }, () => {
   assert.match(slice, /panels: o\.panels/, 'the console line no longer says how many containers there were');
   assert.match(slice, /scopedTo: o\.scopedTo/, 'the console line no longer says which root was read');
 });
+
+/** Fixture 09 with the Nth and Mth offer headings turned to a used grade. */
+function withUsedOffers(positions) {
+  let n = 0;
+  return fs.readFileSync(path.join(FIX, '09-offers-panel.html'), 'utf8')
+    .replace(/(<span class="a-size-base a-text-bold">)New(<\/span>)/g,
+      (m, a, b) => { n++; return positions.includes(n) ? a + 'Used - Very Good' + b : m; });
+}
+
+test('condition is read, and non-new offers leave the competitive figures', { skip }, () => {
+  // THE BOOK ASIN. The drawer returned used copies alongside new ones, and the
+  // panel showed a $19.00 row at 33% ROI next to a $36.55 row at 219% with
+  // nothing to say they are different goods -- then computed "lowest FBM" from
+  // the used one, a price no new-condition seller has to beat.
+  const all = readPage.readOffers(load('09-offers-panel.html'));
+  assert.equal(all.newCount, 7, 'the all-new capture no longer reads as all new');
+  assert.equal(all.excludedByCondition, 0);
+  assert.equal(all.conditionUnknown, 0, 'a condition heading stopped parsing');
+  assert.equal(all.buyBox.condition, 'New');
+  assert.equal(all.buyBox.isNew, true);
+
+  const mixed = readPage.readOffers(new JSDOM(withUsedOffers([4, 5])).window.document);
+  assert.equal(mixed.count, 7, 'the used offers were dropped from the list entirely');
+  assert.equal(mixed.newCount, 5);
+  assert.equal(mixed.excludedByCondition, 2);
+  // The counts are over NEW offers only: 6 FBA became 4.
+  assert.equal(mixed.fbaCount, 4, 'the FBA count still includes used offers');
+  assert.equal(mixed.fbmCount, 1);
+
+  // EVERY offer survives in the list, with its grade, because "why is it
+  // cheaper elsewhere?" deserves an answer rather than silence.
+  const used = mixed.offers.filter((o) => o.isNew === false);
+  assert.equal(used.length, 2);
+  for (const o of used) assert.equal(o.condition, 'Used - Very Good',
+    'the literal heading text is not carried through');
+});
+
+test('the lowest-price figures skip used offers', { skip }, () => {
+  // Make the CHEAPEST offer used, which is the shape that actually misleads:
+  // the headline "lowest" becomes a price for a different good.
+  const html = withUsedOffers([2]); // the first non-pinned offer, at 64.97
+  const o = readPage.readOffers(new JSDOM(html).window.document);
+  const usedOne = o.offers.find((x) => x.isNew === false);
+  assert.ok(usedOne, 'no offer was turned used, so this tests nothing');
+
+  // It is still in the list...
+  assert.ok(o.offers.includes(usedOne));
+  // ...and it is not what fbaLow points at, unless a NEW offer ties it.
+  assert.notEqual(o.fbaLow, usedOne, 'the lowest FBA figure is a used offer');
+  assert.equal(o.fbaLow.isNew, true, 'the lowest FBA offer is not new condition');
+});
+
+test('a condition that could not be read is kept, not assumed used', { skip }, () => {
+  // An unparsed heading is not evidence of condition. Dropping an offer on a
+  // failed read is how a real competitor disappears with no trace -- so it
+  // counts, and is marked instead.
+  const html = fs.readFileSync(path.join(FIX, '09-offers-panel.html'), 'utf8')
+    .replace(/<div id="aod-offer-heading"[\s\S]*?<\/div>/, '');
+  const o = readPage.readOffers(new JSDOM(html).window.document);
+
+  assert.equal(o.conditionUnknown, 1, 'a missing heading is no longer reported');
+  assert.equal(o.excludedByCondition, 0, 'an unreadable condition was treated as used');
+  assert.equal(o.newCount, o.count, 'an offer was excluded for a condition nobody could read');
+  const unknown = o.offers.find((x) => x.isNew === null);
+  assert.equal(unknown.condition, null);
+
+  // null and false are different answers and must stay so.
+  const src = fs.readFileSync(path.join(__dirname, '..', 'readPage.js'), 'utf8');
+  assert.match(src, /o\.isNew !== false/,
+    'the filter uses a truthiness test, which would drop unreadable conditions too');
+});
