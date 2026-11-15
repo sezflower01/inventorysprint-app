@@ -329,17 +329,40 @@ test('manifest permissions stay minimal and match the stated allowlist', () => {
   const m = JSON.parse(read(path.join(ROOT, 'manifest.json')));
   assert.deepEqual(m.permissions.sort(), ['activeTab', 'storage'],
     'a new permission appeared -- justify it to store review before adding it');
+  // EXACTLY THE HOSTS THAT ARE FETCHED, and nothing else.
+  //
+  // https://*.amazon.com/* used to head this list and has been REMOVED, not
+  // narrowed. Nothing fetches an Amazon product page: it is read in place by
+  // a content script, which is granted by content_scripts.matches, and the
+  // panel's own assets are granted by web_accessible_resources.matches. Both
+  // are separate grants from this one.
+  //
+  // The proof was already in this manifest: handoff.js has always run on
+  // inventorysprint.com, which has never had a host_permissions entry.
+  //
+  // The install warning therefore drops from "all amazon.com sites" to three
+  // named hosts, which is the single biggest store-review item on this
+  // extension -- and it got smaller while a feature was added.
   assert.deepEqual(m.host_permissions.sort(), [
-    'https://*.amazon.com/*',
-    // Added in 0.2.0. Each user supplies their own key, so each user's own
-    // requests go here. This is the permission store review will look at
-    // hardest, and it must stay the only addition.
+    // Each user supplies their own key, so each user's own requests go here.
     'https://api.keepa.com/*',
     'https://mstibdszibcheodvnprm.supabase.co/*',
+    // Added in 0.2.0 for the gating read. The ONLY Amazon host that is
+    // fetched, and gating.js is the only file allowed to reach it.
+    'https://sellercentral.amazon.com/*',
   ], 'host_permissions changed');
-  // No <all_urls>, no http://*/*, no broad wildcard.
+  // No <all_urls>, no http://*/*, no broad wildcard -- and no Amazon
+  // subdomain wildcard, which is what *.amazon.com was.
   for (const h of m.host_permissions) {
     assert.ok(!/^<all_urls>$/.test(h) && !/^https?:\/\/\*\/\*$/.test(h), `broad host permission: ${h}`);
+    assert.ok(!/^https:\/\/\*\./.test(h),
+      `subdomain wildcard is back: ${h} -- name the hosts that are fetched`);
+  }
+  // Every fetched host must appear here, or the fetch fails at runtime with a
+  // CORS error that looks like the remote being down.
+  for (const needed of ['api.keepa.com', 'sellercentral.amazon.com']) {
+    assert.ok(m.host_permissions.some((h) => h.includes(needed)),
+      `${needed} is fetched but not permitted`);
   }
   assert.equal(m.manifest_version, 3);
   assert.equal(m.version, '0.2.0');

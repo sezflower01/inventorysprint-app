@@ -213,15 +213,23 @@ test('gating.js may reach Seller Central and nothing else', () => {
   assert.ok(!/setTimeout|setInterval|chrome\.alarms|MutationObserver/.test(code),
     'gating.js can now fire unattended against the user’s logged-in account');
 
-  // NO PERMISSION CHANGE WAS NEEDED: host_permissions already carries
-  // https://*.amazon.com/*, and Chrome's subdomain wildcard matches
-  // sellercentral.amazon.com. The manifest test asserts that list is
-  // unchanged, so this passing alongside it is the proof.
+  // THIS ASSERTED THE OPPOSITE, and both halves were right when written.
+  //
+  // Gating needed no permission change, because host_permissions carried
+  // https://*.amazon.com/* and Chrome's subdomain wildcard matched Seller
+  // Central -- so this test required that wildcard to be present and required
+  // no sellercentral entry beside it.
+  //
+  // The wildcard has since been REMOVED, because nothing fetches an Amazon
+  // product page: the page is read in place by a content script, granted by
+  // content_scripts.matches. So Seller Central is now the only Amazon host in
+  // the list, and it is named rather than matched by a wildcard. A narrower
+  // permission for the same capability.
   const m = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
-  assert.ok(m.host_permissions.includes('https://*.amazon.com/*'),
-    'the wildcard that already covered Seller Central has gone');
-  assert.ok(!m.host_permissions.some((h) => /sellercentral/.test(h)),
-    'a redundant Seller Central permission was added');
+  assert.ok(m.host_permissions.includes('https://sellercentral.amazon.com/*'),
+    'the gating fetch has no permission, so it will fail as a CORS error');
+  assert.ok(!m.host_permissions.includes('https://*.amazon.com/*'),
+    'the Amazon subdomain wildcard is back');
 });
 
 test('the worker caches, caps and never auto-retries the gating call', () => {

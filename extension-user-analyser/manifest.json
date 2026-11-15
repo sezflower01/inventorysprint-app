@@ -8,9 +8,9 @@
     "activeTab"
   ],
   "host_permissions": [
-    "https://*.amazon.com/*",
     "https://api.keepa.com/*",
-    "https://mstibdszibcheodvnprm.supabase.co/*"
+    "https://mstibdszibcheodvnprm.supabase.co/*",
+    "https://sellercentral.amazon.com/*"
   ],
   "background": {
     "service_worker": "background.js"
