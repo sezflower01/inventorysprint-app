@@ -26,6 +26,10 @@
 // importScripts, not an ESM import: this worker is a classic service worker
 // and switching it to a module would change how every other file in it loads.
 importScripts('keepa.js');
+// The only file allowed to reach Seller Central, for the same reason keepa.js
+// is the only one allowed to reach the data provider: the fetch lint is
+// per-file, so one module per host keeps the narrow rule narrow.
+importScripts('gating.js');
 
 // How long one ASIN's rank/units answer is reused before spending another of
 // the user's tokens. Six hours: rank moves slowly, and the figure on screen
@@ -61,6 +65,46 @@ const CALL_LEDGER_KEY = 'isua_keepa_calls';
 
 /** The user's own seller id, typed by them. Never fetched, never guessed. */
 const MY_SELLER_KEY = 'isua_my_seller_id';
+
+// ── gating ────────────────────────────────────────────────────────────────
+//
+// Cached and capped on exactly the pattern the provider lookups use, and for
+// a sharper reason: this call rides the user’s own Seller Central session.
+// A loop here does not spend tokens, it hammers the account the user logs
+// into, and Amazon throttles and challenges sessions that behave like
+// scrapers. The budget being protected is their ACCESS, which is worth more
+// than the token budget.
+//
+// SHORTER TTL THAN THE PRODUCT CACHE on purpose: a gate can be lifted or
+// applied while the user is working, and a six-hour-old "restricted" would
+// stop them buying stock they can now sell.
+const GATING_TTL_MS = 30 * 60 * 1000;
+const GATING_FAIL_TTL_MS = 2 * 60 * 1000;
+const GATING_CALL_CAP = 3;
+const GATING_WINDOW_MS = 60 * 1000;
+const GATING_LEDGER_KEY = 'isua_gating_calls';
+
+/**
+ * Same claim-before-you-call shape as the provider gate, same reasoning: the
+ * ledger lives in storage because Chrome stops an idle service worker and a
+ * module-level counter is a cap a restart lifts.
+ */
+async function claimGatingSlot() {
+  const now = Date.now();
+  const got = await chrome.storage.local.get(GATING_LEDGER_KEY);
+  const recent = (got[GATING_LEDGER_KEY] || [])
+    .filter((t) => Number.isFinite(t) && now - t < GATING_WINDOW_MS);
+  if (recent.length >= GATING_CALL_CAP) {
+    const retryInMs = GATING_WINDOW_MS - (now - Math.min(...recent));
+    return { ok: false, retryInMs: retryInMs,
+      message: 'Paused to protect your Seller Central session: '
+        + GATING_CALL_CAP + ' checks a minute is the cap. Try again in '
+        + Math.ceil(retryInMs / 1000) + 's.' };
+  }
+  recent.push(now);
+  await chrome.storage.local.set({ [GATING_LEDGER_KEY]: recent });
+  return { ok: true, used: recent.length };
+}
 
 /** Amazon marketplace ids, which look exactly like seller ids and are not. */
 const MARKETPLACE_IDS = [
@@ -398,6 +442,73 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         // is banned from touching and has a test to prove it. So it is a
         // field they fill in once. No network call, no permission, and
         // the value never leaves this browser.
+        // ── can the user list this ASIN? ────────────────────────────────
+        //
+        // Read from the user’s OWN signed-in Seller Central session. No
+        // cookie is read by this code -- the browser attaches its own, and
+        // the sign-in state is inferred from the RESPONSE, which is the same
+        // request as the gating read. State and data arrive together or
+        // neither does.
+        //
+        // Cache first, then cap, then call -- so a free answer is never
+        // refused by the cap, which is the ordering the provider handler
+        // learned the hard way.
+        case 'ISUA_GATING': {
+          const asin = String(msg.asin || '').trim().toUpperCase();
+          const mkt = String(msg.marketplace || 'US').toUpperCase();
+          if (!/^[A-Z0-9]{10}$/.test(asin)) {
+            sendResponse({ ok: false, state: 'unreadable', code: 'BAD_ASIN',
+              error: 'Not a valid ASIN.',
+              diag: { asin, outcome: 'skipped', reason: 'bad ASIN' } });
+            break;
+          }
+          // US ONLY. The endpoint is sellercentral.amazon.com, which is the
+          // North America one; a European seller’s gate lives on a
+          // different host and would quietly answer about a different
+          // marketplace. Declining is the honest answer until that is read
+          // and tested too.
+          if (mkt !== 'US') {
+            sendResponse({ ok: false, state: 'unsupported_market',
+              error: 'This version reads listing eligibility for the US '
+                + 'marketplace only.',
+              diag: { asin, marketplace: mkt, outcome: 'skipped', reason: 'non-US' } });
+            break;
+          }
+
+          const gKey = `isua_gate_${mkt}_${asin}`;
+          const gHit = (await chrome.storage.local.get(gKey))[gKey];
+          if (gHit && Number.isFinite(gHit.at) && gHit.value) {
+            const ttl = gHit.value.ok ? GATING_TTL_MS : GATING_FAIL_TTL_MS;
+            const age = Date.now() - gHit.at;
+            if (age < ttl) {
+              sendResponse({ ...gHit.value, cached: true,
+                diag: { asin, marketplace: mkt, outcome: 'cached', ageMs: age } });
+              break;
+            }
+          }
+
+          const gSlot = await claimGatingSlot();
+          if (!gSlot.ok) {
+            sendResponse({ ok: false, state: 'paused', error: gSlot.message,
+              retryInMs: gSlot.retryInMs,
+              diag: { asin, marketplace: mkt, outcome: 'skipped',
+                reason: 'per-minute cap' } });
+            break;
+          }
+
+          const g = await GATING.lookup(asin);
+          // Cached either way, including the failures, for the same reason
+          // the provider failures are: an uncached failure means every
+          // repeat goes back to Amazon, and this one goes back wearing the
+          // user’s session.
+          await chrome.storage.local.set({ [gKey]: { at: Date.now(), value: g } });
+          sendResponse({ ...g,
+            diag: { asin, marketplace: mkt, outcome: 'called',
+              status: g.status ?? null, state: g.state,
+              callsThisMinute: gSlot.used,
+              error: g.ok ? null : (g.message || null) } });
+          break;
+        }
         case 'ISUA_GET_MY_SELLER': {
           const got = await chrome.storage.local.get(MY_SELLER_KEY);
           sendResponse({ ok: true, sellerId: got[MY_SELLER_KEY] || null });

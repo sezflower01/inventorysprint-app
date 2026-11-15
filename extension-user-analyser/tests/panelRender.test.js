@@ -211,12 +211,25 @@ test('the gating row carries no verdict, no number and no colour', { skip }, () 
       assert.ok(!pill.classList.contains(c), `${f}: gating pill carries the verdict class ${c}`);
     }
 
-    // The eligibility chip in the decision table is backend-derived, so it
-    // must say so and must not be coloured either.
+    // THE INVARIANT, not a fixed string. This asserted the chip equalled
+    // "Not available in this version", which was true while no gating read
+    // existed. One exists now, so the thing worth pinning is what it must
+    // NEVER do rather than what it happens to say: a false "eligible" sends
+    // the user to buy stock they cannot sell.
+    //
+    // The harness answers every worker message with a generic success, which
+    // is exactly the malformed shape the panel must refuse -- and it did not,
+    // until this test caught it rendering "Restricted — new" with the bad
+    // colour on a reply that contained no verdict at all.
     const chip = $('apx-sa-eligible');
-    // NOT the loading label: no amount of waiting makes this build read gating,
-    // so a spinner-ish label here would be a promise it cannot keep.
-    assert.equal(chip.textContent.trim(), NOT_IN_VERSION, `${f}: eligibility chip showed something else`);
+    assert.ok(!/eligible/i.test(chip.textContent) || /couldn/i.test(chip.textContent),
+      `${f}: the chip claims eligibility from an answer with no verdict in it`);
+    assert.ok(!chip.classList.contains('apx-sa-good'),
+      `${f}: the eligibility chip is coloured good without a readable verdict`);
+    assert.ok(!chip.classList.contains('apx-sa-bad'),
+      `${f}: the eligibility chip is coloured bad without a readable verdict`);
+    assert.ok(chip.classList.contains('apx-sa-unknown'),
+      `${f}: the chip is not in the unknown state despite having no verdict`);
     assert.ok(chip.classList.contains('apx-sa-unknown'), `${f}: eligibility chip is not in the unknown state`);
   }
 });
@@ -479,7 +492,7 @@ test('every empty field is in exactly one of the two states, and the right one',
   //   fba/fbm/amz/swing    a read of the offers panel on the page
   //   dims                 a catalogue field this build never fetches
   const WILL_NOT = [
-    'apx-sa-eligible', 'apx-sa-pl',
+    'apx-sa-pl',
   ];
 
   // A THIRD state, and it had to exist. These three fill from the offers
@@ -900,4 +913,114 @@ test('the seller button says Saved, and stops saying it when it is not true', { 
   assert.equal(btn.textContent, 'Save seller ID',
     'the button still says Saved over an edited field');
   void stored;
+});
+
+/** Load gating.js the way the worker does, to build real parsed responses. */
+function gatingModule() {
+  const sandbox = { console, fetch: () => { throw new Error('no network'); } };
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'gating.js'), 'utf8'), sandbox);
+  return sandbox.GATING;
+}
+function recordedGating() {
+  const b = JSON.parse(fs.readFileSync(
+    path.join(ROOT, 'tests', 'fixtures', '11-gating-new-allowed.json'), 'utf8'));
+  delete b._fixture;
+  return b;
+}
+
+test('every gating state renders, and only a real verdict is coloured', { skip }, () => {
+  // THESE TESTS EXIST BECAUSE THEIR ABSENCE HID A BUG. The gating functions
+  // were never written into panel.js -- a patch script failed before writing
+  // and the call site went in by hand -- and the whole suite stayed green,
+  // because every gating test covered gating.js and background.js and nothing
+  // covered the panel. The panel threw a ReferenceError on every page read.
+  const G = gatingModule();
+  const P = (json, status, ct) => G.parseGating(
+    { status: status || 200, contentType: ct || 'application/json', json });
+  const body = recordedGating();
+  const gated = JSON.parse(JSON.stringify(body));
+  gated.conditionDetails.new = { isRestricted: true, showCondition: false };
+  gated.restrictionDetails.push(
+    { conditionTypes: ['new'], message: 'You need approval for this brand.' });
+  const unknown = JSON.parse(JSON.stringify(body));
+  unknown.conditionDetails.graded = { isRestricted: false };
+
+  const cases = [
+    ['listable', P(body), 'apx-sa-good', /Eligible/],
+    ['restricted', P(gated), 'apx-sa-bad', /Restricted/],
+    ['signed out', P(null, 200, 'text/html'), null, /Sign in to Seller Central/],
+    ['http 500', P(null, 500), null, /couldn/],
+    ['unknown condition', P(unknown), null, /couldn/],
+    ['capped', { ok: false, state: 'paused', error: 'Paused.' }, null, /paused/],
+    ['non-US', { ok: false, state: 'unsupported_market', error: 'US only.' }, null, /US only/],
+    // The malformed success the harness produces by accident, and the one the
+    // panel must refuse: ok with no verdict in it.
+    ['bare ok', { ok: true }, null, /couldn/],
+  ];
+
+  for (const [label, res, colour, text] of cases) {
+    const reading = readFixture('01-normal.html', URL_FOR('B07XYZ1234'));
+    const { $ } = renderPanel(wire(reading), { ISUA_GATING: res });
+    const chip = $('apx-sa-eligible');
+    assert.match(chip.textContent, text, label + ': the chip said something else');
+
+    // ONLY the two real verdicts carry a colour. Everything else is unknown,
+    // because a false "eligible" sends the user to buy stock they cannot sell
+    // and a false "couldn't read this" costs them one click.
+    for (const c of ['apx-sa-good', 'apx-sa-bad']) {
+      assert.equal(chip.classList.contains(c), c === colour,
+        label + ': wrong colour state ' + c);
+    }
+    if (!colour) {
+      assert.ok(chip.classList.contains('apx-sa-unknown'), label + ': not marked unknown');
+    }
+    // And every state says what to do, or why it cannot.
+    assert.ok((chip.title || '').trim().length > 0, label + ': no explanation behind the chip');
+  }
+});
+
+test('the other three conditions are shown apart from the verdict', { skip }, () => {
+  // On the recorded ASIN new is listable while used, collectible and
+  // refurbished are all restricted. Folding them into one answer would report
+  // a perfectly listable product as restricted.
+  const G = gatingModule();
+  const res = G.parseGating(
+    { status: 200, contentType: 'application/json', json: recordedGating() });
+  const reading = readFixture('01-normal.html', URL_FOR('B07XYZ1234'));
+  const { $ } = renderPanel(wire(reading), { ISUA_GATING: res });
+
+  assert.match($('apx-sa-eligible').textContent, /Eligible/, 'the verdict followed the other conditions');
+  const others = $('apx-sa-conditions');
+  assert.equal(others.textContent, 'all restricted');
+  assert.match(others.title, /used/);
+  assert.match(others.title, /collectible/);
+  assert.match(others.title, /refurbished/);
+  assert.match(others.title, /cannot list the product in this condition/,
+    'the restriction message is not shown anywhere');
+  // The other conditions are never coloured: they are not the verdict.
+  for (const c of ['apx-sa-good', 'apx-sa-bad']) {
+    assert.ok(!others.classList.contains(c), 'the other-conditions row is coloured like a verdict');
+  }
+});
+
+test('gating is requested on page read and Recheck, and nowhere else', { skip }, () => {
+  // It rides the user's own logged-in Seller Central session, so an
+  // unattended trigger would hammer the account they log in with -- and
+  // Amazon throttles and challenges sessions that behave like scrapers. The
+  // budget being protected here is their ACCESS, not a token balance.
+  const reading = readFixture('01-normal.html', URL_FOR('B07XYZ1234'));
+  const { sent } = renderPanel(wire(reading),
+    { ISUA_GATING: { ok: false, state: 'signed_out', error: 'Sign in.' } });
+  const asked = sent.filter((m) => m && m.type === 'ISUA_GATING');
+  assert.equal(asked.length, 1, 'gating was requested ' + asked.length + ' times for one page read');
+  assert.equal(asked[0].asin, 'B07XYZ1234');
+  assert.equal(asked[0].marketplace, 'US');
+
+  const panel = srcOf('panel.js').replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+  const fn = panel.slice(panel.indexOf('function requestGating'), panel.indexOf('function renderOffers(o)'));
+  assert.ok(!/setTimeout|setInterval|chrome\.alarms|MutationObserver/.test(fn),
+    'something can now fire the gating read unattended');
+  // One per ASIN per panel session, so a re-render does not ask again.
+  assert.match(fn, /gatingFor/, 'the per-ASIN guard has gone');
 });

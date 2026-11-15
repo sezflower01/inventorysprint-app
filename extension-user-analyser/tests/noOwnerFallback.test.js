@@ -179,12 +179,17 @@ test('fetch() only ever reaches a host that file is allowed to reach', () => {
   for (const f of FILES) {
     const src = read(f);
     const isProvider = path.basename(f) === 'keepa.js';
+    const isGating = path.basename(f) === 'gating.js';
     // Each fetch( and the ~200 chars that follow, which is where the URL is.
     for (const m of src.matchAll(/\bfetch\s*\(/g)) {
       const window_ = src.slice(m.index, m.index + 200);
       const urls = urlsIn(window_);
       const viaCfg = /CFG\.SUPABASE_URL/.test(window_);
-      const viaBase = isProvider && window_.includes('BASE');
+      // gating.js builds its URL from its own BASE const too, so it needs the
+      // same exemption keepa.js has. The protection the literal-URL rule was
+      // giving is replaced by the test below, which pins what BASE points at --
+      // otherwise BASE could be repointed and this rule would not notice.
+      const viaBase = (isProvider || isGating) && window_.includes('BASE');
       if (viaCfg) {
         if (isProvider) bad.push(`${rel(f)}: the provider module must not reach our own host`);
         continue;
@@ -194,7 +199,20 @@ test('fetch() only ever reaches a host that file is allowed to reach', () => {
         bad.push(`${rel(f)}: fetch() with no literal URL and no known base nearby`);
         continue;
       }
-      const allowed = isProvider ? 'api.keepa.com' : 'mstibdszibcheodvnprm.supabase.co';
+      // THIRD ENTRY, added for 0.2.0 gating, on the same principle rather than
+      // by widening: gating.js is the only file that may reach Seller Central,
+      // exactly as keepa.js is the only one that may reach the data provider.
+      // One module per host keeps the narrow rule narrow -- a shared allowlist
+      // would let any file call any of the three.
+      //
+      // Worth recording for store review: this needed NO manifest change,
+      // because host_permissions already carries https://*.amazon.com/* and
+      // Chrome's subdomain wildcard matches sellercentral.amazon.com. The
+      // existing permission was already broader than the extension used.
+
+      const allowed = isProvider ? 'api.keepa.com'
+        : isGating ? 'sellercentral.amazon.com'
+        : 'mstibdszibcheodvnprm.supabase.co';
       for (const u of urls) {
         let host;
         try { host = new URL(u).host; } catch (_) { continue; }

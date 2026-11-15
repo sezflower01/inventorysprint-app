@@ -185,7 +185,12 @@
     // Eligibility: a real read, but not one this build makes. The tooltip
     // keeps saying that your sign-in is not the thing missing, because that
     // is the wrong conclusion a reader reaches first.
-    setUnavailable($('apx-sa-eligible'), NOT_IN_VERSION);
+    // The gating read IS made now, from the user’s own Seller Central
+    // session, so this is a first paint rather than a permanent absence.
+    setUnavailable($('apx-sa-eligible'), LOADING,
+      'Reading your own Seller Central session for this ASIN.');
+    setUnavailable($('apx-sa-conditions'), LOADING,
+      'Reading your own Seller Central session for this ASIN.');
 
     // Private-label risk: deliberately NOT defined for v1, so there is
     // nothing here to be waiting on. Brand-risk research is the user’s own
@@ -668,6 +673,150 @@
       verdict.title = main.points.length + ' price points, ' + main.label
         + '. The flat steps are real: a price holds until it changes.';
     }
+  }
+  // ── listing eligibility, from the user’s own Seller Central session ─────
+  //
+  // THE RULE THAT OUTRANKS THE OTHERS HERE: a false "eligible" sends the user
+  // to buy stock they cannot sell; a false "could not read this" costs them
+  // one click. So every state that is not an explicit, well-formed "new is
+  // not restricted" renders as something other than eligible, and the chip
+  // never carries the good colour on a doubt.
+  //
+  // Requested on panel open and Recheck only -- the same two triggers as the
+  // page read, because PAGE_READING is the only thing that calls this. There
+  // is no timer and no observer, so it cannot run unattended against the
+  // user’s own logged-in account.
+  let gatingFor = null;
+
+  function setChip(el, text, cls, why) {
+    if (!el) return;
+    el.textContent = text;
+    el.classList.remove(...VERDICT_CLASSES);
+    el.classList.toggle('apx-sa-unknown', !cls);
+    if (cls) el.classList.add(cls);
+    el.title = why || '';
+  }
+
+  function renderGating(res) {
+    const chip = $('apx-sa-eligible');
+    const others = $('apx-sa-conditions');
+    const pill = $('apx-elig');
+
+    if (!res) {
+      setUnavailable(chip, LOADING,
+        'Reading your own Seller Central session for this ASIN.');
+      setUnavailable(others, LOADING, 'Reading your own Seller Central session.');
+      return;
+    }
+
+    // The three states that are NOT a verdict, each with the one action that
+    // changes it. None of them is "eligible" and none is a colour.
+    if (!res.ok) {
+      const map = {
+        signed_out: ['Sign in to Seller Central',
+          res.error || 'Sign in to Seller Central in this browser, then press Recheck.'],
+        paused: ['paused', res.error || 'Paused to protect your Seller Central session.'],
+        unsupported_market: ['US only in this version',
+          res.error || 'This version reads listing eligibility for the US marketplace only.'],
+      };
+      const [text, why] = map[res.state] || ['couldn\u2019t read this',
+        (res.error || 'Seller Central returned something this version does not '
+          + 'recognise.') + ' Nothing here means you may list it \u2014 it means the '
+          + 'answer could not be read.'];
+      setUnavailable(chip, text, why);
+      setUnavailable(others, text, why);
+      if (pill) {
+        pill.textContent = res.state === 'signed_out' ? 'Not signed in' : 'Not checked';
+        pill.classList.remove(...VERDICT_CLASSES);
+        pill.classList.add('apx-sa-unknown');
+        pill.title = why;
+      }
+      return;
+    }
+
+    // THE PANEL DOES NOT TRUST THE SHAPE EITHER, and this was a real hole.
+    //
+    // parseGating cannot produce an ok:true without a boolean verdict and a
+    // conditions array -- but the panel receives whatever the worker sends,
+    // and a bare {ok:true} from some path nobody considered rendered as
+    // "Restricted — new" with the bad colour on it. A test harness that
+    // answered every message with a generic success found it; a worker
+    // refactor would have found it in front of a user.
+    //
+    // The expensive error is a confident verdict built on an answer nobody
+    // checked, so the shape is checked here as well as there.
+    if (typeof res.eligibleNew !== 'boolean' || !Array.isArray(res.conditions)) {
+      const why = 'The eligibility answer came back in a shape this version does '
+        + 'not recognise, so it is not being shown. This does NOT mean you may '
+        + 'list it.';
+      setUnavailable(chip, 'couldn’t read this', why);
+      setUnavailable(others, 'couldn’t read this', why);
+      if (pill) {
+        pill.textContent = 'Not checked';
+        pill.classList.remove(...VERDICT_CLASSES);
+        pill.classList.add('apx-sa-unknown');
+        pill.title = why;
+      }
+      return;
+    }
+
+    // The verdict, and ONLY for the condition the user sells in.
+    const cached = res.cached ? ' (cached)' : '';
+    if (res.eligibleNew) {
+      setChip(chip, 'Eligible \u2014 new', 'apx-sa-good',
+        'Your Seller Central session says new is not restricted for you on this '
+        + 'ASIN.' + cached);
+    } else {
+      setChip(chip, 'Restricted \u2014 new', 'apx-sa-bad',
+        (res.newMessage || 'Your Seller Central session says you cannot list this '
+          + 'ASIN as new.') + cached);
+    }
+
+    // The other three, SEPARATELY. Folding them into the verdict would have
+    // reported the recorded ASIN as restricted when the condition that
+    // matters was open.
+    const rest = res.conditions.filter((c) => c.key !== 'new');
+    const open = rest.filter((c) => !c.restricted).map((c) => c.key);
+    const shut = rest.filter((c) => c.restricted).map((c) => c.key);
+    setChip(others,
+      open.length ? open.join(', ') + ' open' : 'all restricted',
+      null,
+      (open.length ? 'Also listable: ' + open.join(', ') + '. ' : '')
+      + (shut.length ? 'Restricted: ' + shut.join(', ') + '. ' : '')
+      + (rest.find((c) => c.message) ? rest.find((c) => c.message).message : ''));
+
+    if (pill) {
+      pill.textContent = res.eligibleNew ? 'Can list (new)' : 'Restricted (new)';
+      pill.classList.remove(...VERDICT_CLASSES);
+      pill.classList.remove('apx-sa-unknown');
+      pill.classList.add(res.eligibleNew ? 'apx-sa-good' : 'apx-sa-bad');
+      pill.title = (res.productType ? 'Product type ' + res.productType + '. ' : '')
+        + 'Read from your own Seller Central session. Seller Central reports '
+        + (res.offerCount != null ? res.offerCount + ' offers' : 'no offer count')
+        + (res.lowestPrice ? ' from ' + res.lowestPrice : '') + '.';
+    }
+  }
+
+  function requestGating(reading) {
+    const asin = reading && reading.asin && reading.asin.found ? reading.asin.value : null;
+    if (!asin) return;
+    const mkt = (reading && reading.marketplace) || 'US';
+    const tag = mkt + ':' + asin;
+    // One request per ASIN per panel session. The worker caches and caps on
+    // top of this; this just stops a re-render asking again for an answer
+    // already on screen.
+    if (gatingFor === tag) return;
+    gatingFor = tag;
+    renderGating(null);
+    chrome.runtime.sendMessage({ type: 'ISUA_GATING', asin: asin, marketplace: mkt },
+      (res) => {
+        if (chrome.runtime.lastError) {
+          renderGating({ ok: false, state: 'unreadable',
+            error: 'The extension\u2019s background worker did not answer.' });
+          return;
+        }
+        renderGating(res);
+      });
   }
   function renderOffers(o) {
     if (!o) { renderSellersPending(); return; }
@@ -1194,6 +1343,10 @@
       if (lastRank) renderRank(lastRank);
 
       requestRank(d.reading);
+      // Same two triggers as the page read, and no others: panel open and
+      // Recheck. Nothing schedules this, which is what keeps it from running
+      // unattended against the user's own logged-in Seller Central account.
+      requestGating(d.reading);
     }
   });
 

@@ -1,0 +1,44 @@
+{
+  "_fixture": [
+    "Seller Central GET /lyp/api/lookupAsin?asin=<ASIN>, recorded 2026-11-15 from",
+    "the operator's own signed-in session. Second non-synthetic fixture here.",
+    "",
+    "SCRUBBED: the SKU field was already removed by the operator before it",
+    "reached this repo, the title is elided, and the real ASIN is replaced with a",
+    "synthetic one. No cookie, token, seller id or session identifier was in the",
+    "body -- this endpoint returns none, which is itself worth recording.",
+    "",
+    "THE SHAPE THAT MATTERS: conditionDetails.new.isRestricted is the eligibility",
+    "answer, and restrictionDetails does NOT contain an entry for 'new' here",
+    "because new is not restricted. So an absent message is the normal case for",
+    "a listable product, and code that requires one would call every listable",
+    "ASIN unreadable.",
+    "",
+    "productDetails.salesRank is 52494. The product page for the same ASIN said",
+    "263,661. Different ranking of a different category -- they are deliberately",
+    "not reconciled.",
+    "",
+    "productDetails.offerCount (7) and lowestPrice ($64.97) match what the offer",
+    "drawer reader produced independently, which is a real cross-check on it."
+  ],
+  "conditionDetails": {
+    "collectible": { "isRestricted": true, "showCondition": false },
+    "new": { "isRestricted": false, "showCondition": true },
+    "refurbished": { "isRestricted": true, "showCondition": false },
+    "used": { "isRestricted": true, "showCondition": false }
+  },
+  "productDetails": {
+    "asin": "B0SYNTH001",
+    "lowestPrice": "$64.97",
+    "offerCount": 7,
+    "productType": "COLLECTIBLE_CARD",
+    "salesRank": 52494,
+    "title": "..."
+  },
+  "restrictionDetails": [
+    {
+      "conditionTypes": ["collectible", "refurbished", "used"],
+      "message": "You cannot list the product in this condition."
+    }
+  ]
+}
