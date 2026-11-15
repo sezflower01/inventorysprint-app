@@ -1162,3 +1162,72 @@ test('the why-paragraph does not deny a feature that now works', { skip }, () =>
   // Private-label risk IS still absent, so that claim stays.
   assert.match(why, /Private-label risk is not assessed/);
 });
+
+test('the competitor count is never printed as a ratio of two different bases', { skip }, () => {
+  // THE LIVE READOUT. A book showed "Competitors 0 of 39 (one yours)" with
+  // eleven rows visible underneath. The 0 was new-condition offers that are
+  // not the user's own; the 39 was every offer of every condition including
+  // theirs. A reader cannot reconcile those, because they are not answers to
+  // the same question -- so they are no longer printed as a ratio.
+  let n = 0;
+  const html = fs.readFileSync(path.join(ROOT, 'tests', 'fixtures', '09-offers-panel.html'), 'utf8')
+    // every offer but the pinned one turned used, which is the books shape
+    .replace(/(<span class="a-size-base a-text-bold">)New(<\/span>)/g,
+      (m, a, b) => { n++; return n === 1 ? m : a + 'Used - Good' + b; })
+    // and the rest withheld behind "See more options"
+    .replace(/<div id="aod-retail-other-offers-content"[\s\S]*?\n      <\/div>/,
+      '<div id="aod-retail-other-offers-content" class="a-section"></div>');
+
+  const reading = readPageOf(html, URL_FOR('B0H8QLSNPP'));
+  const me = reading.offers.buyBox.sellerId;
+  const { $ } = renderPanelAsSeller(reading, me);
+
+  const txt = $('apx-sellers-count').textContent;
+  assert.ok(!/\bof\s+\d/.test(txt),
+    'the headline is a ratio again: ' + JSON.stringify(txt));
+  // "so far", because the drawer is still withholding offers -- a count that
+  // quietly means "of what has loaded" is one nobody can act on.
+  assert.match(txt, /so far/, 'a partial count does not say it is partial');
+
+  // EVERY BASE NAMED in the tooltip, where there is room to say what each
+  // number counts.
+  const tip = $('apx-sellers-count').title;
+  assert.match(tip, /offers read from the open list/);
+  assert.match(tip, /not new condition/, 'the tooltip does not say used offers were excluded');
+  assert.match(tip, /one of them yours/, 'the tooltip does not say the own offer was excluded');
+  assert.match(tip, /of every condition/,
+    'the page total is quoted without saying it counts every condition');
+});
+
+test('a Recheck does not throw away a gating verdict already on screen', { skip }, () => {
+  // SEEN LIVE: "Eligible — new" on page load, then "Loading…" for ever after
+  // pressing Recheck. renderNeedsAmazon() blanks both chips on every page
+  // read, and requestGating returns early because the ASIN has not changed --
+  // so the answer was wiped and never put back.
+  //
+  // The identical bug was fixed for the provider answer with lastRank, and
+  // the fix was not carried across at the time. Holding the answer is what
+  // makes a re-read free rather than destructive.
+  const reading = readFixture('01-normal.html', URL_FOR('B07XYZ1234'));
+  const G = gatingModule();
+  const verdict = G.parseGating(
+    { status: 200, contentType: 'application/json', json: recordedGating() });
+  const { $, window, sent } = renderPanel(wire(reading), { ISUA_GATING: verdict });
+
+  assert.match($('apx-sa-eligible').textContent, /Eligible/, 'the first read produced no verdict');
+
+  // A second page read, which is exactly what Recheck causes.
+  const ev = new window.MessageEvent('message', {
+    data: { source: 'isua-host', type: 'PAGE_READING', reading: wire(reading) },
+  });
+  Object.defineProperty(ev, 'source', { value: window, configurable: true });
+  window.dispatchEvent(ev);
+
+  assert.notEqual($('apx-sa-eligible').textContent, 'Loading…',
+    'Recheck wiped the verdict and left the chip loading');
+  assert.match($('apx-sa-eligible').textContent, /Eligible/,
+    'the held verdict was not re-applied on the second read');
+  // And it was NOT re-requested: the whole point is that a re-read is free.
+  assert.equal(sent.filter((m) => m && m.type === 'ISUA_GATING').length, 1,
+    'Recheck asked Seller Central again instead of reusing the held answer');
+});

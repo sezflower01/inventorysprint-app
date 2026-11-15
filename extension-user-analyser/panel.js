@@ -739,6 +739,18 @@
   // is no timer and no observer, so it cannot run unattended against the
   // user’s own logged-in account.
   let gatingFor = null;
+  // THE ANSWER IS HELD, for the same reason lastRank is.
+  //
+  // renderNeedsAmazon() blanks both gating chips to Loading on every page
+  // read, and requestGating then returns early because the ASIN has not
+  // changed -- so a Recheck wiped a working “Eligible — new” and never put it
+  // back. Seen live: the verdict on page load, Loading for ever after
+  // pressing Recheck.
+  //
+  // This is the identical bug that was fixed for the provider answer, in the
+  // identical way, and I did not carry the fix across at the time. Holding
+  // the last answer is what makes a re-read free rather than destructive.
+  let lastGating = null;
 
   function setChip(el, text, cls, why) {
     if (!el) return;
@@ -919,6 +931,10 @@
           error: (res && res.error) || null,
         }));
       } catch (_) {}
+      // Held so the next page read can re-apply it instead of discarding it.
+      // Only a real answer is kept: a transport failure must not be replayed
+      // as though it were a verdict about the ASIN.
+      if (res && res.ok) lastGating = res;
       renderGating(res);
     };
 
@@ -1015,14 +1031,20 @@
       // The number shown is COMPETITORS, so the user’s own offer comes out
       // of it. The total is kept in the tooltip, because a count that
       // dropped from 7 to 6 with no explanation is a bug report.
-      count.textContent = others.length + ' live' + (mine ? ' + you' : '');
-      // "3 of 7" rather than a bare 3, because the drawer is withholding
-      // four offers until the shopper clicks for them and a count that
-      // quietly means "so far" is a count nobody can act on.
-      if (!o.complete) {
-        count.textContent = others.length + ' of ' + (o.totalOthers + 1)
-          + (mine ? ' (one yours)' : '');
-      }
+      // "0 of 39" WAS TWO DIFFERENT BASES SIDE BY SIDE, and on a book it
+      // read as nonsense: zero new-condition competitors that are not the
+      // user's own, against thirty-nine offers of every condition including
+      // theirs. Eleven rows were visible underneath. A reader cannot
+      // reconcile those two numbers because they are not answers to the same
+      // question, and the honest fix is to stop printing them as a ratio.
+      //
+      // The headline is the competitor count. "so far" rather than "live"
+      // when the drawer is still withholding offers, because a count that
+      // quietly means "of what has loaded" is a count nobody can act on --
+      // and the tooltip below spells out every base.
+      count.textContent = others.length
+        + (o.complete ? ' live' : ' so far')
+        + (mine ? ' + you' : '');
       const split = o.fbaCount + ' FBA, ' + o.fbmCount + ' FBM';
       const unknown = o.newCount - o.fbaCount - o.fbmCount;
       // WHAT THE NUMBER COUNTS, said explicitly, because it is now two
@@ -1039,7 +1061,13 @@
         + (mine ? ', one of them yours' : '') + ' \u2014 ' + split
         + (unknown > 0 ? ', ' + unknown + ' with no fulfilment stated' : '')
         + (o.amazonSold ? '. Amazon is one of them.' : '. Amazon is not selling this.')
-        + (o.totalOthers != null ? ' The page\u2019s own counter says ' + o.totalOthers + ' besides the Buy Box.' : '');
+        // Safe to state as a total HERE, where there is room to say what it
+        // counts. It is not safe beside the competitor figure, which is why
+        // the headline no longer prints them as a ratio.
+        + (o.totalOthers != null
+            ? ' The page\u2019s own counter says ' + o.totalOthers
+              + ' offers besides the Buy Box, of every condition.'
+            : '');
     }
 
     // A "none" MEANS LESS WHEN OFFERS ARE STILL HIDDEN. The drawer is sorted
@@ -1513,6 +1541,7 @@
       // NOT ask for it again -- rankFor still matches, so the request is
       // skipped. Re-applying the held answer is what makes a re-read free.
       if (lastRank) renderRank(lastRank);
+      if (lastGating) renderGating(lastGating);
 
       requestRank(d.reading);
       // Same two triggers as the page read, and no others: panel open and
