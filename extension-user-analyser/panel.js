@@ -733,6 +733,14 @@
         paused: ['paused', res.error || 'Paused to protect your Seller Central session.'],
         unsupported_market: ['US only in this version',
           res.error || 'This version reads listing eligibility for the US marketplace only.'],
+        // The deadline fired, or the context was invalidated. Both mean the
+        // extension’s own worker did not answer, which the user fixes in one
+        // place -- and which is NOT a statement about the ASIN.
+        no_answer: ['no answer from the extension',
+          'The extension\u2019s background worker did not reply. Reload the extension '
+          + 'on chrome://extensions, then reload this page and press Recheck. '
+          + (res.error ? '(' + res.error + ') ' : '')
+          + 'This says nothing about whether you may list the ASIN.'],
       };
       const [text, why] = map[res.state] || ['couldn\u2019t read this',
         (res.error || 'Seller Central returned something this version does not '
@@ -812,6 +820,26 @@
     }
   }
 
+  // HOW LONG THE PANEL MAY SAY "LOADING", which is a question I had already
+  // answered once and then got wrong again.
+  //
+  // The offers drawer used to sit on "Loading..." for ever, and the fix was
+  // that a state nothing can resolve must not be shown as progress. Then
+  // this function introduced a loading state with a round trip behind it --
+  // and a round trip that never returns is the same dead end. It happened on
+  // a real page: "Eligible to list: Loading..." with nothing coming.
+  //
+  // THE CALLBACK CAN GENUINELY NEVER FIRE. If the service worker fails to
+  // evaluate -- an importScripts error, or the extension reloaded under a
+  // page that is still open -- Chrome may drop the message with no callback
+  // and no lastError at all. Nothing in the panel finds out.
+  //
+  // So: a DEADLINE. It changes a label and nothing else. It does not retry,
+  // does not re-request, and cannot spend a token or touch the user’s Seller
+  // Central session -- the one thing a timer in this extension must never
+  // do. A test holds that line.
+  const GATING_DEADLINE_MS = 8000;
+
   function requestGating(reading) {
     const asin = reading && reading.asin && reading.asin.found ? reading.asin.value : null;
     if (!asin) return;
@@ -823,15 +851,49 @@
     if (gatingFor === tag) return;
     gatingFor = tag;
     renderGating(null);
-    chrome.runtime.sendMessage({ type: 'ISUA_GATING', asin: asin, marketplace: mkt },
-      (res) => {
-        if (chrome.runtime.lastError) {
-          renderGating({ ok: false, state: 'unreadable',
-            error: 'The extension\u2019s background worker did not answer.' });
-          return;
-        }
-        renderGating(res);
-      });
+
+    let settled = false;
+    const finish = (res) => {
+      if (settled) return;
+      settled = true;
+      try {
+        console.info('[InventorySprint Analyser] gating', JSON.stringify({
+          asin: asin, marketplace: mkt,
+          state: (res && res.state) || null, ok: !!(res && res.ok),
+          cached: !!(res && res.cached),
+          // Never the ASIN-bearing URL and never the response body: this
+          // line is about whether the read happened, not what it said.
+          error: (res && res.error) || null,
+        }));
+      } catch (_) {}
+      renderGating(res);
+    };
+
+    // A DEADLINE, not a retry. Changes the label and stops.
+    const deadline = setTimeout(() => {
+      finish({ ok: false, state: 'no_answer' });
+    }, GATING_DEADLINE_MS);
+
+    const reply = (res) => {
+      clearTimeout(deadline);
+      if (chrome.runtime.lastError) {
+        finish({ ok: false, state: 'no_answer',
+          error: chrome.runtime.lastError.message || null });
+        return;
+      }
+      finish(res);
+    };
+
+    try {
+      chrome.runtime.sendMessage({ type: 'ISUA_GATING', asin: asin, marketplace: mkt }, reply);
+    } catch (e) {
+      // sendMessage THROWS SYNCHRONOUSLY when the extension context has been
+      // invalidated -- which is what happens to a panel still open in a tab
+      // after the extension is reloaded. Unhandled, it aborted this function
+      // one line after painting "Loading", and left it there.
+      clearTimeout(deadline);
+      finish({ ok: false, state: 'no_answer', error: (e && e.message) || String(e) });
+    }
   }
   function renderOffers(o) {
     if (!o) { renderSellersPending(); return; }

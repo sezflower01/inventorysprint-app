@@ -130,6 +130,10 @@ function renderPanel(reading, responses) {
         sent.push(msg);
         if (!cb) return;
         const own = responses && Object.prototype.hasOwnProperty.call(responses, msg && msg.type);
+        // The sentinel a test uses to simulate a worker that never answers:
+        // take the callback and drop it, which is what a dead service worker
+        // looks like from the panel.
+        if (own && responses[msg.type] === '__never__') return;
         cb(own ? responses[msg.type]
                : { ok: true, signedIn: true, email: 'someone@example.invalid' });
       },
@@ -1019,8 +1023,73 @@ test('gating is requested on page read and Recheck, and nowhere else', { skip },
 
   const panel = srcOf('panel.js').replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
   const fn = panel.slice(panel.indexOf('function requestGating'), panel.indexOf('function renderOffers(o)'));
-  assert.ok(!/setTimeout|setInterval|chrome\.alarms|MutationObserver/.test(fn),
-    'something can now fire the gating read unattended');
+
+  // THE RULE SHARPENED RATHER THAN RELAXED. This banned setTimeout outright,
+  // and then a setTimeout was needed -- because "Loading" with a round trip
+  // behind it has to be bounded, or a reply that never comes leaves the panel
+  // claiming progress for ever. That happened on a real page.
+  //
+  // A ban on all timers was the wrong shape of rule. What must never happen
+  // is a timer that REQUESTS something: this call rides the user's own Seller
+  // Central session, and an unattended one would hammer the account they log
+  // in with. A timer that only changes a label spends nothing.
+  //
+  // So: repeating timers and alarms stay banned outright, and a one-shot
+  // deadline is allowed only if nothing inside it asks for anything.
+  assert.ok(!/setInterval|chrome\.alarms|MutationObserver/.test(fn),
+    'a repeating trigger can now fire the gating read unattended');
+
+  for (const m of fn.matchAll(/setTimeout\s*\(([\s\S]*?)\},\s*[A-Za-z0-9_]+\s*\)/g)) {
+    assert.ok(!/sendMessage|requestGating|GATING\.lookup/.test(m[1]),
+      'a timer re-requests the gating read, which can run against the user’s '
+      + 'logged-in account with nobody watching');
+  }
+  // And the deadline must actually exist, or the unbounded wait is back.
+  assert.match(fn, /setTimeout/, 'the gating wait is unbounded again');
+  assert.match(panel, /const GATING_DEADLINE_MS = \d+/, 'the gating deadline has gone');
+  // A synchronous throw from sendMessage -- which is what an invalidated
+  // extension context does -- must not abort the function after it has
+  // already painted "Loading".
+  assert.match(fn, /try \{[\s\S]*sendMessage[\s\S]*\} catch/,
+    'a synchronous sendMessage failure can strand the panel on Loading again');
   // One per ASIN per panel session, so a re-render does not ask again.
   assert.match(fn, /gatingFor/, 'the per-ASIN guard has gone');
+});
+
+test('a reply that never comes stops saying Loading', { skip }, async () => {
+  // THE LIVE FAILURE. "Eligible to list: Loading…" with nothing coming, on a
+  // real page. The callback can genuinely never fire: if the service worker
+  // fails to evaluate, or the extension is reloaded under a page that is
+  // still open, Chrome may drop the message with no callback and no
+  // lastError. Nothing in the panel found out.
+  //
+  // This is the second time an unbounded "Loading" has shipped here -- the
+  // offers drawer was the first -- so the deadline is tested, not just
+  // written.
+  const reading = readFixture('01-normal.html', URL_FOR('B07XYZ1234'));
+  // A harness that takes the callback and never calls it, which is exactly
+  // what a dead worker looks like from in here.
+  const { $, window } = renderPanel(wire(reading), { ISUA_GATING: '__never__' });
+
+  assert.equal($('apx-sa-eligible').textContent, 'Loading…',
+    'the request does not show as in flight at all');
+
+  // Let the deadline fire.
+  const ms = Number(srcOf('panel.js').match(/const GATING_DEADLINE_MS = (\d+)/)[1]);
+  assert.ok(ms > 0 && ms <= 15000, 'the deadline is ' + ms + 'ms, which is not a wait anyone will sit through');
+  await new Promise((r) => setTimeout(r, ms + 150));
+
+  const chip = $('apx-sa-eligible');
+  assert.notEqual(chip.textContent, 'Loading…', 'the panel is still claiming progress');
+  assert.match(chip.textContent, /no answer/i, 'the stalled state does not name what happened');
+  assert.match(chip.title, /chrome:\/\/extensions/,
+    'the stalled state does not say how to fix it');
+  // AND IT MUST NOT READ AS A VERDICT. A worker that did not answer says
+  // nothing about whether the ASIN may be listed.
+  assert.match(chip.title, /says nothing about whether you may list/i,
+    'a transport failure could be read as an eligibility answer');
+  for (const c of ['apx-sa-good', 'apx-sa-bad']) {
+    assert.ok(!chip.classList.contains(c), 'a stalled read is coloured like a verdict');
+  }
+  void window;
 });
