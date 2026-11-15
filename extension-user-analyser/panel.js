@@ -497,6 +497,13 @@
       // of it. The total is kept in the tooltip, because a count that
       // dropped from 7 to 6 with no explanation is a bug report.
       count.textContent = others.length + ' live' + (mine ? ' + you' : '');
+      // "3 of 7" rather than a bare 3, because the drawer is withholding
+      // four offers until the shopper clicks for them and a count that
+      // quietly means "so far" is a count nobody can act on.
+      if (!o.complete) {
+        count.textContent = others.length + ' of ' + (o.totalOthers + 1)
+          + (mine ? ' (one yours)' : '');
+      }
       const split = o.fbaCount + ' FBA, ' + o.fbmCount + ' FBM';
       const unknown = o.count - o.fbaCount - o.fbmCount;
       count.title = o.count + ' offers read from the open list'
@@ -506,10 +513,22 @@
         + (o.totalOthers != null ? ' The page\u2019s own counter says ' + o.totalOthers + ' besides the Buy Box.' : '');
     }
 
-    putOffer('apx-fba', rivalFba, 'none',
-      mine ? 'No FBA offer but your own in the open list.' : 'No FBA offer in the open list.');
-    putOffer('apx-fbm', rivalFbm, 'none',
-      mine ? 'No FBM offer but your own in the open list.' : 'No FBM offer in the open list.');
+    // A "none" MEANS LESS WHEN OFFERS ARE STILL HIDDEN. The drawer is sorted
+    // cheapest-first, so the LOWEST figures are trustworthy from a partial
+    // list -- what is missing is the expensive end. A "none", though, is a
+    // claim about offers nobody has looked at yet.
+    const partly = !o.complete ? ' in the ' + o.count + ' offers loaded so far' : '';
+    // "but your own" only when your own offer IS of that kind. It read "No FBM
+    // offer but your own" on an ASIN where the user's offer is FBA -- true of
+    // the list and false of the sentence, and the sort of wrongness that makes
+    // a reader stop trusting the lines that are right.
+    const noneWhy = (kind, isKind) => 'No ' + kind + ' offer'
+      + (mine && isKind ? ' but your own' : '') + (partly || ' in the open list')
+      + (partly ? ' \u2014 click \u201cSee more options\u201d on the page, then Recheck.' : '.');
+    putOffer('apx-fba', rivalFba, partly ? 'none yet' : 'none',
+      noneWhy('FBA', mine && mine.fba === true));
+    putOffer('apx-fbm', rivalFbm, partly ? 'none yet' : 'none',
+      noneWhy('FBM', mine && mine.fba === false));
     if (mine) {
       for (const [id, rival] of [['apx-fba', rivalFba], ['apx-fbm', rivalFbm]]) {
         const el = $(id);
@@ -629,6 +648,19 @@
     // that silently skipped an offer and have no way to know.
     const note = document.createElement('div');
     note.className = 'apx-sellers-note apx-k';
+    if (!o.complete) {
+      const more = document.createElement('div');
+      more.className = 'apx-sellers-note apx-k';
+      more.textContent = o.missing + ' more offer' + (o.missing === 1 ? '' : 's')
+        + ' exist but are not on the page yet. Click \u201cSee more options\u201d there,'
+        + ' then Recheck.';
+      // Worth saying, because it decides whether the gap matters: the drawer
+      // is sorted by price plus delivery ascending, so the ones still hidden
+      // are the dearest.
+      more.title = 'The offer list is sorted cheapest first, so the offers still '
+        + 'hidden are more expensive than every one shown.';
+      list.appendChild(more);
+    }
     if (mine) {
       note.textContent = 'Your own offer (' + fmt(mine.landed) + ', '
         + (mine.fba === true ? 'FBA' : mine.fba === false ? 'FBM' : 'fulfilment not stated')

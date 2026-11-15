@@ -672,6 +672,11 @@ test('ROI per offer answers what YOU would make there, not their margin', { skip
 });
 
 /** renderPanel, but with a seller id already saved in the worker's store. */
+/** readPage.extract over arbitrary HTML, for fixtures a test mutates. */
+function readPageOf(html, url) {
+  return require(path.join(ROOT, 'readPage.js')).extract(new JSDOM(html).window.document, url);
+}
+
 function renderPanelAsSeller(reading, sellerId) {
   return renderPanel(wire(reading), {
     ISUA_GET_MY_SELLER: { ok: true, sellerId },
@@ -773,4 +778,24 @@ test('the seller id is typed and local: no cookie, no network, no guess', () => 
   const panel = srcOf('panel.js').replace(/\/\/[^\n]*/g, '');
   assert.ok(!/chrome\.cookies|document\.cookie/.test(panel + code),
     'a cookie API appeared alongside the seller-id feature');
+});
+
+test('"but your own" appears only when your own offer is that kind', { skip }, () => {
+  // It read "No FBM offer but your own" on an ASIN where the user's own offer
+  // is FBA: true of the list, false of the sentence. The kind of wrongness
+  // that makes a reader stop trusting the lines that ARE right.
+  const lazy = fs.readFileSync(path.join(ROOT, 'tests', 'fixtures', '09-offers-panel.html'), 'utf8')
+    .replace(/<div id="aod-retail-other-offers-content"[\s\S]*?\n      <\/div>/,
+      '<div id="aod-retail-other-offers-content" class="a-section"></div>');
+  const reading = readPageOf(lazy, URL_FOR('B0H8QLSNPP'));
+  // The user's own offer here is FBA, and no FBM offer is loaded.
+  const me = reading.offers.offers[1].sellerId;
+  const { $ } = renderPanelAsSeller(reading, me);
+
+  assert.equal(reading.offers.offers[1].fba, true, 'the fixture own-offer is no longer FBA');
+  assert.equal($('apx-fbm').textContent, 'none yet');
+  assert.ok(!/but your own/.test($('apx-fbm').title),
+    'the FBM line still claims the user own offer is the only FBM one');
+  assert.match($('apx-fbm').title, /See more options/,
+    'the FBM line no longer says how to load the rest');
 });

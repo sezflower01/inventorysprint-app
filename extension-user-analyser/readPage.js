@@ -404,19 +404,25 @@
   //            a read taken in that window sees one offer out of seven.
   //   read     everything the counter promised is present.
   //
-  // Distinguishing loading from read needs the counter, not the spinner alone:
-  // one parsed offer with a counter saying six more exist is a half-built
-  // drawer, while one parsed offer with a counter saying zero others is a
-  // single-offer product and a COMPLETE read. Without that check the panel
-  // would say "Loading" forever on every sole-seller ASIN -- which is exactly
-  // the population a sourcing panel cares most about.
-  function offersState(panel, parsedCount, totalOthers) {
+  // LOADING IS BOUNDED BY THE PARSE, NOT BY THE COUNTER, and getting that
+  // backwards produced a panel stuck on "Loading..." for ever.
+  //
+  // The counter says how many offers EXIST. It does not say how many are in
+  // the DOM. Amazon ships the first few and fetches the rest only when the
+  // shopper clicks "See N more options" -- so a drawer that has finished
+  // everything it intends to do unasked can sit at three offers against a
+  // counter of seven, for ever. Waiting for the difference is waiting for a
+  // click that may never come.
+  //
+  // The earlier version also read the spinner, which is no help here: the
+  // spinner is hidden, because nothing is being fetched.
+  //
+  // So: one parsed offer is enough to be READ. Whether the read is COMPLETE
+  // is a separate question, answered by comparing against the counter and
+  // reported rather than waited on.
+  function offersState(panel, parsedCount) {
     if (!panel) return 'closed';
     if (!parsedCount) return 'loading';
-    if (totalOthers != null && (parsedCount - 1) < totalOthers) return 'loading';
-    const sp = panel.querySelector('#all-offers-display-spinner');
-    // The spinner element is always present; the class is what hides it.
-    if (sp && !/\baok-hidden\b/.test(sp.className || '')) return 'loading';
     return 'read';
   }
 
@@ -424,7 +430,7 @@
     const panel = doc.querySelector('#all-offers-display');
     const base = {
       found: false, text: 'not found', source: SRC_PAGE, state: 'closed',
-      count: 0, totalOthers: null, offers: [],
+      count: 0, totalOthers: null, complete: false, missing: 0, offers: [],
       buyBox: null, fbaLow: null, fbmLow: null, amazon: null,
       fbaCount: 0, fbmCount: 0, amazonSold: false,
     };
@@ -454,7 +460,7 @@
     const rawTotal = totalEl ? parseInt(totalEl.getAttribute('value'), 10) : NaN;
     const totalOthers = Number.isInteger(rawTotal) ? rawTotal : null;
 
-    const state = offersState(panel, offers.length, totalOthers);
+    const state = offersState(panel, offers.length);
     if (state !== 'read') {
       // The partial offers are returned so a caller could show them, but every
       // DERIVED figure stays null: "lowest FBA" computed from two of seven
@@ -482,6 +488,12 @@
       source: SRC_PAGE,
       count: offers.length,
       totalOthers: totalOthers,
+      // Whether every offer the counter promises is actually in the DOM.
+      // False means the shopper has not expanded "See N more options", so
+      // the dearest offers are absent -- the drawer is sorted by price plus
+      // delivery ascending, so what is missing is always the expensive end.
+      complete: totalOthers == null || offers.length >= totalOthers + 1,
+      missing: totalOthers == null ? 0 : Math.max(0, (totalOthers + 1) - offers.length),
       offers: offers,
       buyBox: offers.find((o) => o.isBuyBox) || null,
       fbaLow: cheapest(offers.filter((o) => o.fba === true)),

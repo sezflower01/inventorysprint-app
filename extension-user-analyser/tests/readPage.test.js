@@ -312,23 +312,50 @@ test('the pinned offer is in the DOM twice and must be counted once', { skip }, 
   assert.equal(o.amazonSold, false);
 });
 
-test('10 loading: a half-built drawer is not a finished read', { skip }, () => {
-  // Amazon paints the pinned offer and the counter first, then fetches the
-  // rest. A read taken in that window sees one offer out of seven, and
-  // "lowest FBA" computed from it is a number that changes a second later
-  // with nothing on screen to say it had.
+test('10 partial: a drawer with offers is READ, however many are missing', { skip }, () => {
+  // THIS TEST ASSERTED THE OPPOSITE AND THE OPPOSITE WAS WRONG.
+  //
+  // It required a drawer showing one of seven offers to report itself as
+  // "loading", on the reasoning that the rest were on their way. They are
+  // not. The counter says how many offers EXIST, not how many are in the
+  // DOM: Amazon ships the first few and fetches the rest only when the
+  // shopper clicks "See N more options". So a drawer that has finished
+  // everything it will do unasked sits at three offers against a counter of
+  // seven -- and waiting for the difference is waiting for a click.
+  //
+  // The panel sat on "Loading..." for ever, which is the same dead end the
+  // old blanket "Not read yet" produced: a state the user cannot act on and
+  // cannot distinguish from a hang.
   const o = readPage.readOffers(load('10-offers-loading.html'));
-  assert.equal(o.state, 'loading');
-  assert.equal(o.found, false, 'a partial drawer reported itself as read');
+  assert.equal(o.state, 'read', 'a drawer with a parsed offer is reporting itself as loading');
+  assert.equal(o.found, true);
   assert.equal(o.count, 1, 'the pinned offer did not parse from the sticky block');
-  assert.equal(o.totalOthers, 6, 'the counter that proves more are coming was not read');
+  assert.equal(o.totalOthers, 6, 'the counter was not read');
 
-  // The partial offers come through, but EVERY derived figure stays null.
-  assert.equal(o.offers.length, 1);
-  for (const k of ['fbaLow', 'fbmLow', 'buyBox', 'amazon']) {
-    assert.equal(o[k], null, k + ' was derived from a partial offer list');
-  }
-  assert.equal(o.fbaCount, 0, 'counts were derived from a partial list');
+  // READ but NOT COMPLETE, and the difference is reported rather than waited
+  // on. Six offers exist that are not on the page.
+  assert.equal(o.complete, false, 'a one-of-seven drawer claimed to be complete');
+  assert.equal(o.missing, 6);
+
+  // The figures ARE derived, because the drawer is sorted by price plus
+  // delivery ascending -- so whatever is missing is dearer than everything
+  // present, and the LOWEST figures cannot be wrong. It is a "none" that
+  // becomes unsafe on a partial list, and the panel qualifies those.
+  assert.ok(o.buyBox, 'the pinned offer is no longer recognised as the Buy Box');
+  assert.equal(o.fbaLow.landed, 64.97);
+  assert.equal(o.fbaCount, 1);
+});
+
+test('loading means the drawer is open and genuinely empty', { skip }, () => {
+  // The only remaining route to "loading", and it is narrow on purpose: the
+  // drawer exists and not one offer has parsed. Anything else resolves, so
+  // the state cannot strand the panel.
+  const html = fs.readFileSync(path.join(FIX, '10-offers-loading.html'), 'utf8')
+    .replace(/<div id="aod-sticky-pinned-container"[\s\S]*?<\/div>\s*<\/div>\s*<\/div>/, '');
+  const o = readPage.readOffers(new JSDOM(html).window.document);
+  assert.equal(o.state, 'loading', 'an empty open drawer no longer reports as loading');
+  assert.equal(o.count, 0);
+  assert.equal(o.found, false);
 });
 
 test('a single-offer product is a complete read, not a stuck spinner', { skip }, () => {
@@ -420,4 +447,42 @@ test('no real Amazon seller id or name can get back into a fixture', () => {
     assert.ok(!new RegExp('\\bPe' + 'du\\b').test(text),
       path.basename(file) + ' still carries the operator’s own business name');
   }
+});
+
+test('the lazy-loaded drawer: what actually stranded the panel', { skip }, () => {
+  // THE LIVE FAILURE, 2026-11-14. The panel read "Competitors — / Loading..."
+  // and stayed there. Not a slow page: Amazon had finished.
+  //
+  // The drawer ships the pinned offer plus the first two, and leaves the rest
+  // behind a "See 4 more options on Amazon" button that fetches them on
+  // click. Fixture 09 was captured AFTER that button had been pressed, which
+  // is exactly why the bug was invisible to it -- the fixture showed a state
+  // the extension would rarely meet first.
+  const lazy = fs.readFileSync(path.join(FIX, '09-offers-panel.html'), 'utf8')
+    .replace(/<div id="aod-retail-other-offers-content"[\s\S]*?\n      <\/div>/,
+      '<div id="aod-retail-other-offers-content" class="a-section"></div>');
+  const o = readPage.readOffers(new JSDOM(lazy).window.document);
+
+  assert.equal(o.state, 'read', 'the lazy-loaded drawer strands the panel again');
+  assert.equal(o.count, 3, 'the pinned offer plus the two visible ones did not parse');
+  assert.equal(o.complete, false);
+  assert.equal(o.missing, 4, 'the four withheld offers are not counted as missing');
+
+  // The cheap end is all present, because Amazon sorts the drawer by price
+  // plus delivery ascending. That is what makes a partial read useful rather
+  // than merely available.
+  assert.equal(o.fbaLow.landed, 64.97, 'the lowest FBA offer is not in the loaded set');
+  assert.equal(o.buyBox.isBuyBox, true);
+
+  // And the FBM offer is among the withheld ones, which is the case where a
+  // partial list could mislead: there IS an FBM competitor and none is
+  // loaded. The reader reports null, and the panel must not render that as a
+  // flat "none" -- it says "none yet" and tells the user to expand the list.
+  assert.equal(o.fbmLow, null);
+  assert.equal(o.fbmCount, 0);
+
+  const panel = fs.readFileSync(path.join(__dirname, '..', 'panel.js'), 'utf8');
+  const slice = panel.slice(panel.indexOf('const partly ='), panel.indexOf("putOffer('apx-amz'"));
+  assert.match(slice, /none yet/, 'a partial list reports a flat "none" again');
+  assert.match(slice, /See more options/, 'the panel no longer says how to load the rest');
 });

@@ -1,7 +1,13 @@
 <!doctype html>
 <!--
-  10: the offers drawer MID-LOAD, which is a different answer from both
-  "closed" and "read".
+  10: the offers drawer with only its pinned offer in the DOM -- READ but
+  not COMPLETE.
+
+  This header used to call it MID-LOAD, and the reader used to report it as
+  "loading" on the reasoning that the rest were on their way. They are not.
+  Amazon ships the first few offers and fetches the rest only when the shopper
+  clicks "See N more options", so this state can persist indefinitely -- and
+  the panel sat on "Loading..." for ever on a real page because of it.
 
   Derived from the same real B0H8QLSNPP capture as fixture 09, keeping the
   parts that distinguish a drawer still filling in from one that has finished:
