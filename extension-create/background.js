@@ -229,6 +229,42 @@ async function invoke(fn, body) {
   return data;
 }
 
+// ── Reserved units: can they cover FUTURE demand? ───────────────────────────
+//
+// PORTED FROM src/lib/replenishment.ts, which this file’s forecast claimed to
+// be a "verbatim port of" and was not. The shared library excludes Reserved
+// when the last FBA receipt is older than reservedFreshDays; this file added
+// Reserved unconditionally, so two implementations of one model disagreed and
+// the extension was the optimistic one.
+//
+// The reasoning, which is the shared library’s: Reserved sits in an ambiguous
+// state. Either it is still checking in from a recent shipment, in which case
+// it becomes Available and does cover future demand -- or it is already
+// committed to a customer order, in which case it never will. A recent
+// receipt is the only evidence that distinguishes them.
+//
+// UNKNOWN KEEPS IT, which is the optimistic direction and is deliberately the
+// shared library’s choice rather than mine: daysSinceLastReceived == null
+// means no received shipment was found for the ASIN, not that the stock is
+// stale. Changing that would change every reorder figure in the app, so the
+// two implementations agree on it and the decision stays in one place.
+//
+// A SEPARATE FUNCTION so the parity test can run it, rather than grep the
+// source and hope. background.js is a service worker and cannot be loaded
+// whole in a test; this can be extracted and executed.
+const REP_RESERVED_FRESH_DAYS = 7;
+
+function repPipelineStock(available, inbound, reserved, daysSinceLastReceived, reservedFreshDays) {
+  const fresh = Number.isFinite(reservedFreshDays) ? reservedFreshDays : REP_RESERVED_FRESH_DAYS;
+  const reservedExcluded = daysSinceLastReceived != null && daysSinceLastReceived > fresh;
+  const effectiveReserved = reservedExcluded ? 0 : (Number(reserved) || 0);
+  return {
+    reservedExcluded,
+    effectiveReserved,
+    totalPipelineStock: (Number(available) || 0) + (Number(inbound) || 0) + effectiveReserved,
+  };
+}
+
 async function restGet(path) {
   let s = await ensureFreshSession();
   const url = `${CFG.SUPABASE_URL}/rest/v1/${path}`;
@@ -976,12 +1012,50 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           const cutoff30Date = new Date(today.getTime() - 30 * 86400000);
           const cutoff30 = cutoff30Date.toISOString().slice(0, 10);
 
-          const [invRows, recentSales, allSales, settingsRows] = await Promise.all([
+          const [invRows, recentSales, allSales, settingsRows, shipItems] = await Promise.all([
             restGet(`inventory?user_id=eq.${uid}&asin=eq.${asin}&select=available,inbound,reserved,listing_status,sku`).catch(() => []),
             restGet(`sales_orders?user_id=eq.${uid}&asin=eq.${asin}&order_date=gte.${cutoff30}&select=quantity,order_date&limit=2000`).catch(() => []),
             restGet(`sales_orders?user_id=eq.${uid}&asin=eq.${asin}&select=quantity,order_date&order=order_date.asc&limit=5000`).catch(() => []),
             restGet(`reorder_planning_settings?user_id=eq.${uid}&select=coverage_days,supplier_lead_time_days,prep_days,shipping_to_amazon_days,amazon_receiving_days,safety_percent&limit=1`).catch(() => []),
+            // WHICH SHIPMENTS OF THIS ASIN WERE RECEIVED. Needed for the
+            // Reserved rule above, and NOT available from the inventory row --
+            // the web page builds it from fba_shipment_items joined to
+            // fba_shipments, so the extension has to read the same two tables.
+            // quantity_received > 0 matches the web query: a shipment line that
+            // received nothing is not evidence of a receipt.
+            restGet(`fba_shipment_items?user_id=eq.${uid}&asin=eq.${asin}&quantity_received=gt.0&select=shipment_id&limit=500`).catch(() => []),
           ]);
+
+          // The received date of the newest of those shipments. A SECOND round
+          // trip, because the ids are not known until the query above returns --
+          // and skipped entirely when the ASIN has no received shipment lines,
+          // which is the common case for something never sent to FBA.
+          let daysSinceLastReceived = null;
+          try {
+            const ids = [...new Set((Array.isArray(shipItems) ? shipItems : [])
+              .map((r) => r && r.shipment_id).filter(Boolean))];
+            if (ids.length) {
+              const inList = ids.map((x) => `"${String(x).replace(/"/g, "")}"`).join(",");
+              const shipRows = await restGet(
+                `fba_shipments?user_id=eq.${uid}&shipment_id=in.(${encodeURIComponent(inList)})`
+                + `&received_date=not.is.null&select=received_date&order=received_date.desc&limit=1`
+              ).catch(() => []);
+              const newest = Array.isArray(shipRows) && shipRows[0] && shipRows[0].received_date;
+              // NOT the daysSince helper below: that is a const arrow declared
+              // later in this block, so calling it here is a temporal-dead-zone
+              // ReferenceError -- which would have thrown on every ASIN that HAS
+              // a received shipment, i.e. exactly the ones this rule is for.
+              if (newest) {
+                const ms = today.getTime() - new Date(newest).getTime();
+                daysSinceLastReceived = Math.max(0, Math.floor(ms / 86400000));
+              }
+            }
+          } catch (_) {
+            // A failed lookup leaves it null, which KEEPS Reserved -- the same
+            // answer as "no shipment found". Failing the other way would cut 23
+            // units off a forecast because one query timed out.
+            daysSinceLastReceived = null;
+          }
 
           // Settings (with defaults matching NeedBuyAgain)
           const cfgRow = (Array.isArray(settingsRows) && settingsRows[0]) || {};
@@ -1050,7 +1124,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             (cfg.shipping_to_amazon_days || 0) +
             (cfg.amazon_receiving_days || 0);
           const planningDays = (cfg.coverage_days || 0) + totalLeadTimeDays;
-          const totalPipelineStock = available + inbound + reserved;
+          const pipe = repPipelineStock(available, inbound, reserved, daysSinceLastReceived);
+          const totalPipelineStock = pipe.totalPipelineStock;
           const forecastDemand = ads * planningDays;
           const safetyStock = forecastDemand * ((cfg.safety_percent || 0) / 100);
           let replenishQty = 0;
@@ -1074,6 +1149,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
               available, inbound, reserved,
               sales7d: d7, sales30d: d30, sales90d: d90,
               ads, totalLeadTimeDays, planningDays, forecastDemand, safetyStock,
+              // WHICH SALES DROVE THE RATE. The panel showed 7d/30d/90d side by
+              // side as though they were equals, and only one of them feeds the
+              // forecast -- on a product whose 90-day rate is double its 30-day
+              // rate, that is the difference between 38 and 71 days of cover.
+              //
+              // adsDays is the ACTUAL span used, not a flat 30: the window is
+              // measured from the first order inside it, so an ASIN whose only
+              // recent sale was 9 days ago is averaged over 9 days.
+              adsSource: recentUnits > 0 ? 'recent' : (historicalUnits > 0 ? 'all-time' : 'none'),
+              adsDays: recentUnits > 0 ? actualSalesPeriod : (historicalUnits > 0 ? historicalDays : null),
+              reservedExcluded: pipe.reservedExcluded,
+              effectiveReserved: pipe.effectiveReserved,
+              daysSinceLastReceived,
               totalPipelineStock, daysUntilStockout, replenishQty, riskLevel, riskLabel,
               settings: cfg,
               hasSettings: !!(Array.isArray(settingsRows) && settingsRows[0]),

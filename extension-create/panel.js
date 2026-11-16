@@ -2171,8 +2171,30 @@ function renderReplenish(d, asin = null) {
   const lt = Number(d?.totalLeadTimeDays || 0);
   const plan = Number(d?.planningDays || 0);
   const adsTxt = ads > 0 ? `${(Math.round(ads * 10) / 10)} units/day` : "no recent sales";
+  // WHICH WINDOW DROVE THE RATE. The 7d / 30d / 90d figures below sit side by
+  // side as though they were equals and only one of them feeds this forecast.
+  // On the ASIN that prompted this the 90-day rate was double the 30-day rate,
+  // which is 38 days of cover against 71 -- so the number is useless without
+  // knowing which one it came from.
+  //
+  // The span is the ACTUAL one, not a flat 30: it is measured from the first
+  // order inside the window, so a single sale 9 days ago averages over 9 days.
+  const adsDays = Number(d?.adsDays || 0);
+  const adsFrom = ads > 0 && adsDays > 0
+    ? (d?.adsSource === 'all-time' ? ` from all-time sales (${adsDays}d)` : ` from ${adsDays}d of sales`)
+    : "";
   $("apx-rep-meta").textContent =
-    `ADS ${adsTxt} · plan ${plan}d (lead ${lt}d + coverage ${plan - lt}d)`;
+    `ADS ${adsTxt}${adsFrom} · plan ${plan}d (lead ${lt}d + coverage ${plan - lt}d)`;
+  // And say so when Reserved was left out, because it moves the answer by the
+  // whole Reserved figure and the row above still shows that figure.
+  if (d?.reservedExcluded) {
+    const rEl = $("apx-rep-reserved");
+    if (rEl) {
+      rEl.title = `${fmtRepNum(d?.reserved)} reserved, left OUT of the forecast: the last FBA `
+        + `receipt for this ASIN was ${fmtRepNum(d?.daysSinceLastReceived)} days ago, so these `
+        + "units are more likely already committed to customer orders than still checking in.";
+    }
+  }
   $("apx-rep-status").textContent = d?.hasSettings
     ? ""
     : "Using default lead-time / coverage. Tune in Need to Buy Again → Reorder Planning.";
