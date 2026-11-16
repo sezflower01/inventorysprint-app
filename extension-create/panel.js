@@ -1920,7 +1920,13 @@ document.querySelectorAll(".apx-tab").forEach((btn) => {
 });
 
 /* ─── Add Purchase mode ─── */
-const purchase = { source: null, fbaElig: null, checking: false, suppliers: [], inherited: false };
+const purchase = {
+  source: null, fbaElig: null, checking: false, suppliers: [], inherited: false,
+  // The INVSPRNT_FIND_LISTING ghost verdict for the ASIN being added. Add
+  // Purchase showed a deleted listing’s purchase history exactly like a live
+  // listing, so money was being logged against stock that cannot be sent in.
+  presence: null,
+};
 
 function fmtMoney(n) {
   const v = Number(n);
@@ -2446,6 +2452,8 @@ $("apx-p-find").addEventListener("click", async () => {
   $("apx-p-replenish")?.classList.add("hidden");
   purchase.source = null;
   purchase.fbaElig = null;
+  purchase.presence = null;
+  $("apx-p-ghost-warning")?.classList.add("hidden");
   // Drop the previous ASIN's retailer with it. renderPurchaseCard re-seeds the
   // editor before the card is shown again, so this only guards against the
   // state outliving a failed Find.
@@ -2454,11 +2462,20 @@ $("apx-p-find").addEventListener("click", async () => {
   renderPurchaseFbaGate();
   const r = await bg("INVSPRNT_FIND_LISTING", { asin });
   if (!r?.ok) { setStatus("apx-p-find-status", r?.error || "Search failed", "err"); return; }
+  purchase.presence = r.presence || null;
   if (!r.data) {
-    setStatus("apx-p-find-status", "No existing listing for this ASIN. Switch to New Listing.", "err");
+    // "No existing listing" covered two different situations. When every
+    // inventory row is a ghost, the ASIN WAS listed here and was deleted, and
+    // "Switch to New Listing" is the wrong instruction -- relisting it in
+    // Seller Central is what makes it printable again.
+    setStatus("apx-p-find-status", purchase.presence?.state === "ghost"
+      ? "This ASIN is a ghost: every SKU in your inventory for it is deleted or not in the catalogue. Relist it in Seller Central first."
+      : "No existing listing for this ASIN. Switch to New Listing.", "err");
+    renderPurchaseGhost();
     return;
   }
   setStatus("apx-p-find-status", "");
+  renderPurchaseGhost();
   const allRows = Array.isArray(r.data._allRows) ? r.data._allRows : [r.data];
   const pick = (row) => {
     renderSkuPicker("apx-p-sku-picker", allRows, row.sku, pick);
@@ -2693,6 +2710,35 @@ $("apx-p-title-q").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("apx-p-title-find").click();
 });
 
+/**
+ * Ghost banner for Add Purchase.
+ *
+ * This does NOT block saving. Logging the purchase can be the right move --
+ * the stock is bought either way and the cost belongs on record -- but it must
+ * be a decision, not a surprise. Before this, the panel rendered the purchase
+ * history of a deleted listing with the same card as a live one.
+ */
+function renderPurchaseGhost() {
+  const el = $("apx-p-ghost-warning");
+  if (!el) return;
+  const p = purchase.presence;
+  if (!p || (p.state !== "ghost" && p.state !== "absent")) {
+    el.classList.add("hidden");
+    el.textContent = "";
+    return;
+  }
+  const body = p.state === "ghost"
+    ? "Every SKU in your inventory for this ASIN is a ghost" + ghostEvidenceHtml(p)
+      + ". The details below come from your own purchase history, not a live"
+      + " listing. You can still record the cost, but this stock cannot be sent"
+      + " to FBA and no FNSKU can be printed until the listing is relisted."
+    : "This ASIN has no inventory row in this account, so the details below come"
+      + " from your purchase history only. Check Seller Central before sending"
+      + " stock in — it was either deleted and purged, or never listed here.";
+  el.innerHTML = `<strong>⚠ ${p.state === "ghost" ? "Ghost listing" : "Not in your inventory"}</strong><div>${body}</div>`;
+  el.classList.remove("hidden");
+}
+
 /* ─── Boot ─── */
 post({ type: "READY" });
 checkAuth();
@@ -2704,7 +2750,13 @@ setInterval(checkAuth, 5000);
 
 /* ─── Print Label mode ─── */
 const PRINT_CLIENT_URLS = ["http://localhost:7777", "http://127.0.0.1:7777"];
-const printState = { listing: null, options: [], selectedOptionIndex: null, clientUrl: null, connected: false, fbaElig: null };
+const printState = {
+  listing: null, options: [], selectedOptionIndex: null, clientUrl: null,
+  connected: false, fbaElig: null,
+  // The INVSPRNT_FIND_LISTING verdict on whether this ASIN is still a listing.
+  // null = not measured, which reads as unknown and keeps the generic wording.
+  presence: null,
+};
 
 function isValidFnsku(value) {
   return VALID_FNSKU_RE.test((value || "").toString().trim().toUpperCase());
@@ -2718,12 +2770,92 @@ function normalizeFnsku(value) {
   return (value || "").toString().trim().toUpperCase();
 }
 
-function fnskuBlockReason(fnsku, asin) {
+/* ─── What a missing FNSKU actually means ────────────────────────
+ *
+ * "Not safe to print — no valid Amazon FNSKU found" was doing TWO jobs and one
+ * of them was false. Reported 2026-11-16 on B0187YMN5K: the listing had been
+ * deleted in Seller Central and the panel answered "press Find again in a
+ * minute once Amazon has synced". Amazon does not issue an FNSKU for a listing
+ * that no longer exists, so that advice never resolves — it just sends the
+ * seller back every minute for ever.
+ *
+ * One state answering two questions, again. "No FNSKU" is the symptom; whether
+ * the listing is alive is the cause, and only the cause says what to do next.
+ *
+ * The verdict is NOT recomputed here. INVSPRNT_FIND_LISTING already applies the
+ * ghost rule to decide which SKUs to offer, and now reports what it found, so
+ * the picker and the message cannot disagree about the same row.
+ *
+ * FAIL-CLOSED ON THE DIAGNOSIS, not only on printing: no verdict means the old
+ * generic wording, never a guess. Printing stays blocked in every one of these
+ * states — this changes only what we SAY.
+ */
+function presenceFor(asin) {
+  // A verdict only answers for the ASIN it was measured on.
+  const p = printState.presence;
+  if (!p || !p.asin) return null;
+  return p.asin === normalizeFnsku(asin) ? p : null;
+}
+
+/** Up to three ghost SKUs, named with their status, as evidence. */
+function ghostEvidenceHtml(presence) {
+  const ghosts = (presence && Array.isArray(presence.ghosts)) ? presence.ghosts : [];
+  const shown = ghosts.slice(0, 3).map((g) => {
+    const why = g.listing_status
+      ? String(g.listing_status).toLowerCase().replace(/_/g, " ")
+      : (g.reason ? String(g.reason) : "gone");
+    return g.sku ? `${escapeHtml(g.sku)} (${escapeHtml(why)})` : escapeHtml(why);
+  });
+  const more = ghosts.length - shown.length;
+  if (!shown.length) return "";
+  return `: ${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
+}
+
+/**
+ * The sentence under the headline. Each branch ends with the action that
+ * resolves ITS state — the old text offered "wait and press Find again" to all
+ * three, which is true of only one.
+ */
+function missingFnskuDetail(presence) {
+  const fromHistory = presence && presence.purchase_history
+    ? " The title and image above come from your own purchase history, not from a live listing."
+    : "";
+  if (presence && presence.state === "ghost") {
+    return "Every SKU this account holds for this ASIN is a ghost"
+      + ghostEvidenceHtml(presence)
+      + ". A deleted listing has no FNSKU and will never be issued one, so"
+      + " waiting or pressing Find again cannot help. Relist it in Seller"
+      + " Central, let inventory sync, then press Find again."
+      + fromHistory;
+  }
+  if (presence && presence.state === "absent") {
+    return "There is no inventory row for this ASIN in this account at all, so"
+      + " there is nothing for Amazon to issue an FNSKU against — it was either"
+      + " deleted and purged, or never listed here. Check Seller Central: if the"
+      + " listing is really there, run an inventory sync and press Find again;"
+      + " if it is gone, relist it before printing."
+      + fromHistory;
+  }
+  return "No Amazon FNSKU (X00…) is stored for this listing yet. If Seller"
+    + " Central shows one, type it in the FNSKU box below — or press Find again"
+    + " in a minute once Amazon has synced.";
+}
+
+function fnskuBlockReason(fnsku, asin, presence = presenceFor(asin)) {
   const normalized = normalizeFnsku(fnsku);
   const normalizedAsin = normalizeFnsku(asin);
-  if (!normalized) return "Not safe to print — no valid Amazon FNSKU found.";
+  // Manufacturer-barcode mode is checked FIRST and unconditionally: the
+  // "FNSKU" being the ASIN is positive evidence about the listing and outranks
+  // anything the inventory rows say. The normalizedAsin guard stops a blank
+  // FNSKU and a blank ASIN from matching each other.
   if (normalizedAsin && normalized === normalizedAsin) return "Blocked: ASIN is using manufacturer barcode, not Amazon FNSKU.";
-  if (!isValidFnsku(normalized)) return "Not safe to print — no valid Amazon FNSKU found.";
+  if (!normalized || !isValidFnsku(normalized)) {
+    // Missing and malformed share a headline because they share a consequence:
+    // nothing printable. WHY there is nothing is what changes the advice.
+    if (presence && presence.state === "ghost") return "Not safe to print — this ASIN is a ghost: no live listing in your inventory.";
+    if (presence && presence.state === "absent") return "Not safe to print — this ASIN is not in your Amazon inventory.";
+    return "Not safe to print — no valid Amazon FNSKU found.";
+  }
   return null;
 }
 
@@ -2745,7 +2877,7 @@ function renderPrintSafety() {
           // sentence, which told the seller something false about the listing.
           /manufacturer barcode/i.test(localReason)
             ? "This listing uses the manufacturer barcode instead of an Amazon FNSKU. Only X-prefixed Amazon FNSKUs can be printed."
-            : "No Amazon FNSKU (X00…) is stored for this listing yet. If Seller Central shows one, type it in the FNSKU box below — or press Find again in a minute once Amazon has synced."
+            : missingFnskuDetail(presenceFor(row?.asin))
         }</div>`;
     if (selected) selected.classList.add("hidden");
   } else {
@@ -3059,8 +3191,12 @@ $("apx-l-find").addEventListener("click", async () => {
   printState.options = [];
   printState.selectedOptionIndex = null;
   printState.fbaElig = null;
+  // A re-Find of the SAME ASIN must not reuse the old verdict: the whole point
+  // of pressing Find again is that Amazon may have synced since.
+  printState.presence = null;
   const r = await bg("INVSPRNT_FIND_LISTING", { asin });
   if (!r?.ok) { setStatus("apx-l-find-status", r?.error || "Search failed", "err"); return; }
+  printState.presence = r.presence || null;
   let listing = r.data || { asin, title: asin, image_url: "" };
   const allRows = Array.isArray(r.data?._allRows) ? r.data._allRows : (r.data ? [r.data] : []);
   setStatus("apx-l-find-status", "Checking FBA eligibility and saved FNSKU options…");

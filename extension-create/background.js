@@ -265,6 +265,60 @@ function repPipelineStock(available, inbound, reserved, daysSinceLastReceived, r
   };
 }
 
+// ── Ghost inventory rows, and whether an ASIN is still a listing ────────
+//
+// AT THE TOP LEVEL ON PURPOSE. Both of these were inline inside the
+// INVSPRNT_FIND_LISTING handler, which cannot be loaded in a test -- this file
+// is a service worker and registers chrome.* listeners as it parses. The
+// Reserved-units rule in this same file was ported wrong and sat undetected
+// for exactly that reason, so the rules that decide what the seller is told
+// live where a test can extract and execute them.
+//
+// NOT_FOUND joins NOT_IN_CATALOG and DELETED (2026-11-16). The label printer
+// already treated it as dead while the Add Purchase picker still offered it,
+// so the picker could hand the user a SKU the printer then refused -- two
+// ghost rules, one of them wrong.
+//
+// INACTIVE is NOT a ghost here, unlike src/lib/ghostFilter.ts which hides it
+// from Synced Inventory. That rule also hides zero-stock rows, and logging a
+// replenishment for an out-of-stock SKU is the commonest reason to open Add
+// Purchase. This repo has also measured that an INACTIVE row with stock is
+// usually STALE STOCK rather than a dead listing, so calling it gone would
+// send the seller to relist something that is still there.
+const GHOST_LISTING_STATUSES = ["NOT_IN_CATALOG", "DELETED", "NOT_FOUND"];
+
+function isGhostInventoryRow(r) {
+  if (!r) return true;
+  if (GHOST_LISTING_STATUSES.includes(String(r.listing_status || "").toUpperCase())) return true;
+  if (String(r.sku || "").toLowerCase().startsWith("amzn.gr.")) return true;
+  return false;
+}
+
+// live    at least one inventory SKU that is not a ghost
+// ghost   inventory rows exist and EVERY one is a ghost
+// absent  no inventory row at all for this ASIN
+//
+// "absent" deliberately does not claim deletion: it says what we can see,
+// which is nothing. Deleted-and-purged, never-listed and never-synced are
+// indistinguishable from here, and guessing between them would put a false
+// certainty in front of the seller.
+function listingPresenceVerdict(asin, invRows, liveRows, clRows) {
+  const rows = Array.isArray(invRows) ? invRows : [];
+  const live = Array.isArray(liveRows) ? liveRows : [];
+  return {
+    asin: String(asin || "").trim().toUpperCase(),
+    state: !rows.length ? "absent" : (live.length ? "live" : "ghost"),
+    inventory_rows: rows.length,
+    live_skus: live.map((r) => r && r.sku).filter(Boolean),
+    ghosts: rows.filter(isGhostInventoryRow).map((r) => ({
+      sku: r.sku || null,
+      listing_status: r.listing_status || null,
+      reason: r.ghost_reason || r.deleted_reason || null,
+    })),
+    purchase_history: Array.isArray(clRows) ? clRows.length : 0,
+  };
+}
+
 async function restGet(path) {
   let s = await ensureFreshSession();
   const url = `${CFG.SUPABASE_URL}/rest/v1/${path}`;
@@ -684,7 +738,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           // ghost SKUs that no longer exist on Amazon. The picker must reflect
           // SKUs that currently exist in the user's Amazon inventory.
           const invData = await restGet(
-            `inventory?user_id=eq.${uid}&asin=eq.${asin}&select=asin,sku,fnsku,title,image_url,price,my_price,cost,available,reserved,inbound,listing_status,updated_at&order=updated_at.desc.nullslast&limit=50`
+            `inventory?user_id=eq.${uid}&asin=eq.${asin}&select=asin,sku,fnsku,title,image_url,price,my_price,cost,available,reserved,inbound,listing_status,ghost_reason,deleted_reason,updated_at&order=updated_at.desc.nullslast&limit=50`
           );
           const invRows = Array.isArray(invData) ? invData : [];
 
@@ -695,19 +749,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           // Excludes:
           //   - listing_status NOT_IN_CATALOG / DELETED (confirmed gone)
           //   - SKUs starting with "amzn.gr." (Amazon-grading auto-relisted)
-          const isGhost = (r) => {
-            if (!r) return true;
-            const ls = String(r.listing_status || "").toUpperCase();
-            if (ls === "NOT_IN_CATALOG" || ls === "DELETED") return true;
-            if (String(r.sku || "").toLowerCase().startsWith("amzn.gr.")) return true;
-            return false;
-          };
+          // isGhostInventoryRow() is defined at the top of this file so a test
+          // can execute it; see the comment there for why INACTIVE is excluded.
 
           // De-duplicate by SKU (multi-marketplace can repeat the same SKU);
           // keep the most recently updated row.
           const bySku = new Map();
           for (const r of invRows) {
-            if (isGhost(r)) continue;
+            if (isGhostInventoryRow(r)) continue;
             const key = String(r.sku || "").toUpperCase();
             if (!key) continue;
             if (!bySku.has(key)) bySku.set(key, r);
@@ -843,8 +892,35 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           };
           allRows.sort((a, b) => _rowTs(b) - _rowTs(a));
 
-          const row = allRows[0] ? { ...allRows[0], _allRows: allRows } : null;
-          sendResponse({ ok: true, data: row });
+          // ── IS THIS ASIN STILL A LISTING? ───────────────────────────────
+          //
+          // The ghost rows were being dropped SILENTLY, and that silence was
+          // the bug. Reported 2026-11-16 on B0187YMN5K: the ASIN had been
+          // deleted in Seller Central, so every inventory row was a ghost and
+          // the only survivor was the seller’s own purchase history -- which
+          // Add Purchase then displayed like a live listing, and Print Label
+          // described as "no valid Amazon FNSKU found… press Find again in a
+          // minute once Amazon has synced". There is nothing to sync. Amazon
+          // does not issue an FNSKU for a listing that no longer exists.
+          //
+          // So report the verdict with the rows, rather than leaving each
+          // caller to re-derive it from what is missing:
+          //
+          //   live    at least one inventory SKU that is not a ghost
+          //   ghost   inventory rows exist and EVERY one is a ghost
+          //   absent  no inventory row at all for this ASIN
+          //
+          // "absent" deliberately does not claim deletion: it says what we can
+          // see, which is nothing. Deleted-and-purged, never-listed and
+          // never-synced are indistinguishable from here, and guessing between
+          // them would put a false certainty in front of the seller.
+          const presence = listingPresenceVerdict(asinRaw, invRows, liveRows, clRows);
+
+          const row = allRows[0] ? { ...allRows[0], _allRows: allRows, _presence: presence } : null;
+          // Carried OUTSIDE data as well, because data is null when the ASIN has
+          // no live SKU and no purchase history -- the case where the verdict
+          // matters most.
+          sendResponse({ ok: true, data: row, presence });
           break;
         }
         case "INVSPRNT_SEARCH_BY_SUPPLIER": {
