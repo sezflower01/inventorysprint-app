@@ -55,6 +55,8 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { getListingUnitCostSafe } from "@/lib/cost-contract";
+import { attributeShipmentItems, buildAsinBySku } from "@/lib/shipmentAttribution";
+import type { ShipmentLine } from "@/lib/shipmentAttribution";
 import AsinTraceDialog from "@/components/inventory/AsinTraceDialog";
 
 type ListingRow = {
@@ -72,13 +74,9 @@ type ListingRow = {
   supplier_links: unknown;
 };
 
-type ShipItem = {
-  asin: string | null;
-  seller_sku: string | null;
-  shipment_id: string | null;
-  quantity_shipped: number | null;
-  quantity_received: number | null;
-};
+// The shape @/lib/shipmentAttribution consumes. Re-exported as a local alias
+// so the page and the rule cannot disagree about the columns.
+type ShipItem = ShipmentLine;
 
 type GapKind = "never_shipped" | "short_shipped" | "not_received" | "accounted";
 
@@ -216,7 +214,8 @@ const _purchasesCache: {
   stock: Map<string, number>;
   known: Set<string>;
   sold: Map<string, number>;
-} = { userId: null, loadedAt: null, listings: [], shipItems: [], stock: new Map(), known: new Set(), sold: new Map() };
+  asinBySku: Map<string, string>;
+} = { userId: null, loadedAt: null, listings: [], shipItems: [], stock: new Map(), known: new Set(), sold: new Map(), asinBySku: new Map() };
 
 // What you were LOOKING AT, kept separately from the data cache above.
 //
@@ -243,6 +242,9 @@ export default function UnshippedPurchases() {
   const [stockByAsin, setStockByAsin] = useState<Map<string, number>>(new Map());
   const [knownAsins, setKnownAsins] = useState<Set<string>>(new Set());
   const [soldByAsin, setSoldByAsin] = useState<Map<string, number>>(new Map());
+  // sku -> asin, for shipment lines that carry no ASIN. See the comment above
+  // the shipment aggregation for why they exist.
+  const [asinBySku, setAsinBySku] = useState<Map<string, string>>(new Map());
   const [loading, setLoading] = useState(true);
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
   const [query, setQuery] = useState(_purchasesViewCache.query);
@@ -267,6 +269,7 @@ export default function UnshippedPurchases() {
       setStockByAsin(_purchasesCache.stock);
       setKnownAsins(_purchasesCache.known);
       setSoldByAsin(_purchasesCache.sold);
+      setAsinBySku(_purchasesCache.asinBySku);
       setLoadedAt(_purchasesCache.loadedAt);
       setLoading(false);
       return;
@@ -277,7 +280,7 @@ export default function UnshippedPurchases() {
       const [l, s, inv, sold] = await Promise.all([
         fetchAllPaged("created_listings", "id, asin, sku, title, image_url, units, received_quantity, cost, amount, date_created, created_at, supplier_links", user.id),
         fetchAllPaged("fba_shipment_items", "asin, seller_sku, shipment_id, quantity_shipped, quantity_received", user.id),
-        fetchAllPaged("inventory", "asin, available, reserved, inbound", user.id),
+        fetchAllPaged("inventory", "asin, sku, available, reserved, inbound", user.id),
         // Server-side aggregate. sales_orders is ~70k rows; totalling it in the
         // browser would mean 70+ paged requests per load, and any paging slip
         // would understate sales -- the exact failure this is fixing.
@@ -305,6 +308,9 @@ export default function UnshippedPurchases() {
         if (r.asin) soldMap.set(r.asin, Number(r.units_sold) || 0);
       }
 
+      // Inventory first, created_listings second -- see buildAsinBySku().
+      const skuToAsin = buildAsinBySku(inv as any[], l as ListingRow[]);
+
       const now = Date.now();
       _purchasesCache.userId = user.id;
       _purchasesCache.loadedAt = now;
@@ -313,12 +319,14 @@ export default function UnshippedPurchases() {
       _purchasesCache.stock = stock;
       _purchasesCache.known = known;
       _purchasesCache.sold = soldMap;
+      _purchasesCache.asinBySku = skuToAsin;
 
       setListings(l as ListingRow[]);
       setShipItems(s as ShipItem[]);
       setStockByAsin(stock);
       setKnownAsins(known);
       setSoldByAsin(soldMap);
+      setAsinBySku(skuToAsin);
       setLoadedAt(now);
       setLoading(false);
     })();
@@ -353,24 +361,19 @@ export default function UnshippedPurchases() {
   // instant and nothing moves while you are reading it.
   useEffect(() => { void loadData(false); }, [loadData]);
 
-  const allRows = useMemo<GapRow[]>(() => {
+  // Returns the rows AND what could not be attributed to any of them. The
+  // leftovers have to travel with the rows: a count recomputed separately
+  // would be a second copy of the matching rule, and the two would drift.
+  const computed = useMemo<{ rows: GapRow[]; unmatched: { lines: number; units: number } }>(() => {
     // Shipment totals keyed by ASIN. Deliberately ASIN-level, not ASIN+SKU:
     // a listing is frequently recreated under a new SKU, and matching on the
     // pair would report the original purchase as unshipped every time that
     // happened. ASIN is the stable identity of the thing bought.
-    const shippedByAsin = new Map<string, { shipped: number; received: number; ids: Set<string> }>();
-    for (const it of shipItems) {
-      const asin = it.asin;
-      if (!asin) continue;
-      const agg = shippedByAsin.get(asin) ?? { shipped: 0, received: 0, ids: new Set<string>() };
-      agg.shipped += Number(it.quantity_shipped) || 0;
-      agg.received += Number(it.quantity_received) || 0;
-      // A Set because one ASIN can appear on several lines of the same
-      // shipment; the id is the same shipment either way and listing it twice
-      // would read as two.
-      if (it.shipment_id) agg.ids.add(String(it.shipment_id));
-      shippedByAsin.set(asin, agg);
-    }
+    // Shipment totals per ASIN, including the lines whose own asin column is
+    // null -- which is most of them, and dropping them is what made every row
+    // read "Shipped 0". The rule and the reasons live in
+    // @/lib/shipmentAttribution so a test can run them.
+    const { byAsin: shippedByAsin, unmatched } = attributeShipmentItems(shipItems, asinBySku);
 
     // Purchases roll up per ASIN too, so buying the same product three times
     // is one line with the combined quantity rather than three lines each
@@ -490,16 +493,23 @@ export default function UnshippedPurchases() {
     // Money first — this page exists to be worked top-down. Rows with an
     // unknown unit cost sort under the priced ones rather than to the bottom,
     // since "unknown" is not the same as "nothing at stake".
-    return out.sort((a, b) => {
+    out.sort((a, b) => {
       const am = a.moneyAtRisk ?? -1;
       const bm = b.moneyAtRisk ?? -1;
       if (bm !== am) return bm - am;
       return (b.purchased - Math.max(b.sold + b.onHand, b.shipped)) - (a.purchased - Math.max(a.sold + a.onHand, a.shipped));
     });
+    return { rows: out, unmatched };
     // Deliberately NOT dependent on the filters. Computing the full set once
     // means the dropdown can show a count per status, and the summary cards
     // stay put while you filter.
-  }, [listings, shipItems, stockByAsin, knownAsins, soldByAsin]);
+  }, [listings, shipItems, stockByAsin, knownAsins, soldByAsin, asinBySku]);
+
+  const allRows = computed.rows;
+  // Three states, not two. shipItems.length === 0 means the shipment history
+  // did not load -- which is NOT the same as "nothing was shipped", and
+  // printing 0 for it is the bug this page just had.
+  const shipmentDataLoaded = shipItems.length > 0;
 
   // Years present in the data, newest first, so the dropdown never offers a
   // year with nothing behind it.
@@ -693,6 +703,43 @@ export default function UnshippedPurchases() {
           </Card>
         )}
 
+        {/* Shipment history missing or partly unattributable. Stated, because
+            every Shipped/Received figure on the page depends on it and the
+            previous failure was that nothing said so. */}
+        {!loading && !shipmentDataLoaded && (
+          <Card className="p-3 mb-4 border-red-500/40 bg-red-500/5 text-xs">
+            <div className="flex gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-red-600 dark:text-red-500" />
+              <div className="text-muted-foreground">
+                <strong className="text-foreground">No FBA shipment records loaded.</strong>{" "}
+                Shipped and Received read as unknown, not zero, and the shipment
+                column is empty for every row. Sold and in-stock figures are
+                unaffected, so the Missing column still rests on those — but any
+                units in transit or not yet checked in are uncounted. Run an FBA
+                shipment sync, then Refresh.
+              </div>
+            </div>
+          </Card>
+        )}
+        {!loading && shipmentDataLoaded && computed.unmatched.lines > 0 && (
+          <Card className="p-3 mb-4 border-amber-500/40 bg-amber-500/5 text-xs">
+            <div className="flex gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-500" />
+              <div className="text-muted-foreground">
+                <strong className="text-foreground">
+                  {computed.unmatched.lines} shipment line{computed.unmatched.lines === 1 ? "" : "s"}
+                  {" "}could not be matched to a product
+                </strong>{" "}
+                ({computed.unmatched.units} unit{computed.unmatched.units === 1 ? "" : "s"}).
+                Those lines carry no ASIN and their SKU is in neither your
+                inventory nor your purchase history, so they are missing from the
+                Shipped and Received columns below. Anything shipped under an old
+                SKU that was never recorded locally lands here.
+              </div>
+            </div>
+          </Card>
+        )}
+
         <Card className="p-3 mb-4 border-amber-500/30 bg-amber-500/5">
           <div className="flex gap-2 text-xs text-muted-foreground">
             <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-500" />
@@ -804,9 +851,18 @@ export default function UnshippedPurchases() {
                           </span>
                         )}
                       </td>
-                      <td className="px-3 py-2 text-right tabular-nums">{r.shipped}</td>
+                      {/* "0" and "we have no shipment data" must not look the
+                          same. With no rows loaded at all these read as
+                          unknown, because that is what they are. */}
                       <td className="px-3 py-2 text-right tabular-nums">
-                        {r.received}
+                        {shipmentDataLoaded ? r.shipped : (
+                          <span title="No FBA shipment records loaded — this is unknown, not zero">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">
+                        {shipmentDataLoaded ? r.received : (
+                          <span title="No FBA shipment records loaded — this is unknown, not zero">—</span>
+                        )}
                         {r.manualReceived != null && r.manualReceived !== r.purchased && (
                           <span className="block text-[10px] text-muted-foreground" title="Manually recorded as received from the supplier">
                             {r.manualReceived} from supplier
