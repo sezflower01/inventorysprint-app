@@ -103,18 +103,62 @@ left join fba_shipment_items i
 group by w.asin, w.sku, w.bought
 order by w.bought desc;
 
--- ─── 4. How far back does shipment history actually reach? ────────────────
--- The page's own caveat: a purchase older than the sync coverage looks
--- unshipped because it predates the data. These purchases are 21-46 days old,
--- so if the newest shipment here is older than that, cause B is in play too.
+-- ─── 4. How far forward does shipment history actually reach? ────────────
+-- THE ANSWER to "September is fine but October shows nothing shipped". There
+-- is no column called created_date on fba_shipments (an earlier draft of this
+-- file said there was and would simply have errored); the real date chain is
+-- ship_date -> received_date -> the MM/DD/YYYY the seller typed into
+-- shipment_name -> confirmed_need_by_date, which is the same COALESCE the
+-- get_shipment_accounting_period RPC uses.
+--
+-- last_updated_date is EXCLUDED on purpose: Amazon returns the API call
+-- timestamp there, which mis-bucketed 144 shipments into April 2026.
+-- created_at is ours, not Amazon's -- it says when the sync wrote the row, so
+-- it is reported separately as ingest, never as a shipment date.
 select
   u.email,
-  count(*)                       as shipments,
-  min(s.created_date)            as oldest,
-  max(s.created_date)            as newest,
-  count(s.received_date)         as with_received_date,
-  max(s.received_date)           as newest_receipt
+  count(*)                                            as shipments,
+  min(d.shipment_date)                                as oldest_dated,
+  max(d.shipment_date)                                as newest_dated,
+  count(*) - count(d.shipment_date)                   as undated,
+  max(s.created_at)::date                             as last_ingested,
+  count(*) filter (where s.created_at >= current_date - 30) as ingested_last_30d
 from fba_shipments s
 join auth.users u on u.id = s.user_id
+cross join lateral (
+  select coalesce(
+    s.ship_date,
+    s.received_date,
+    to_date((regexp_match(s.shipment_name, E'\(([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})'))[1], 'MM/DD/YYYY'),
+    s.confirmed_need_by_date
+  ) as shipment_date
+) d
 group by u.email
 order by shipments desc;
+
+-- ─── 5. Shipments and units per calendar month ────────────────────────────
+-- If September has rows and October has none, the sync stopped; the page is
+-- reporting absence of data as absence of shipment. If October HAS rows, the
+-- cause is elsewhere and this file's query 2 is the next stop.
+select
+  to_char(d.shipment_date, 'YYYY-MM')                 as month,
+  count(distinct s.shipment_id)                       as shipments,
+  sum(coalesce(i.quantity_shipped, 0))                as units_shipped,
+  sum(coalesce(i.quantity_received, 0))               as units_received,
+  count(i.id)                                         as item_rows
+from fba_shipments s
+join auth.users u on u.id = s.user_id
+cross join lateral (
+  select coalesce(
+    s.ship_date,
+    s.received_date,
+    to_date((regexp_match(s.shipment_name, E'\(([0-9]{1,2}/[0-9]{1,2}/[0-9]{4})'))[1], 'MM/DD/YYYY'),
+    s.confirmed_need_by_date
+  ) as shipment_date
+) d
+left join fba_shipment_items i
+  on i.user_id = s.user_id and i.shipment_id = s.shipment_id
+where d.shipment_date is not null
+group by 1
+order by 1 desc
+limit 18;

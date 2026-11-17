@@ -57,6 +57,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { getListingUnitCostSafe } from "@/lib/cost-contract";
 import { attributeShipmentItems, buildAsinBySku } from "@/lib/shipmentAttribution";
 import type { ShipmentLine } from "@/lib/shipmentAttribution";
+import { couldHaveShipmentRecord, shipmentCoverage } from "@/lib/shipmentCoverage";
+import type { ShipmentCoverage, ShipmentHeader } from "@/lib/shipmentCoverage";
 import AsinTraceDialog from "@/components/inventory/AsinTraceDialog";
 
 type ListingRow = {
@@ -108,6 +110,12 @@ type GapRow = {
    * already in fba_shipment_items; the query simply did not ask for them.
    */
   shipmentIds: string[];
+  /**
+   * False when this purchase is NEWER than any shipment on record, so no
+   * shipment row could be describing it. Then Shipped/Received are unknown,
+   * not zero -- see @/lib/shipmentCoverage.
+   */
+  shipmentEvidencePossible: boolean;
   kind: GapKind;
 };
 
@@ -180,6 +188,13 @@ async function fetchAllPaged(table: string, columns: string, userId: string): Pr
       .from(table as any)
       .select(columns)
       .eq("user_id", userId)
+      // ORDER BY is not optional with .range(). Without one, Postgres is free
+      // to return rows in a different order per request -- synchronize_seqscans
+      // makes a large table genuinely non-deterministic -- so successive pages
+      // overlap and some rows are never returned at all. On fba_shipment_items
+      // (15k rows, 16 pages) that is silent, partial shipment history, which is
+      // exactly the failure this page keeps having. id is the primary key.
+      .order("id", { ascending: true })
       .range(from, from + size - 1);
     if (error) { console.warn(`[unshipped-purchases] ${table}:`, error.message); break; }
     const batch = (data ?? []) as any[];
@@ -215,7 +230,8 @@ const _purchasesCache: {
   known: Set<string>;
   sold: Map<string, number>;
   asinBySku: Map<string, string>;
-} = { userId: null, loadedAt: null, listings: [], shipItems: [], stock: new Map(), known: new Set(), sold: new Map(), asinBySku: new Map() };
+  coverage: ShipmentCoverage | null;
+} = { userId: null, loadedAt: null, listings: [], shipItems: [], stock: new Map(), known: new Set(), sold: new Map(), asinBySku: new Map(), coverage: null };
 
 // What you were LOOKING AT, kept separately from the data cache above.
 //
@@ -245,6 +261,10 @@ export default function UnshippedPurchases() {
   // sku -> asin, for shipment lines that carry no ASIN. See the comment above
   // the shipment aggregation for why they exist.
   const [asinBySku, setAsinBySku] = useState<Map<string, string>>(new Map());
+  // How far the shipment history reaches. A purchase made after the newest
+  // shipment on record cannot have shipment evidence, and printing 0 for it
+  // reads as "Amazon received nothing" -- see @/lib/shipmentCoverage.
+  const [coverage, setCoverage] = useState<ShipmentCoverage | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadedAt, setLoadedAt] = useState<number | null>(null);
   const [query, setQuery] = useState(_purchasesViewCache.query);
@@ -270,6 +290,7 @@ export default function UnshippedPurchases() {
       setKnownAsins(_purchasesCache.known);
       setSoldByAsin(_purchasesCache.sold);
       setAsinBySku(_purchasesCache.asinBySku);
+      setCoverage(_purchasesCache.coverage);
       setLoadedAt(_purchasesCache.loadedAt);
       setLoading(false);
       return;
@@ -277,7 +298,7 @@ export default function UnshippedPurchases() {
 
     (async () => {
       setLoading(true);
-      const [l, s, inv, sold] = await Promise.all([
+      const [l, s, inv, sold, ships] = await Promise.all([
         fetchAllPaged("created_listings", "id, asin, sku, title, image_url, units, received_quantity, cost, amount, date_created, created_at, supplier_links", user.id),
         fetchAllPaged("fba_shipment_items", "asin, seller_sku, shipment_id, quantity_shipped, quantity_received", user.id),
         fetchAllPaged("inventory", "asin, sku, available, reserved, inbound", user.id),
@@ -285,6 +306,10 @@ export default function UnshippedPurchases() {
         // browser would mean 70+ paged requests per load, and any paging slip
         // would understate sales -- the exact failure this is fixing.
         supabase.rpc("sold_units_by_asin"),
+        // The shipment HEADERS, for their dates only. ~hundreds of rows against
+        // 15k items, and without them the page cannot tell "Amazon received
+        // nothing" from "our shipment history stops before this purchase".
+        fetchAllPaged("fba_shipments", "ship_date, received_date, confirmed_need_by_date, shipment_name, created_at", user.id),
       ]);
       const stock = new Map<string, number>();
       const known = new Set<string>();
@@ -310,6 +335,7 @@ export default function UnshippedPurchases() {
 
       // Inventory first, created_listings second -- see buildAsinBySku().
       const skuToAsin = buildAsinBySku(inv as any[], l as ListingRow[]);
+      const cov = shipmentCoverage(ships as ShipmentHeader[]);
 
       const now = Date.now();
       _purchasesCache.userId = user.id;
@@ -320,6 +346,7 @@ export default function UnshippedPurchases() {
       _purchasesCache.known = known;
       _purchasesCache.sold = soldMap;
       _purchasesCache.asinBySku = skuToAsin;
+      _purchasesCache.coverage = cov;
 
       setListings(l as ListingRow[]);
       setShipItems(s as ShipItem[]);
@@ -327,6 +354,7 @@ export default function UnshippedPurchases() {
       setKnownAsins(known);
       setSoldByAsin(soldMap);
       setAsinBySku(skuToAsin);
+      setCoverage(cov);
       setLoadedAt(now);
       setLoading(false);
     })();
@@ -433,6 +461,7 @@ export default function UnshippedPurchases() {
         ageDays: when ? Math.floor((now - when.getTime()) / 86_400_000) : null,
         purchaseDate: when ? when.toISOString() : null,
         shipmentIds: [],
+        shipmentEvidencePossible: true,
         kind: "never_shipped",
       });
     }
@@ -488,6 +517,13 @@ export default function UnshippedPurchases() {
         r.kind = "accounted";
       }
 
+      // Can a shipment record exist for this purchase at all? Decided per row
+      // rather than per page, because the answer changes with the purchase
+      // date: September purchases are inside coverage while October ones may
+      // not be, and that is precisely the difference between a supplier
+      // shortfall and a stale sync.
+      r.shipmentEvidencePossible = couldHaveShipmentRecord(coverage, r.purchaseDate);
+
       // Recompute age from the stored ISO date after the merge above.
       const d = parseDate(r.purchaseDate);
       r.ageDays = d ? Math.floor((now - d.getTime()) / 86_400_000) : null;
@@ -507,7 +543,7 @@ export default function UnshippedPurchases() {
     // Deliberately NOT dependent on the filters. Computing the full set once
     // means the dropdown can show a count per status, and the summary cards
     // stay put while you filter.
-  }, [listings, shipItems, stockByAsin, knownAsins, soldByAsin, asinBySku]);
+  }, [listings, shipItems, stockByAsin, knownAsins, soldByAsin, asinBySku, coverage]);
 
   const allRows = computed.rows;
   // Three states, not two. shipItems.length === 0 means the shipment history
@@ -576,6 +612,15 @@ export default function UnshippedPurchases() {
     }
     return list;
   }, [periodRows, statusFilter, query]);
+
+  // Counted over the VISIBLE rows, unlike the summary cards below, because this
+  // one is a statement about what you are currently reading. Narrow to October
+  // and it fires; narrow to September and it goes away -- which is itself the
+  // measurement the user wanted.
+  const beyondCoverage = useMemo(
+    () => rows.filter((r) => !r.shipmentEvidencePossible).length,
+    [rows],
+  );
 
   // From allRows, never the filtered set: these cards are the headline
   // exposure for the whole account. Recomputing them per filter would make
@@ -721,6 +766,39 @@ export default function UnshippedPurchases() {
                 unaffected, so the Missing column still rests on those — but any
                 units in transit or not yet checked in are uncounted. Run an FBA
                 shipment sync, then Refresh.
+              </div>
+            </div>
+          </Card>
+        )}
+        {/* THE ANSWER TO "why does October show nothing shipped". The matching
+            is fine; there is no shipment that recent to match against. Stated
+            before the table, because otherwise a column of zeros reads as a
+            supplier shortfall and the page's whole output is "go ask for money
+            back". */}
+        {!loading && shipmentDataLoaded && beyondCoverage > 0 && (
+          <Card className="p-3 mb-4 border-amber-500/40 bg-amber-500/5 text-xs">
+            <div className="flex gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-500" />
+              <div className="text-muted-foreground">
+                <strong className="text-foreground">
+                  {beyondCoverage} purchase{beyondCoverage === 1 ? "" : "s"} shown
+                  {" "}{beyondCoverage === 1 ? "is" : "are"} newer than every shipment on record
+                </strong>{" "}
+                — Shipped and Received read as unknown for {beyondCoverage === 1 ? "it" : "them"},
+                not zero, and the Missing column rests on sales and stock alone.
+                {coverage?.newest && (
+                  <> The newest shipment on record is dated{" "}
+                  <strong className="text-foreground">{coverage.newest}</strong>
+                  {coverage.oldest ? <> (history runs from {coverage.oldest})</> : null}
+                  {coverage.lastIngestedAt ? <>, and the most recent one was first synced {coverage.lastIngestedAt}</> : null}.</>
+                )}
+                {" "}Nothing on this page can fix that: run an FBA shipment sync,
+                then Refresh.
+                {coverage && coverage.undated > 0 && (
+                  <> ({coverage.undated} of {coverage.shipments} shipments carry no
+                  usable Amazon date; those are judged by when they were synced, so
+                  coverage is never understated.)</>
+                )}
               </div>
             </div>
           </Card>
@@ -877,17 +955,22 @@ export default function UnshippedPurchases() {
                         )}
                       </td>
                       {/* "0" and "we have no shipment data" must not look the
-                          same. With no rows loaded at all these read as
-                          unknown, because that is what they are. */}
+                          same, and there are TWO ways to have no data: nothing
+                          loaded at all, and a purchase newer than the newest
+                          shipment on record. Both read as unknown. */}
                       <td className="px-3 py-2 text-right tabular-nums">
-                        {shipmentDataLoaded ? r.shipped : (
+                        {!shipmentDataLoaded ? (
                           <span title="No FBA shipment records loaded — this is unknown, not zero">—</span>
-                        )}
+                        ) : !r.shipmentEvidencePossible ? (
+                          <span title={`This purchase is newer than every shipment on record${coverage?.newest ? ` (newest: ${coverage.newest})` : ""} — unknown, not zero`}>—</span>
+                        ) : r.shipped}
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums">
-                        {shipmentDataLoaded ? r.received : (
+                        {!shipmentDataLoaded ? (
                           <span title="No FBA shipment records loaded — this is unknown, not zero">—</span>
-                        )}
+                        ) : !r.shipmentEvidencePossible ? (
+                          <span title={`This purchase is newer than every shipment on record${coverage?.newest ? ` (newest: ${coverage.newest})` : ""} — unknown, not zero`}>—</span>
+                        ) : r.received}
                         {r.manualReceived != null && r.manualReceived !== r.purchased && (
                           <span className="block text-[10px] text-muted-foreground" title="Manually recorded as received from the supplier">
                             {r.manualReceived} from supplier
