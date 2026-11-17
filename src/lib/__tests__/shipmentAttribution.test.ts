@@ -139,7 +139,40 @@ describe('attributeShipmentItems', () => {
       new Map(),
     );
     expect(byAsin.size).toBe(0);
-    expect(unmatched).toEqual({ lines: 2, units: 34 });
+    expect(unmatched.lines).toBe(2);
+    expect(unmatched.units).toBe(34);
+    // The SKUs come back as evidence. Their SHAPE is what distinguishes
+    // "a few long-dead SKUs" from "this column is not holding merchant SKUs
+    // at all", and nothing on the client can tell those apart by reasoning.
+    expect(unmatched.sampleSkus).toEqual(['GONE-SKU-001']);
+  });
+
+  it('reports a denominator, because a bare count cannot be acted on', () => {
+    // "237 unmatched" means something different at 237 of 240 than at 237 of
+    // 5,000. The first says the shipment history does not describe the current
+    // products at all; the second is routine.
+    const asinBySku = buildAsinBySku([{ sku: 'AAA-BBB-0001', asin: STANLEY.asin }], []);
+    const { matched, unmatched } = attributeShipmentItems(
+      [
+        line({ seller_sku: 'AAA-BBB-0001', quantity_shipped: 5 }),
+        line({ seller_sku: 'AAA-BBB-0001', shipment_id: 'FBA1BBB', quantity_shipped: 5 }),
+        line({ seller_sku: 'GONE-SKU-001', quantity_shipped: 9 }),
+      ],
+      asinBySku,
+    );
+    expect(matched).toEqual({ lines: 2, asins: 1 });
+    expect(unmatched.lines).toBe(1);
+  });
+
+  it('caps and de-duplicates the sample, so one dead SKU is not listed 200 times', () => {
+    const lines = Array.from({ length: 200 }, (_, i) =>
+      line({ seller_sku: i < 100 ? 'DEAD-SKU-001' : `DEAD-SKU-${i}`, quantity_shipped: 1 }),
+    );
+    const { unmatched } = attributeShipmentItems(lines, new Map());
+    expect(unmatched.lines).toBe(200);
+    expect(unmatched.sampleSkus).toHaveLength(6);
+    expect(new Set(unmatched.sampleSkus).size).toBe(6);
+    expect(unmatched.sampleSkus[0]).toBe('DEAD-SKU-001');
   });
 
   it('treats null quantities as zero without losing the line', () => {
@@ -160,9 +193,12 @@ describe('attributeShipmentItems', () => {
     // distinguishable from "shipped nothing" by the caller, which reads
     // shipItems.length -- so this returns empty rather than inventing zeros.
     for (const empty of [[], null, undefined]) {
-      const { byAsin, unmatched } = attributeShipmentItems(empty, new Map());
+      const { byAsin, matched, unmatched } = attributeShipmentItems(empty, new Map());
       expect(byAsin.size).toBe(0);
-      expect(unmatched).toEqual({ lines: 0, units: 0 });
+      expect(matched).toEqual({ lines: 0, asins: 0 });
+      expect(unmatched.lines).toBe(0);
+      expect(unmatched.units).toBe(0);
+      expect(unmatched.sampleSkus).toEqual([]);
     }
   });
 });

@@ -364,7 +364,11 @@ export default function UnshippedPurchases() {
   // Returns the rows AND what could not be attributed to any of them. The
   // leftovers have to travel with the rows: a count recomputed separately
   // would be a second copy of the matching rule, and the two would drift.
-  const computed = useMemo<{ rows: GapRow[]; unmatched: { lines: number; units: number } }>(() => {
+  const computed = useMemo<{
+    rows: GapRow[];
+    matched: { lines: number; asins: number };
+    unmatched: { lines: number; units: number; sampleSkus: string[] };
+  }>(() => {
     // Shipment totals keyed by ASIN. Deliberately ASIN-level, not ASIN+SKU:
     // a listing is frequently recreated under a new SKU, and matching on the
     // pair would report the original purchase as unshipped every time that
@@ -373,7 +377,7 @@ export default function UnshippedPurchases() {
     // null -- which is most of them, and dropping them is what made every row
     // read "Shipped 0". The rule and the reasons live in
     // @/lib/shipmentAttribution so a test can run them.
-    const { byAsin: shippedByAsin, unmatched } = attributeShipmentItems(shipItems, asinBySku);
+    const { byAsin: shippedByAsin, matched, unmatched } = attributeShipmentItems(shipItems, asinBySku);
 
     // Purchases roll up per ASIN too, so buying the same product three times
     // is one line with the combined quantity rather than three lines each
@@ -499,7 +503,7 @@ export default function UnshippedPurchases() {
       if (bm !== am) return bm - am;
       return (b.purchased - Math.max(b.sold + b.onHand, b.shipped)) - (a.purchased - Math.max(a.sold + a.onHand, a.shipped));
     });
-    return { rows: out, unmatched };
+    return { rows: out, matched, unmatched };
     // Deliberately NOT dependent on the filters. Computing the full set once
     // means the dropdown can show a count per status, and the summary cards
     // stay put while you filter.
@@ -727,14 +731,35 @@ export default function UnshippedPurchases() {
               <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-500" />
               <div className="text-muted-foreground">
                 <strong className="text-foreground">
-                  {computed.unmatched.lines} shipment line{computed.unmatched.lines === 1 ? "" : "s"}
+                  {computed.unmatched.lines} of{" "}
+                  {computed.unmatched.lines + computed.matched.lines} shipment lines
                   {" "}could not be matched to a product
                 </strong>{" "}
                 ({computed.unmatched.units} unit{computed.unmatched.units === 1 ? "" : "s"}).
                 Those lines carry no ASIN and their SKU is in neither your
                 inventory nor your purchase history, so they are missing from the
-                Shipped and Received columns below. Anything shipped under an old
-                SKU that was never recorded locally lands here.
+                Shipped and Received columns below.
+                {computed.matched.lines === 0 ? (
+                  <>
+                    {" "}<strong className="text-foreground">Nothing matched at all</strong>,
+                    {" "}which means these lines are not describing the products below:
+                    {" "}either the shipment history is entirely stale (the current
+                    {" "}shipments were never ingested, which no change on this page
+                    {" "}can fix — run an FBA shipment sync), or seller_sku is
+                    {" "}holding something other than your merchant SKUs.
+                  </>
+                ) : (
+                  <>{" "}Anything shipped under an old SKU that was never recorded
+                  {" "}locally lands here.</>
+                )}
+                {/* The SHAPE of these says which of the two it is, and no
+                    amount of reasoning from this side of the network can. */}
+                {computed.unmatched.sampleSkus.length > 0 && (
+                  <div className="mt-1 font-mono text-[11px] text-foreground/80">
+                    unmatched SKUs: {computed.unmatched.sampleSkus.join(", ")}
+                    {computed.unmatched.lines > computed.unmatched.sampleSkus.length ? ", …" : ""}
+                  </div>
+                )}
               </div>
             </div>
           </Card>

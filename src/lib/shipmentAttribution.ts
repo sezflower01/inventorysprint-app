@@ -47,8 +47,24 @@ export type AsinShipmentTotals = {
 
 export type ShipmentAttribution = {
   byAsin: Map<string, AsinShipmentTotals>;
-  unmatched: { lines: number; units: number };
+  /**
+   * A count with no denominator cannot be acted on. "237 lines unmatched"
+   * reads completely differently at 237 of 240 (the SKUs are from some other
+   * namespace, or the shipment history is all stale) than at 237 of 5,000
+   * (a handful of long-deleted SKUs, which is expected and harmless).
+   *
+   * `sampleSkus` exists for the same reason: the shape of the unmatched SKUs
+   * says what they are. X-prefixed means the column holds FNSKUs, not
+   * merchant SKUs. Recognisable old SKUs mean stale shipment history, and
+   * that the current shipments were never ingested at all -- which no change
+   * on this page can fix.
+   */
+  matched: { lines: number; asins: number };
+  unmatched: { lines: number; units: number; sampleSkus: string[] };
 };
+
+/** How many example SKUs to carry back for the UI to show. */
+const SAMPLE_LIMIT = 6;
 
 /** SKUs differ only by case and padding between sources; compare normalized. */
 export function skuKey(sku: string | null | undefined): string {
@@ -87,8 +103,10 @@ export function attributeShipmentItems(
   asinBySku: Map<string, string>,
 ): ShipmentAttribution {
   const byAsin = new Map<string, AsinShipmentTotals>();
+  let matchedLines = 0;
   let unmatchedLines = 0;
   let unmatchedUnits = 0;
+  const sampleSkus: string[] = [];
 
   for (const it of lines ?? []) {
     // The line's own ASIN wins when it has one; the SKU lookup is the fallback
@@ -97,8 +115,13 @@ export function attributeShipmentItems(
     if (!asin) {
       unmatchedLines++;
       unmatchedUnits += Number(it?.quantity_shipped) || 0;
+      const sku = skuKey(it?.seller_sku);
+      if (sku && sampleSkus.length < SAMPLE_LIMIT && !sampleSkus.includes(sku)) {
+        sampleSkus.push(sku);
+      }
       continue;
     }
+    matchedLines++;
     const agg = byAsin.get(asin) ?? { shipped: 0, received: 0, ids: new Set<string>() };
     agg.shipped += Number(it?.quantity_shipped) || 0;
     agg.received += Number(it?.quantity_received) || 0;
@@ -106,5 +129,9 @@ export function attributeShipmentItems(
     byAsin.set(asin, agg);
   }
 
-  return { byAsin, unmatched: { lines: unmatchedLines, units: unmatchedUnits } };
+  return {
+    byAsin,
+    matched: { lines: matchedLines, asins: byAsin.size },
+    unmatched: { lines: unmatchedLines, units: unmatchedUnits, sampleSkus },
+  };
 }
