@@ -125,6 +125,14 @@ verify_jwt = true
 [functions.fetch-product-price]
 verify_jwt = true
 
+# pg_cron sends x-internal-secret and NO Authorization header, so the gateway
+# would reject this before the function ran. It exists to be the bearer-less
+# entry point for the weekly shipment catch-up; it calls sync-fba-shipments
+# (which keeps verify_jwt = true for the browser) with a service-role bearer
+# read from its own environment, so no JWT has to live in cron.job.
+[functions.catchup-fba-shipments]
+verify_jwt = false
+
 [functions.sync-fba-shipments]
 verify_jwt = true
 
