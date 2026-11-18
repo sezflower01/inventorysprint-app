@@ -93,6 +93,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { withCronLock } from "../_shared/cron-lock.ts";
+import { innerCallTimeoutMs, shouldReenter } from "./reentry.ts";
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -131,6 +132,13 @@ const MODE_BODY: Record<Mode, Record<string, unknown>> = {
     // Headers keep being upserted past this point; only the per-shipment
     // SP-API call stops, and the response says how many were left.
     itemFetchBudgetMs: 70_000,
+    // The inner call's HARD total budget, not just its item phase. The
+    // wrapper's re-entry arithmetic treats this as the worst case, so the two
+    // constants must move together -- see INNER_TOTAL_BUDGET_MS.
+    totalBudgetMs: 100_000,
+    // Record status/size/duration of the first few item fetches, to find out
+    // why they take 12-25s and return nothing.
+    traceItemFetches: 8,
     // Breadcrumbs to cron_run_history before each phase, so the next kill
     // names the phase instead of leaving us to infer it from a duration.
     phaseTrace: true,
@@ -139,10 +147,8 @@ const MODE_BODY: Record<Mode, Record<string, unknown>> = {
 };
 
 /**
- * Stop STARTING work at 110s. The platform kills the request at 150s with no
- * response written, and one sync call plus its throttle has to fit in the
- * remainder. Deliberately well short of the limit rather than near it: the
- * point is that the request always returns and therefore always records.
+ * Stop STARTING a new USER past this. Distinct from the re-entry ceiling
+ * below: this one only guards the fan-out across users.
  */
 const DEADLINE_MS = 110_000;
 
@@ -150,10 +156,33 @@ const DEADLINE_MS = 110_000;
 const RECENT_FRESHNESS_HOURS = 24;
 
 /**
- * How many times to re-enter the inner sync for one user in a single run. The
- * inner call bounds itself at itemFetchBudgetMs and says whether item work
- * remains; this caps how much of our own 110s we spend resuming it. Anything
- * still outstanding is picked up by the next run through the same cursor.
+ * THE WRAPPER MUST RETURN WITHIN THIS, ALWAYS.
+ *
+ * The platform kills an edge request at 150s with no response bytes written,
+ * which leaves withCronLock unable to record anything -- and "no row" then
+ * means both "never ran" and "ran and was killed". 140s keeps a 10s margin on
+ * the kill. See reentry.ts for the 2026-11-18 14:13Z run this is derived from.
+ */
+const HARD_CEILING_MS = 140_000;
+
+/**
+ * The inner sync's CONTRACTUAL total budget, sent to it as `totalBudgetMs` and
+ * used here as the worst case when deciding whether another call can fit. The
+ * two must agree: if the inner call may run longer than we assume, the
+ * arithmetic in reentry.ts is unsound and the wrapper gets killed again.
+ */
+const INNER_TOTAL_BUDGET_MS = 100_000;
+
+/** Headroom over the inner worst case, for our own recording and return. */
+const REENTRY_SLACK_MS = 15_000;
+
+/** Never spent on work: reserved so the history row always gets written. */
+const RECORDING_RESERVE_MS = 5_000;
+
+/**
+ * Hard cap on inner calls per run, independent of the arithmetic. With the
+ * budgets above a second call cannot currently fit (reentry.ts has a test
+ * stating that), so this is a backstop, not the mechanism.
  */
 const MAX_INNER_CALLS = 2;
 
@@ -239,6 +268,14 @@ serve(async (req) => {
       ok: boolean;
       shipments?: number;
       items?: number;
+      /** How many inner sync calls this user took. */
+      calls?: number;
+      /**
+       * Why re-entry was allowed or refused, one entry per decision. Recorded
+       * because a run that declines to resume looks identical to one that had
+       * nothing left to do, and the two need different responses.
+       */
+      reentry?: string[];
       error?: string;
     };
     const results: UserOutcome[] = [];
@@ -264,13 +301,32 @@ serve(async (req) => {
         let items = 0;
         let lastError: string | undefined;
         let sawSuccess = false;
+        const reentryReasons: string[] = [];
 
-        while (calls < MAX_INNER_CALLS && Date.now() - t0 < DEADLINE_MS) {
+        // Why a do/while asking a pure function rather than a condition in the
+        // loop header: the old header compared elapsed time against a deadline
+        // while ignoring how long the call it was admitting could take, which
+        // is how a 91.8s re-entry put the wrapper past 190s. reentry.ts owns
+        // that arithmetic now and has a regression test for exactly that run.
+        let decision = { reenter: true, reason: 'first call', projectedMs: 0 };
+        while (decision.reenter) {
           calls++;
           let more = false;
+
+          // Guarantee we get control back with time left to record, even if
+          // the inner call overruns its own contract or hangs outright.
+          const budgetMs = innerCallTimeoutMs(Date.now() - t0, HARD_CEILING_MS, RECORDING_RESERVE_MS);
+          if (budgetMs <= 0) {
+            lastError = lastError ?? `no time left to call sync-fba-shipments (elapsed ${Date.now() - t0}ms)`;
+            break;
+          }
+          const abort = new AbortController();
+          const abortTimer = setTimeout(() => abort.abort(), budgetMs);
+
           try {
             const resp = await fetch(`${supabaseUrl}/functions/v1/sync-fba-shipments`, {
               method: 'POST',
+              signal: abort.signal,
               headers: {
                 'Content-Type': 'application/json',
                 // Service-role key from THIS function's environment. Satisfies
@@ -300,17 +356,35 @@ serve(async (req) => {
             items += Number(payload?.itemsUpserted ?? payload?.itemCount ?? 0);
             more = payload?.moreItemWorkRemaining === true;
           } catch (e) {
-            lastError = (e as Error)?.message ?? String(e);
+            // An abort here is OUR ceiling firing, not an Amazon failure.
+            // Name it as such: the inner sync is still running and its own
+            // cursor means the next run resumes, so this is a deferral.
+            lastError = (e as Error)?.name === 'AbortError'
+              ? `aborted at wrapper ceiling after ${Date.now() - t0}ms (inner sync may still be running; its cursor resumes next run)`
+              : ((e as Error)?.message ?? String(e));
             break;
+          } finally {
+            clearTimeout(abortTimer);
           }
 
-          if (!more) break;
+          decision = shouldReenter({
+            elapsedMs: Date.now() - t0,
+            callsMade: calls,
+            maxCalls: MAX_INNER_CALLS,
+            moreWork: more,
+            innerWorstCaseMs: INNER_TOTAL_BUDGET_MS,
+            slackMs: REENTRY_SLACK_MS,
+            hardCeilingMs: HARD_CEILING_MS,
+          });
+          reentryReasons.push(decision.reason);
+          if (!decision.reenter) break;
+
           // Breather before resuming the next slice.
           await new Promise((r) => setTimeout(r, 1000));
         }
 
         if (sawSuccess) {
-          results.push({ user_id: userId, ok: true, shipments, items, ...(lastError ? { error: lastError } : {}) });
+          results.push({ user_id: userId, ok: true, shipments, items, calls, reentry: reentryReasons, ...(lastError ? { error: lastError } : {}) });
         } else {
           results.push({ user_id: userId, ok: false, error: lastError ?? 'no response' });
         }

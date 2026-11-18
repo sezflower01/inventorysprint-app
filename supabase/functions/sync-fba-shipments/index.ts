@@ -89,6 +89,27 @@ async function getLwaAccessToken(refreshToken: string): Promise<string> {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+/**
+ * One per-shipment item fetch, measured. Added 2026-11-18 because the phase
+ * breadcrumbs showed only 6 fetches in 77s and 4 in 98s, all returning zero
+ * items, and nothing in the logs said which half was slow. `gate_ms` is time
+ * blocked on our own shared rate limiter; `call_ms` is time inside callSpApi,
+ * which retries a 429 up to 3 attempts with backoff. Separating them is the
+ * whole point: the two have completely different fixes.
+ */
+interface ItemFetchProbe {
+  shipment_id: string;
+  source: string;
+  gate_ms: number;
+  gate_ok: boolean;
+  call_ms: number;
+  ok: boolean;
+  status?: number;
+  items: number;
+  bytes?: number;
+  error?: string;
+}
+
 class SpApiError extends Error {
   constructor(public status: number, public responseText: string) {
     super(`SP-API error: ${status} - ${responseText}`);
@@ -181,7 +202,7 @@ function quantityValue(...values: any[]): number {
   return 0;
 }
 
-async function fetchV0ShipmentItems(supabase: any, shipmentId: string, marketplaceId: string, accessToken: string): Promise<any[]> {
+async function fetchV0ShipmentItems(supabase: any, shipmentId: string, marketplaceId: string, accessToken: string, probe?: ItemFetchProbe[]): Promise<any[]> {
   const collected: any[] = [];
   let nextToken: string | null = null;
 
@@ -189,9 +210,45 @@ async function fetchV0ShipmentItems(supabase: any, shipmentId: string, marketpla
     const params = new URLSearchParams({ MarketplaceId: marketplaceId });
     if (nextToken) params.set('NextToken', nextToken);
     const itemsUrl = `https://sellingpartnerapi-na.amazon.com/fba/inbound/v0/shipments/${encodeURIComponent(shipmentId)}/items?${params.toString()}`;
-    await waitForApiToken(supabase, 'inbound_api');
-    const itemsResponse = await callSpApi('GET', itemsUrl, accessToken);
+
+    // Measured separately -- see ItemFetchProbe. A long gate_ms means the
+    // shared bucket is starved; a long call_ms means Amazon is throttling us
+    // inside callSpApi's retry loop.
+    const gateStart = Date.now();
+    const gateOk = await waitForApiToken(supabase, 'inbound_api');
+    const gateMs = Date.now() - gateStart;
+    const callStart = Date.now();
+
+    let itemsResponse: any;
+    try {
+      itemsResponse = await callSpApi('GET', itemsUrl, accessToken);
+    } catch (e) {
+      probe?.push({
+        shipment_id: shipmentId,
+        source: 'v0',
+        gate_ms: gateMs,
+        gate_ok: gateOk,
+        call_ms: Date.now() - callStart,
+        ok: false,
+        status: (e as any)?.status,
+        items: 0,
+        error: String((e as any)?.message ?? e).slice(0, 200),
+      });
+      throw e;
+    }
+
     const items = Array.isArray(itemsResponse.payload?.ItemData) ? itemsResponse.payload.ItemData : [];
+    probe?.push({
+      shipment_id: shipmentId,
+      source: 'v0',
+      gate_ms: gateMs,
+      gate_ok: gateOk,
+      call_ms: Date.now() - callStart,
+      ok: true,
+      status: 200,
+      items: items.length,
+      bytes: JSON.stringify(itemsResponse ?? {}).length,
+    });
     collected.push(...items);
     nextToken = typeof itemsResponse.payload?.NextToken === 'string' && itemsResponse.payload.NextToken.length > 0
       ? itemsResponse.payload.NextToken
@@ -477,6 +534,25 @@ serve(async (req) => {
     // no return value and so no response to inspect; these rows are the only
     // evidence that survives one.
     const phaseTrace: boolean = requestBody?.phaseTrace === true;
+
+    // -- A HARD BUDGET ON THE WHOLE LOOP, NOT JUST THE ITEM FETCHES ---------
+    // itemFetchBudgetMs stops the SP-API calls but the loop still runs on,
+    // upserting headers for every remaining shipment. Measured 2026-11-18:
+    // the item budget tripped at 77.7s and the call still had not returned at
+    // ~91.5s. The wrapper treats this value as the inner worst case when it
+    // decides whether another call fits (see catchup-fba-shipments/reentry.ts),
+    // so an unbounded tail makes that arithmetic unsound and gets the WRAPPER
+    // killed. Default null = unlimited, so the browser path is unchanged.
+    const totalBudgetRaw = Number(requestBody?.totalBudgetMs);
+    const totalBudgetMs: number | null =
+      Number.isFinite(totalBudgetRaw) && totalBudgetRaw > 0 ? Math.floor(totalBudgetRaw) : null;
+
+    // How many per-shipment item fetches to measure in detail. 0 = none.
+    const traceItemFetchesRaw = Number(requestBody?.traceItemFetches);
+    const traceItemFetches: number =
+      Number.isFinite(traceItemFetchesRaw) && traceItemFetchesRaw > 0
+        ? Math.min(25, Math.floor(traceItemFetchesRaw))
+        : 0;
 
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -1060,19 +1136,55 @@ serve(async (req) => {
 
     await markPhase('phase-2-complete', { shipments: allShipments.length });
 
-    // Which shipments already have item rows. ONE query, and it is the cursor
-    // described at skipShipmentsWithItems above.
+    // Which shipments already have item rows -- the cursor described at
+    // skipShipmentsWithItems above.
+    //
+    // ⚠️ THE OBVIOUS VERSION OF THIS QUERY SILENTLY RETURNS A FRACTION.
+    // It was `.select('shipment_id').eq('user_id', ...).limit(50000)`, and on
+    // 2026-11-18 it reported 122 shipments while the table actually held
+    // 1,163 distinct shipment_ids. PostgREST caps a response at the project's
+    // db-max-rows (1,000 here) and `.limit()` cannot raise it -- so the 50,000
+    // was never granted, the first 1,000 item rows happened to cover only 122
+    // shipments, and the cursor then re-fetched ~1,041 shipments it already
+    // had. That is the same class as the ~28 files paging with .range() and no
+    // ORDER BY: a capped read that looks like a complete one.
+    //
+    // Fixed by asking only about the shipments in THIS window (a few hundred,
+    // known already) in chunks that cannot hit the cap, instead of reading the
+    // whole table and hoping.
     const haveItemsFor = new Set<string>();
     if (skipShipmentsWithItems && !headersOnly) {
-      const { data: existing } = await supabase
-        .from('fba_shipment_items')
-        .select('shipment_id')
-        .eq('user_id', user.id)
-        .limit(50000);
-      for (const r of existing ?? []) {
-        if (r?.shipment_id) haveItemsFor.add(String(r.shipment_id));
+      const windowIds = Array.from(
+        new Set(allShipments.map((sh: any) => String(sh.ShipmentId)).filter(Boolean)),
+      );
+      const CHUNK = 150;
+      let pages = 0;
+      let capHit = false;
+      for (let i = 0; i < windowIds.length; i += CHUNK) {
+        const chunk = windowIds.slice(i, i + CHUNK);
+        const { data: existing, error: curErr } = await supabase
+          .from('fba_shipment_items')
+          .select('shipment_id')
+          .eq('user_id', user.id)
+          .in('shipment_id', chunk);
+        pages++;
+        if (curErr) {
+          // A broken cursor must not look like an empty one: an empty cursor
+          // means "fetch everything" and would burn the whole budget.
+          console.log(`[cursor] chunk ${pages} failed: ${curErr.message}`);
+          capHit = true;
+          continue;
+        }
+        for (const r of existing ?? []) {
+          if (r?.shipment_id) haveItemsFor.add(String(r.shipment_id));
+        }
       }
-      await markPhase('cursor-loaded', { shipments_with_items: haveItemsFor.size });
+      await markPhase('cursor-loaded', {
+        shipments_with_items: haveItemsFor.size,
+        window_shipments: windowIds.length,
+        chunks: pages,
+        degraded: capHit,
+      });
     }
 
     // Upsert shipments and fetch their items
@@ -1082,8 +1194,27 @@ serve(async (req) => {
     let itemsSkippedBudget = 0;
     let headersUpserted = 0;
     let budgetExhausted = false;
+    let totalBudgetExhausted = false;
+    let shipmentsNotReached = 0;
+    const itemProbes: ItemFetchProbe[] = [];
 
     for (const shipment of allShipments) {
+      // The hard stop. Unlike the item budget this abandons the loop
+      // ENTIRELY, headers included, because the wrapper's re-entry arithmetic
+      // assumes we return inside totalBudgetMs and is unsound otherwise.
+      if (totalBudgetMs !== null && Date.now() - T0 > totalBudgetMs) {
+        if (!totalBudgetExhausted) {
+          totalBudgetExhausted = true;
+          await markPhase('total-budget-exhausted', {
+            headers_upserted: headersUpserted,
+            item_fetches: itemFetches,
+            items_so_far: itemsCount,
+          });
+        }
+        shipmentsNotReached++;
+        continue;
+      }
+
       const shipmentData = {
         user_id: user.id,
         shipment_id: shipment.ShipmentId,
@@ -1129,10 +1260,11 @@ serve(async (req) => {
       if (!headersOnly) {
         try {
           itemFetches++;
+          const wantProbe = itemProbes.length < traceItemFetches ? itemProbes : undefined;
           const items = shipment.__source === 'v2024' && shipment.__inboundPlanId && shipment.__v2024ShipmentId
             // Correct argument order; this call was short by one as well.
             ? await fetchV2024ShipmentItems(supabase, shipment.__inboundPlanId, shipment.__v2024ShipmentId, accessToken)
-            : await fetchV0ShipmentItems(supabase, shipment.ShipmentId, marketplaceId, accessToken);
+            : await fetchV0ShipmentItems(supabase, shipment.ShipmentId, marketplaceId, accessToken, wantProbe);
           itemsCount += await upsertShipmentItems(supabase, user.id, shipment.ShipmentId, items);
           
           await new Promise(r => setTimeout(r, 300));
@@ -1140,6 +1272,10 @@ serve(async (req) => {
           console.log(`Error fetching items for ${shipment.ShipmentId}:`, (itemErr as Error).message);
         }
       }
+    }
+
+    if (itemProbes.length > 0) {
+      await markPhase('item-fetch-trace', { probes: itemProbes });
     }
 
     if (headersOnly) {
@@ -1353,7 +1489,10 @@ serve(async (req) => {
       itemsSkippedAlreadyHave,
       itemsSkippedBudget,
       budgetExhausted,
-      moreItemWorkRemaining: itemsSkippedBudget > 0,
+      totalBudgetExhausted,
+      shipmentsNotReached,
+      itemProbes,
+      moreItemWorkRemaining: itemsSkippedBudget > 0 || shipmentsNotReached > 0,
       durationMs: Date.now() - T0,
       phaseLog,
       statusCounts,
