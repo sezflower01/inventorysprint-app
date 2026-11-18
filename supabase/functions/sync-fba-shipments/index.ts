@@ -1,6 +1,7 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { waitForApiToken } from "../_shared/rate-limiter.ts";
+import { nextPage } from './itemPagination.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -202,78 +203,143 @@ function quantityValue(...values: any[]): number {
   return 0;
 }
 
-async function fetchV0ShipmentItems(supabase: any, shipmentId: string, marketplaceId: string, accessToken: string, probe?: ItemFetchProbe[]): Promise<any[]> {
-  const collected: any[] = [];
-  let nextToken: string | null = null;
+/**
+ * Items fetched, plus why the fetch ended if it ended badly.
+ *
+ * Returns rather than throws, because the call site's `catch` used to swallow
+ * the error AND the items together: on 2026-11-18 fifteen genuinely fetched
+ * items were discarded when a later call in the same loop 429'd, and the run
+ * reported "0 items" -- indistinguishable from Amazon saying there are none.
+ * Partial data and a recorded failure are two separate facts; both travel.
+ */
+interface ItemFetchResult {
+  items: any[];
+  error?: string;
+  status?: number;
+}
 
-  do {
-    const params = new URLSearchParams({ MarketplaceId: marketplaceId });
-    if (nextToken) params.set('NextToken', nextToken);
-    const itemsUrl = `https://sellingpartnerapi-na.amazon.com/fba/inbound/v0/shipments/${encodeURIComponent(shipmentId)}/items?${params.toString()}`;
+/**
+ * ONE call. There is no second page, and asking for one is what broke this.
+ *
+ * `getShipmentItemsByShipmentId` declares exactly two parameters in Amazon's
+ * model file -- `shipmentId` (path) and `MarketplaceId` (query, documented as
+ * "Deprecated. Do not use.") -- and NO NextToken. Its 200 response nonetheless
+ * reuses the shared GetShipmentItemsResponse schema, which carries a NextToken
+ * for the bulk `/fba/inbound/v0/shipmentItems` operation. So this endpoint
+ * hands back a token it will never honour.
+ *
+ * The previous `do { ... } while (nextToken)` fed that token back as a query
+ * parameter the endpoint ignores, got the identical page again, and looped:
+ * 54 calls on FBA19RKR64KC, each 200 OK / 4,735 bytes / 15 items / ~100ms,
+ * ending in 429 QuotaExceeded. That single loop was the entire cause of the
+ * "12-25s per shipment returning nothing" symptom, and it drained the shared
+ * inbound quota that every other inbound caller depends on.
+ *
+ * MarketplaceId is dropped as well: Amazon marks it deprecated, and sending it
+ * is what made the URL look paginable in the first place.
+ */
+async function fetchV0ShipmentItems(supabase: any, shipmentId: string, accessToken: string, probe?: ItemFetchProbe[]): Promise<ItemFetchResult> {
+  const itemsUrl = `https://sellingpartnerapi-na.amazon.com/fba/inbound/v0/shipments/${encodeURIComponent(shipmentId)}/items`;
 
-    // Measured separately -- see ItemFetchProbe. A long gate_ms means the
-    // shared bucket is starved; a long call_ms means Amazon is throttling us
-    // inside callSpApi's retry loop.
-    const gateStart = Date.now();
-    const gateOk = await waitForApiToken(supabase, 'inbound_api');
-    const gateMs = Date.now() - gateStart;
-    const callStart = Date.now();
+  // Measured separately -- see ItemFetchProbe. A long gate_ms means the
+  // shared bucket is starved; a long call_ms means Amazon is throttling us
+  // inside callSpApi's retry loop.
+  const gateStart = Date.now();
+  const gateOk = await waitForApiToken(supabase, 'inbound_api');
+  const gateMs = Date.now() - gateStart;
+  const callStart = Date.now();
 
-    let itemsResponse: any;
-    try {
-      itemsResponse = await callSpApi('GET', itemsUrl, accessToken);
-    } catch (e) {
-      probe?.push({
-        shipment_id: shipmentId,
-        source: 'v0',
-        gate_ms: gateMs,
-        gate_ok: gateOk,
-        call_ms: Date.now() - callStart,
-        ok: false,
-        status: (e as any)?.status,
-        items: 0,
-        error: String((e as any)?.message ?? e).slice(0, 200),
-      });
-      throw e;
-    }
-
-    const items = Array.isArray(itemsResponse.payload?.ItemData) ? itemsResponse.payload.ItemData : [];
+  let itemsResponse: any;
+  try {
+    itemsResponse = await callSpApi('GET', itemsUrl, accessToken);
+  } catch (e) {
+    const status = (e as any)?.status;
+    const message = String((e as any)?.message ?? e).slice(0, 200);
     probe?.push({
       shipment_id: shipmentId,
       source: 'v0',
       gate_ms: gateMs,
       gate_ok: gateOk,
       call_ms: Date.now() - callStart,
-      ok: true,
-      status: 200,
-      items: items.length,
-      bytes: JSON.stringify(itemsResponse ?? {}).length,
+      ok: false,
+      status,
+      items: 0,
+      error: message,
     });
-    collected.push(...items);
-    nextToken = typeof itemsResponse.payload?.NextToken === 'string' && itemsResponse.payload.NextToken.length > 0
-      ? itemsResponse.payload.NextToken
-      : null;
-  } while (nextToken);
+    return { items: [], error: message, status };
+  }
 
-  return collected;
+  const items = Array.isArray(itemsResponse.payload?.ItemData) ? itemsResponse.payload.ItemData : [];
+  probe?.push({
+    shipment_id: shipmentId,
+    source: 'v0',
+    gate_ms: gateMs,
+    gate_ok: gateOk,
+    call_ms: Date.now() - callStart,
+    ok: true,
+    status: 200,
+    items: items.length,
+    bytes: JSON.stringify(itemsResponse ?? {}).length,
+  });
+  return { items };
 }
 
-async function fetchV2024ShipmentItems(supabase: any, inboundPlanId: string, internalShipmentId: string, accessToken: string): Promise<any[]> {
+/**
+ * The 2024-03-20 endpoint really does page: `paginationToken` in,
+ * `pagination.nextToken` out. Unlike the v0 per-shipment call, looping here is
+ * correct -- but the loop is now gated by itemPagination.nextPage, which
+ * refuses a token it has already sent and caps total pages. The v0 bug proved
+ * that "the response contains a token" and "there is another page" are not the
+ * same fact, and this endpoint gets the same protection even though nothing
+ * has gone wrong with it. Partial pages are kept on failure, for the reason in
+ * ItemFetchResult.
+ */
+async function fetchV2024ShipmentItems(supabase: any, inboundPlanId: string, internalShipmentId: string, accessToken: string): Promise<ItemFetchResult> {
   const collected: any[] = [];
   let nextToken: string | null = null;
+  const seenTokens = new Set<string>();
+  let pagesFetched = 0;
 
-  do {
+  for (;;) {
     const params = new URLSearchParams({ pageSize: '100' });
     if (nextToken) params.set('paginationToken', nextToken);
     const itemsUrl = `https://sellingpartnerapi-na.amazon.com/inbound/fba/2024-03-20/inboundPlans/${encodeURIComponent(inboundPlanId)}/shipments/${encodeURIComponent(internalShipmentId)}/items?${params.toString()}`;
     await waitForApiToken(supabase, 'inbound_api');
-    const response = await callSpApi('GET', itemsUrl, accessToken, '', 3);
+
+    let response: any;
+    try {
+      response = await callSpApi('GET', itemsUrl, accessToken, '', 3);
+    } catch (e) {
+      // Keep the pages already collected; report why we stopped.
+      return {
+        items: collected,
+        error: String((e as any)?.message ?? e).slice(0, 200),
+        status: (e as any)?.status,
+      };
+    }
+
     const items = Array.isArray(response?.items) ? response.items : [];
     collected.push(...items);
-    nextToken = response?.pagination?.nextToken || null;
-  } while (nextToken);
+    pagesFetched++;
 
-  return collected;
+    const decision = nextPage({
+      sentToken: nextToken,
+      receivedToken: response?.pagination?.nextToken,
+      pagesFetched,
+      maxPages: 20,
+      seenTokens,
+    });
+    if (!decision.advance) {
+      if (response?.pagination?.nextToken) {
+        console.log(`[v2024-items] ${internalShipmentId}: stopped paging -- ${decision.reason}`);
+      }
+      break;
+    }
+    nextToken = decision.token;
+    seenTokens.add(decision.token!);
+  }
+
+  return { items: collected };
 }
 
 async function upsertShipmentItems(supabase: any, userId: string, shipmentId: string, items: any[]): Promise<number> {
@@ -670,25 +736,33 @@ serve(async (req) => {
         // STEP 2: No cache — try the lightweight v0 item endpoint across NA marketplaces.
         // Do NOT fall through into full v2024 discovery for an already-known shipment; that scan can
         // run past the edge-function timeout and makes the UI look like nothing happened.
-        const fastMarketplaces = Array.from(new Set([marketplaceId, ...(authRows || []).map((r: any) => r.marketplace_id).filter(Boolean), ...NA_MARKETPLACES]));
+        // ONE ATTEMPT, NOT ONE PER MARKETPLACE.
+        //
+        // This used to loop over every known marketplace id, passing each as
+        // MarketplaceId. Amazon's model file marks that parameter "Deprecated.
+        // Do not use." on getShipmentItemsByShipmentId, so the endpoint ignored
+        // it and all four requests were byte-identical -- four calls against a
+        // shared 2 rps inbound quota to learn one thing once. The retry only
+        // ever looked useful because a shipment with no items returned nothing
+        // each time round.
         const fastAttempts: string[] = [];
         console.log(`[FAST_PATH] Shipment ${requestedShipmentId} exists, no cached items — fetching v0 items only`);
-        for (const mp of fastMarketplaces) {
+        {
           try {
-            const bestItems = await fetchV0ShipmentItems(supabase, requestedShipmentId, mp, accessToken);
-            fastAttempts.push(`${mp}:${bestItems.length}`);
-            if (Array.isArray(bestItems) && bestItems.length > 0) {
+            const fastResult = await fetchV0ShipmentItems(supabase, requestedShipmentId, accessToken);
+            const bestItems = fastResult.items;
+            fastAttempts.push(`v0:${bestItems.length}${fastResult.error ? ` (${fastResult.status ?? '?'})` : ''}`);
+            if (bestItems.length > 0) {
               const itemsCount = await upsertShipmentItems(supabase, user.id, requestedShipmentId, bestItems);
-              console.log(`[FAST_PATH] Got ${bestItems.length} items from ${mp}, upserted=${itemsCount}`);
+              console.log(`[FAST_PATH] Got ${bestItems.length} items, upserted=${itemsCount}`);
               return new Response(
-                JSON.stringify({ success: true, mode: 'single_fast', shipmentId: requestedShipmentId, itemsCount, marketplaceId: mp }),
+                JSON.stringify({ success: true, mode: 'single_fast', shipmentId: requestedShipmentId, itemsCount }),
                 { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
               );
             }
           } catch (e: any) {
-            fastAttempts.push(`${mp}:ERR(${(e?.message || '').slice(0, 80)})`);
+            fastAttempts.push(`v0:ERR(${(e?.message || '').slice(0, 80)})`);
           }
-          await sleep(800);
         }
 
         console.log(`[FAST_PATH] No item lines returned quickly for ${requestedShipmentId}. Attempts: ${fastAttempts.join(', ')}`);
@@ -716,7 +790,6 @@ serve(async (req) => {
       );
 
       let shipment: any = null;
-      let shipmentMarketplaceId = marketplaceId;
       const attempts: string[] = [];
 
       for (const mp of candidateMarketplaces) {
@@ -728,7 +801,9 @@ serve(async (req) => {
           attempts.push(`${mp}:${list.length}`);
           if (list[0]?.ShipmentId) {
             shipment = list[0];
-            shipmentMarketplaceId = mp;
+            // Which marketplace answered is recorded in this log line rather
+            // than a variable: the per-shipment items call no longer takes a
+            // MarketplaceId, because Amazon deprecated it on that operation.
             console.log(`[DIRECT] Found ${requestedShipmentId} on marketplace ${mp}`);
             break;
           }
@@ -816,9 +891,11 @@ serve(async (req) => {
       // Fetch items - try v0 first, then v2024 if needed
       let itemsCount = 0;
       try {
-        const v0Items = await fetchV0ShipmentItems(supabase, requestedShipmentId, shipmentMarketplaceId, accessToken);
-        itemsCount += await upsertShipmentItems(supabase, user.id, requestedShipmentId, v0Items);
-        console.log(`[DIRECT] v0 items for ${requestedShipmentId} (${shipmentMarketplaceId}): fetched=${v0Items.length} upserted=${itemsCount}`);
+        const v0Result = await fetchV0ShipmentItems(supabase, requestedShipmentId, accessToken);
+        if (v0Result.items.length > 0) {
+          itemsCount += await upsertShipmentItems(supabase, user.id, requestedShipmentId, v0Result.items);
+        }
+        console.log(`[DIRECT] v0 items for ${requestedShipmentId}: fetched=${v0Result.items.length} upserted=${itemsCount}${v0Result.error ? ` error=${v0Result.status ?? '?'} ${v0Result.error}` : ''}`);
       } catch (e: any) {
         console.log(`[DIRECT] v0 items fetch failed: ${e?.message?.slice(0, 100)}`);
       }
@@ -831,9 +908,11 @@ serve(async (req) => {
           if (!v2024PlanId || !v2024InternalShipmentId) {
             throw new Error('Missing v2024 plan/internal shipment id for item lookup');
           }
-          const v2024Items = await fetchV2024ShipmentItems(supabase, v2024PlanId, v2024InternalShipmentId, accessToken);
-          itemsCount += await upsertShipmentItems(supabase, user.id, requestedShipmentId, v2024Items);
-          console.log(`[DIRECT] v2024 items for ${requestedShipmentId}: fetched=${v2024Items.length} upserted=${itemsCount}`);
+          const v2024Result = await fetchV2024ShipmentItems(supabase, v2024PlanId, v2024InternalShipmentId, accessToken);
+          if (v2024Result.items.length > 0) {
+            itemsCount += await upsertShipmentItems(supabase, user.id, requestedShipmentId, v2024Result.items);
+          }
+          console.log(`[DIRECT] v2024 items for ${requestedShipmentId}: fetched=${v2024Result.items.length} upserted=${itemsCount}${v2024Result.error ? ` error=${v2024Result.status ?? '?'} ${v2024Result.error}` : ''}`);
         } catch (e: any) {
           console.log(`[DIRECT] v2024 items fetch failed: ${e?.message?.slice(0, 100)}`);
         }
@@ -1196,6 +1275,8 @@ serve(async (req) => {
     let budgetExhausted = false;
     let totalBudgetExhausted = false;
     let shipmentsNotReached = 0;
+    let itemFetchFailures = 0;
+    const itemFetchErrors: string[] = [];
     const itemProbes: ItemFetchProbe[] = [];
 
     for (const shipment of allShipments) {
@@ -1261,14 +1342,28 @@ serve(async (req) => {
         try {
           itemFetches++;
           const wantProbe = itemProbes.length < traceItemFetches ? itemProbes : undefined;
-          const items = shipment.__source === 'v2024' && shipment.__inboundPlanId && shipment.__v2024ShipmentId
+          const result = shipment.__source === 'v2024' && shipment.__inboundPlanId && shipment.__v2024ShipmentId
             // Correct argument order; this call was short by one as well.
             ? await fetchV2024ShipmentItems(supabase, shipment.__inboundPlanId, shipment.__v2024ShipmentId, accessToken)
-            : await fetchV0ShipmentItems(supabase, shipment.ShipmentId, marketplaceId, accessToken, wantProbe);
-          itemsCount += await upsertShipmentItems(supabase, user.id, shipment.ShipmentId, items);
+            : await fetchV0ShipmentItems(supabase, shipment.ShipmentId, accessToken, wantProbe);
+
+          // Write what came back even when the fetch also reported an error.
+          // The two used to share one code path and the items always lost.
+          if (result.items.length > 0) {
+            itemsCount += await upsertShipmentItems(supabase, user.id, shipment.ShipmentId, result.items);
+          }
+          if (result.error) {
+            itemFetchFailures++;
+            if (itemFetchErrors.length < 10) {
+              itemFetchErrors.push(`${shipment.ShipmentId}: ${result.status ?? '?'} ${result.error}`);
+            }
+            console.log(`[items] ${shipment.ShipmentId} failed after ${result.items.length} item(s): ${result.error}`);
+          }
           
           await new Promise(r => setTimeout(r, 300));
         } catch (itemErr) {
+          // Should now be unreachable -- the fetchers return their failures.
+          itemFetchFailures++;
           console.log(`Error fetching items for ${shipment.ShipmentId}:`, (itemErr as Error).message);
         }
       }
@@ -1470,15 +1565,27 @@ serve(async (req) => {
       .select('*', { count: 'exact', head: true })
       .eq('user_id', user.id);
 
-    console.log(`Sync complete: ${allShipments.length} shipments synced, ${shipmentCount} total in DB, ${totalItemCount} items`);
+    console.log(`Sync complete: ${allShipments.length} shipments synced, ${shipmentCount} total in DB, ${itemsCount} item rows written this run, ${totalItemCount} in table`);
 
     return new Response(JSON.stringify({
       success: true,
       message: `Synced ${allShipments.length} shipments`,
       shipmentCount,
       shipmentsFound: allShipments.length,
-      itemsUpserted: totalItemCount,
-      itemCount: totalItemCount,
+      // WORK DONE THIS RUN, not the size of the table.
+      //
+      // Both of these used to be `totalItemCount`, a count(*) over the whole
+      // of fba_shipment_items -- so catchup-fba-shipments summed it into
+      // cron_run_history.items_processed and recorded 15,505 "items processed"
+      // on 2026-11-18 while last_item_write stayed at 2026-10-11 and not one
+      // row had been written. A run that achieved nothing reported five
+      // figures of progress. The table total is still useful, under a name
+      // that says what it is.
+      itemsUpserted: itemsCount,
+      itemCount: itemsCount,
+      itemRowsInTable: totalItemCount,
+      itemFetchFailures,
+      ...(itemFetchErrors.length > 0 ? { itemFetchErrors } : {}),
       lookbackDays,
       headersOnly,
       skipEnrichment,
