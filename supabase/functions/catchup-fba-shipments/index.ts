@@ -103,7 +103,21 @@ type Mode = 'recent' | 'wide';
 
 /** What each mode sends to sync-fba-shipments. See the header comment. */
 const MODE_BODY: Record<Mode, Record<string, unknown>> = {
-  recent: {},                                      // 60d, items, v2024 discovery
+  // 60d, items, v2024 discovery -- but NOT the catalogue enrichment pass.
+  //
+  // That pass is the one unbounded phase in sync-fba-shipments and it is scoped
+  // to the user's whole history, not to the window just synced: ~10,000
+  // fba_shipment_items rows with a null asin (null on write by design, because
+  // Amazon's InboundShipmentItem payload has no ASIN), one rate-limited SP-API
+  // catalog call per unique SKU, then up to 10,000 sequential single-row
+  // UPDATEs. It never finishes, so the inner call was being cut off by the
+  // platform's 150s idle timeout and returning 504 -- measured 2026-11-18, a
+  // 151,610 ms run with ok:0 and items_processed:0.
+  //
+  // Nothing here needs it: the discrepancies page resolves a line's ASIN via
+  // seller_sku (src/lib/shipmentAttribution.ts). Enrichment is a backfill, not
+  // part of a sync.
+  recent: { skipEnrichment: true },
   wide: { lookbackDays: 540, headersOnly: true },   // coverage only
 };
 
@@ -257,13 +271,31 @@ serve(async (req) => {
         await new Promise((r) => setTimeout(r, 1500));
       }
 
+      const okCount = results.filter((r) => r.ok).length;
+      const firstError = results.find((r) => !r.ok)?.error ?? null;
+
+      // THROW SO THE HISTORY ROW SAYS 'failed'.
+      //
+      // withCronLock derives its status from whether this callback threw, not
+      // from what it returned. Swallowing every per-user failure into `results`
+      // therefore recorded status 'success' alongside ok:0 -- "the wrapper
+      // completed" written down as "the job worked", which is the third time
+      // that exact conflation has bitten in this one chain of fixes. The error
+      // text goes with it, because `ok:0` with a null error is not actionable.
+      if (results.length > 0 && okCount === 0) {
+        throw new Error(
+          `no user synced (mode=${mode}, users=${results.length}): ${firstError ?? 'no error recorded'}`,
+        );
+      }
+
       return {
         items_processed: results.reduce((s, r) => s + (r.items ?? 0), 0),
         detail: {
           mode,
           users: userIds.length,
-          ok: results.filter((r) => r.ok).length,
+          ok: okCount,
           deferred: deferred.length,
+          ...(firstError ? { first_error: firstError } : {}),
         },
       };
     });

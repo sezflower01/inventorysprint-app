@@ -410,6 +410,30 @@ serve(async (req) => {
     // windows (e.g. 90-day "Sync Missing"). Headers-only sync.
     const headersOnly: boolean = requestBody?.headersOnly === true;
 
+    // Skip the catalogue enrichment pass only. Items and v2024 discovery still
+    // run -- this is NOT headersOnly.
+    //
+    // WHY THIS EXISTS. The enrichment block below is the single unbounded phase
+    // in this function, and it is scoped to the USER'S WHOLE HISTORY rather than
+    // to the shipments just synced: it selects up to 10,000 fba_shipment_items
+    // rows with a null asin/title/image, makes a rate-limited SP-API catalog
+    // call per unique SKU, then issues up to 10,000 SEQUENTIAL single-row
+    // UPDATEs. Because asin is null on write by design (Amazon's
+    // InboundShipmentItem payload has no ASIN field), almost every historical
+    // row qualifies forever, so the work does not shrink as syncs succeed.
+    //
+    // Measured 2026-11-18: catchup-fba-shipments-recent ran 151,610 ms, of
+    // which 150,000 was this function being cut off by the platform's 150s
+    // idle-timeout, returning 504 to its caller. The browser's own "Sync"
+    // button hits the same wall.
+    //
+    // Nothing downstream needs it: /tools/unshipped-purchases resolves a line's
+    // ASIN through seller_sku (src/lib/shipmentAttribution.ts, commit a148880)
+    // precisely because this column is normally null. Enrichment is a backfill
+    // concern, not part of a sync, so the cron opts out and the browser keeps
+    // the old behaviour by default.
+    const skipEnrichment: boolean = requestBody?.skipEnrichment === true;
+
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
@@ -1015,7 +1039,7 @@ serve(async (req) => {
     // Enrich items with ASIN/title/image - fetch from Amazon Catalog API as primary source
     // Get items missing ANY of the key fields (asin, title, or image_url)
     // Skipped entirely in headers-only mode to keep function under timeout.
-    const { data: itemsToEnrich } = headersOnly ? { data: [] as any[] } : await supabase
+    const { data: itemsToEnrich } = (headersOnly || skipEnrichment) ? { data: [] as any[] } : await supabase
       .from('fba_shipment_items')
       .select('id, seller_sku, asin, title, image_url')
       .eq('user_id', user.id)
@@ -1210,6 +1234,8 @@ serve(async (req) => {
       itemsUpserted: totalItemCount,
       itemCount: totalItemCount,
       lookbackDays,
+      headersOnly,
+      skipEnrichment,
       statusCounts,
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
