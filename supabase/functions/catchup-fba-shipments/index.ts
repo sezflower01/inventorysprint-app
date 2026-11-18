@@ -117,7 +117,24 @@ const MODE_BODY: Record<Mode, Record<string, unknown>> = {
   // Nothing here needs it: the discrepancies page resolves a line's ASIN via
   // seller_sku (src/lib/shipmentAttribution.ts). Enrichment is a backfill, not
   // part of a sync.
-  recent: { skipEnrichment: true },
+  recent: {
+    skipEnrichment: true,
+    // The cursor: only fetch items for shipments that have none yet. Most of
+    // the 2,112 historical shipments already do, and skipping one costs no
+    // SP-API call at all -- so the loop's real work is the recent backlog,
+    // not the whole history, and a run that runs out of budget resumes rather
+    // than restarting.
+    skipShipmentsWithItems: true,
+    // Stop fetching items at 70s. The platform kills any request at 150s with
+    // nothing written, and two measured runs died there having persisted
+    // nothing, because no row is written until the item loop is reached.
+    // Headers keep being upserted past this point; only the per-shipment
+    // SP-API call stops, and the response says how many were left.
+    itemFetchBudgetMs: 70_000,
+    // Breadcrumbs to cron_run_history before each phase, so the next kill
+    // names the phase instead of leaving us to infer it from a duration.
+    phaseTrace: true,
+  },
   wide: { lookbackDays: 540, headersOnly: true },   // coverage only
 };
 
@@ -131,6 +148,14 @@ const DEADLINE_MS = 110_000;
 
 /** How recently `recent` must have succeeded before `wide` may advance coverage. */
 const RECENT_FRESHNESS_HOURS = 24;
+
+/**
+ * How many times to re-enter the inner sync for one user in a single run. The
+ * inner call bounds itself at itemFetchBudgetMs and says whether item work
+ * remains; this caps how much of our own 110s we spend resuming it. Anything
+ * still outstanding is picked up by the next run through the same cursor.
+ */
+const MAX_INNER_CALLS = 2;
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -231,40 +256,63 @@ serve(async (req) => {
           continue;
         }
 
-        try {
-          const resp = await fetch(`${supabaseUrl}/functions/v1/sync-fba-shipments`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              // Service-role key from THIS function's environment. Satisfies
-              // the gateway's verify_jwt = true, and is never a stale copy the
-              // way a JWT pasted into cron.job was.
-              'Authorization': `Bearer ${serviceKey}`,
-              'apikey': serviceKey,
-              // ...and this is what sync-fba-shipments' own guard reads.
-              'x-internal-secret': expectedSecret,
-            },
-            // user_id is MANDATORY on that guard's path. Omitting it is
-            // defect 1 above.
-            body: JSON.stringify({ user_id: userId, ...MODE_BODY[mode] }),
-          });
+        // The inner sync bounds its own item work and reports what is left,
+        // so call it again while there is more AND our own budget allows. Each
+        // pass resumes from the cursor; it never redoes a shipment.
+        let calls = 0;
+        let shipments = 0;
+        let items = 0;
+        let lastError: string | undefined;
+        let sawSuccess = false;
 
-          const text = await resp.text();
-          let payload: Record<string, unknown> | null = null;
-          try { payload = JSON.parse(text); } catch { payload = null; }
-
-          if (!resp.ok) {
-            results.push({ user_id: userId, ok: false, error: `HTTP ${resp.status}: ${text.slice(0, 200)}` });
-          } else {
-            results.push({
-              user_id: userId,
-              ok: true,
-              shipments: Number(payload?.shipmentCount ?? payload?.shipmentsFound ?? 0),
-              items: Number(payload?.itemsUpserted ?? payload?.itemCount ?? 0),
+        while (calls < MAX_INNER_CALLS && Date.now() - t0 < DEADLINE_MS) {
+          calls++;
+          let more = false;
+          try {
+            const resp = await fetch(`${supabaseUrl}/functions/v1/sync-fba-shipments`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                // Service-role key from THIS function's environment. Satisfies
+                // the gateway's verify_jwt = true, and is never a stale copy
+                // the way a JWT pasted into cron.job was.
+                'Authorization': `Bearer ${serviceKey}`,
+                'apikey': serviceKey,
+                // ...and this is what sync-fba-shipments' own guard reads.
+                'x-internal-secret': expectedSecret,
+              },
+              // user_id is MANDATORY on that guard's path. Omitting it is
+              // defect 1 above.
+              body: JSON.stringify({ user_id: userId, ...MODE_BODY[mode] }),
             });
+
+            const text = await resp.text();
+            let payload: Record<string, unknown> | null = null;
+            try { payload = JSON.parse(text); } catch { payload = null; }
+
+            if (!resp.ok) {
+              lastError = `HTTP ${resp.status}: ${text.slice(0, 200)}`;
+              break;
+            }
+
+            sawSuccess = true;
+            shipments = Number(payload?.shipmentCount ?? payload?.shipmentsFound ?? shipments);
+            items += Number(payload?.itemsUpserted ?? payload?.itemCount ?? 0);
+            more = payload?.moreItemWorkRemaining === true;
+          } catch (e) {
+            lastError = (e as Error)?.message ?? String(e);
+            break;
           }
-        } catch (e) {
-          results.push({ user_id: userId, ok: false, error: (e as Error)?.message ?? String(e) });
+
+          if (!more) break;
+          // Breather before resuming the next slice.
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+
+        if (sawSuccess) {
+          results.push({ user_id: userId, ok: true, shipments, items, ...(lastError ? { error: lastError } : {}) });
+        } else {
+          results.push({ user_id: userId, ok: false, error: lastError ?? 'no response' });
         }
 
         // Breather for SP-API between users.

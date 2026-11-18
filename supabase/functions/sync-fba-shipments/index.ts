@@ -434,9 +434,72 @@ serve(async (req) => {
     // the old behaviour by default.
     const skipEnrichment: boolean = requestBody?.skipEnrichment === true;
 
+    // -- BOUNDING THE ITEM LOOP --------------------------------------------
+    // The per-shipment loop further down is the phase that actually exceeds
+    // the platform 150s idle timeout. It is proportional to how many shipments
+    // the discovery phases found, and each iteration costs one SP-API call
+    // plus a hardcoded 300ms sleep -- so a few hundred shipments cannot fit,
+    // and no amount of retrying changes that. Measured 2026-11-18: two runs,
+    // 151,610 ms and 151,620 ms, both killed at exactly 150s having written
+    // nothing, because nothing is persisted until that loop is reached.
+    //
+    // All of these default to off/unlimited, so the browser Sync button
+    // behaves exactly as it did before.
+    const itemFetchBudgetRaw = Number(requestBody?.itemFetchBudgetMs);
+    const itemFetchBudgetMs: number | null =
+      Number.isFinite(itemFetchBudgetRaw) && itemFetchBudgetRaw > 0
+        ? Math.floor(itemFetchBudgetRaw)
+        : null;
+    // The cursor, stateless on purpose: a shipment is done when rows already
+    // exist for it in fba_shipment_items. No progress table to drift out of
+    // step with reality, and a repeated run resumes instead of redoing the
+    // same shipments until the budget runs out again.
+    const skipShipmentsWithItems: boolean = requestBody?.skipShipmentsWithItems === true;
+
+    // -- PHASE 1.5 IS OPT-IN NOW, BECAUSE IT HAS NEVER ACTUALLY RUN --------
+    // Its call site passed (accessToken, recentDays) to a function declared
+    // (supabase, accessToken, lookbackDays, requestedConfirmationId): two of
+    // the four, shifted by one. lookbackDays therefore arrived undefined, so
+    // new Date(Date.now() - undefined * 86400000).toISOString() threw
+    // RangeError on the first line, every single time, caught by the
+    // surrounding try/catch and logged as "v2024 discovery failed". tsc has
+    // been reporting it as TS2554 all along.
+    //
+    // The arguments are corrected below, but the gate is kept OFF by default
+    // rather than silently switching on a phase this account has never
+    // exercised and whose own comment says it blows the edge-worker wall-time
+    // at up to 54 pages of detail calls. Pass includeV2024: true to test
+    // whether Send-to-Amazon shipments are being missed.
+    const includeV2024: boolean = requestBody?.includeV2024 === true;
+
+    // Write a breadcrumb to cron_run_history before each phase, so a request
+    // killed by the platform still says which phase it was in. A kill leaves
+    // no return value and so no response to inspect; these rows are the only
+    // evidence that survives one.
+    const phaseTrace: boolean = requestBody?.phaseTrace === true;
+
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
     const supabase = createClient(supabaseUrl, supabaseKey);
+
+    const T0 = Date.now();
+    const phaseLog: Array<{ phase: string; at_ms: number; [k: string]: unknown }> = [];
+    const markPhase = async (phase: string, extra: Record<string, unknown> = {}) => {
+      const at_ms = Date.now() - T0;
+      phaseLog.push({ phase, at_ms, ...extra });
+      console.log(`[PHASE_TRACE] ${phase} at ${at_ms}ms ${JSON.stringify(extra)}`);
+      if (!phaseTrace) return;
+      try {
+        await supabase.rpc('record_cron_run', {
+          p_job_name: 'sync-fba-shipments-phase',
+          p_status: 'started',
+          p_duration_ms: at_ms,
+          p_items_processed: 0,
+          p_error: null,
+          p_detail: { phase, ...extra },
+        });
+      } catch (_e) { /* tracing must never break the sync */ }
+    };
 
     // Auth: either a user JWT, OR an internal-secret + body.user_id (used by catch-up cron)
     const internalSecret = req.headers.get('x-internal-secret');
@@ -918,10 +981,13 @@ serve(async (req) => {
     // detail calls and blows the edge-worker wall-time before Phase 1's shipments are
     // persisted. Phase 1's DATE_RANGE query already covers all recent shipments,
     // which is sufficient for the weekly catch-up header refresh.
-    if (!headersOnly) {
+    await markPhase('phase-1-complete', { shipments: allShipments.length });
+
+    if (!headersOnly && includeV2024) {
       try {
         let v2024Found = 0;
-        const v2024Shipments = await discoverV2024Shipments(accessToken, recentDays);
+        // Correct argument order. See the includeV2024 comment above.
+        const v2024Shipments = await discoverV2024Shipments(supabase, accessToken, recentDays);
 
         for (const shipment of v2024Shipments) {
           if (!shipment.ShipmentId || seenShipmentIds.has(shipment.ShipmentId)) continue;
@@ -937,7 +1003,7 @@ serve(async (req) => {
         console.error('[PHASE 1.5] v2024 discovery failed:', (err as Error).message);
       }
     } else {
-      console.log('[PHASE 1.5] skipped (headersOnly=true)');
+      console.log(`[PHASE 1.5] skipped (headersOnly=${headersOnly}, includeV2024=${includeV2024})`);
     }
 
     // === PHASE 2: Status-based queries for older WORKING/CANCELLED shipments (optional, limited) ===
@@ -992,8 +1058,32 @@ serve(async (req) => {
     console.log('Status counts:', JSON.stringify(statusCounts));
     console.log(`Total shipments found: ${allShipments.length}`);
 
+    await markPhase('phase-2-complete', { shipments: allShipments.length });
+
+    // Which shipments already have item rows. ONE query, and it is the cursor
+    // described at skipShipmentsWithItems above.
+    const haveItemsFor = new Set<string>();
+    if (skipShipmentsWithItems && !headersOnly) {
+      const { data: existing } = await supabase
+        .from('fba_shipment_items')
+        .select('shipment_id')
+        .eq('user_id', user.id)
+        .limit(50000);
+      for (const r of existing ?? []) {
+        if (r?.shipment_id) haveItemsFor.add(String(r.shipment_id));
+      }
+      await markPhase('cursor-loaded', { shipments_with_items: haveItemsFor.size });
+    }
+
     // Upsert shipments and fetch their items
     let itemsCount = 0;
+    let itemFetches = 0;
+    let itemsSkippedAlreadyHave = 0;
+    let itemsSkippedBudget = 0;
+    let headersUpserted = 0;
+    let budgetExhausted = false;
+
+    // Upsert shipments and fetch their items
     
     for (const shipment of allShipments) {
       const shipmentData = {
@@ -1016,12 +1106,34 @@ serve(async (req) => {
         console.log(`Error upserting shipment ${shipment.ShipmentId}:`, upsertError.message);
         continue;
       }
+      headersUpserted++;
 
       // Fetch items for this shipment (skipped in headers-only mode)
+      // The header is already persisted by this point, so stopping here costs
+      // detail but never a row -- headers keep being written for every
+      // remaining shipment, and only the per-shipment SP-API item call stops.
+      if (skipShipmentsWithItems && haveItemsFor.has(String(shipment.ShipmentId))) {
+        itemsSkippedAlreadyHave++;
+        continue;
+      }
+      if (itemFetchBudgetMs !== null && Date.now() - T0 > itemFetchBudgetMs) {
+        if (!budgetExhausted) {
+          budgetExhausted = true;
+          await markPhase('item-budget-exhausted', {
+            after_fetches: itemFetches,
+            items_so_far: itemsCount,
+          });
+        }
+        itemsSkippedBudget++;
+        continue;
+      }
+
       if (!headersOnly) {
         try {
+          itemFetches++;
           const items = shipment.__source === 'v2024' && shipment.__inboundPlanId && shipment.__v2024ShipmentId
-            ? await fetchV2024ShipmentItems(shipment.__inboundPlanId, shipment.__v2024ShipmentId, accessToken)
+            // Correct argument order; this call was short by one as well.
+            ? await fetchV2024ShipmentItems(supabase, shipment.__inboundPlanId, shipment.__v2024ShipmentId, accessToken)
             : await fetchV0ShipmentItems(supabase, shipment.ShipmentId, marketplaceId, accessToken);
           itemsCount += await upsertShipmentItems(supabase, user.id, shipment.ShipmentId, items);
           
@@ -1236,6 +1348,16 @@ serve(async (req) => {
       lookbackDays,
       headersOnly,
       skipEnrichment,
+      includeV2024,
+      // What the caller needs in order to decide whether to call again.
+      headersUpserted,
+      itemFetches,
+      itemsSkippedAlreadyHave,
+      itemsSkippedBudget,
+      budgetExhausted,
+      moreItemWorkRemaining: itemsSkippedBudget > 0,
+      durationMs: Date.now() - T0,
+      phaseLog,
       statusCounts,
     }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
