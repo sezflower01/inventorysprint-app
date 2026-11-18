@@ -1083,8 +1083,6 @@ serve(async (req) => {
     let headersUpserted = 0;
     let budgetExhausted = false;
 
-    // Upsert shipments and fetch their items
-    
     for (const shipment of allShipments) {
       const shipmentData = {
         user_id: user.id,
