@@ -133,6 +133,13 @@ verify_jwt = true
 [functions.catchup-fba-shipments]
 verify_jwt = false
 
+# Read-only probe of the bulk /fba/inbound/v0/shipmentItems endpoint. Run by
+# hand from the SQL editor via net.http_post, which sends x-internal-secret and
+# NO Authorization header -- so the gateway would reject it before it ran.
+# It performs no writes.
+[functions.probe-bulk-shipment-items]
+verify_jwt = false
+
 [functions.sync-fba-shipments]
 verify_jwt = true
 
