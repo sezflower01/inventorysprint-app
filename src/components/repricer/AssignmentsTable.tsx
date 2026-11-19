@@ -8,6 +8,14 @@ import { useRepricerCache } from "@/hooks/use-repricer-cache";
 import { useSubscription } from "@/hooks/use-subscription";
 import { withTimeout } from "@/hooks/use-db-pressure";
 import { deriveAssignmentStatus, isManuallyPaused } from "@/lib/repricer/assignmentStatus";
+import {
+  emptySalesWindows,
+  normalizeIdentifier,
+  parseMediaEnvelope,
+  parseSalesEnvelope,
+  type SalesWindows,
+  type TitleImageMap,
+} from "@/lib/repricer/asinEnrichment";
 import { getListingUnitCost } from "@/lib/cost-contract";
 import { calcRoiAtPrice, getOtherFixedFees } from "@/lib/roiCalc";
 import { useAsinPurchaseRecords } from "@/hooks/use-asin-purchase-records";
@@ -258,8 +266,11 @@ const RULE_MENU_CLASS =
 const RULE_ITEM_CLASS =
   "text-white focus:bg-shipment-row-hover focus:text-white data-[state=checked]:bg-shipment-row-hover";
 
-const normalizeIdentifier = (value?: string | null) =>
-  (value ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+// normalizeIdentifier now lives in @/lib/repricer/asinEnrichment, imported
+// above. It is the join key between every per-ASIN map and the inventory rows,
+// and the SQL aggregates reproduce it exactly -- so it belongs next to the
+// parsing code that depends on it, not as a second copy here. Two local copies
+// of a shared constant is how MARKETPLACE_CURRENCY went wrong in this repo.
 
 // Decide own fulfilment from evidence, not from the source string alone.
 //
@@ -1383,37 +1394,33 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
 // JavaScript. The answer is ~900 rows. Titles and images did the same thing
 // twice more, over all of created_listings and all of sales_orders.
 //
-// The grouping now happens in Postgres (get_repricer_asin_sales,
-// get_repricer_asin_media), which also fixes the four sales columns having
+// The grouping now happens in Postgres (get_repricer_asin_sales_json,
+// get_repricer_asin_media_json), which also fixes the four sales columns having
 // disagreed about what a sale is: today/7d/30d each excluded asin = 'PENDING'
 // and order_id like '%-REFUND', while the lifetime scan excluded nothing, so
 // the Historical column counted refunds and PENDING rows and the other three
 // did not. One filter now serves all four.
 //
-// BOTH CALLS FALL BACK TO THE OLD PAGED SCAN IF THE RPC IS MISSING, because
-// migrations in this repo are applied by hand and the frontend auto-deploys
-// from main -- the client is therefore guaranteed to be live BEFORE the
-// function exists. Until it is applied this file behaves exactly as it did
-// before, just with one wasted round trip and a console warning.
-interface SalesEnrichment {
-  salesTodayMap: Record<string, number>;
-  sales7Map: Record<string, number>;
-  salesMap: Record<string, number>;
-  historicalSalesMap: Record<string, { totalUnits: number; earliestDate: string }>;
-  titleImageMap: Record<string, { title?: string; image_url?: string }>;
-}
-
-type SalesWindows = Omit<SalesEnrichment, "titleImageMap">;
+// BOTH CALLS FALL BACK TO THE OLD PAGED SCAN IF THE RPC IS MISSING OR ITS
+// ANSWER FAILS VALIDATION, because migrations in this repo are applied by hand
+// and the frontend auto-deploys from main -- the client is guaranteed to be
+// live BEFORE the function exists. The paged scan is slow but it pages
+// properly, so it is a correct answer, not a shorter one.
+//
+// AND THE FIRST ATTEMPT AT THIS GOT IT WRONG, WHICH IS WHY VALIDATION EXISTS.
+//
+// The aggregates originally shipped as PostgREST set-returning functions.
+// PostgREST serves one as a table-like resource, so db-max-rows (1,000) cut
+// them, and the live console read today=1000, 7d=1000, 30d=1000,
+// historical=1000, media=1000 -- five exact 1,000s, no error, every ASIN past
+// the first thousand showing as "no sales" rather than "not loaded". They now
+// return a single jsonb value, which a row cap cannot cut, and
+// parseSalesEnvelope/parseMediaEnvelope refuse anything that does not match
+// the count the server itself reports. See asinEnrichment.ts and its tests.
+type SalesEnrichment = SalesWindows & { titleImageMap: TitleImageMap };
 
 const describeError = (e: unknown): string =>
   e instanceof Error ? e.message : typeof e === "string" ? e : JSON.stringify(e);
-
-const emptySalesWindows = (): SalesWindows => ({
-  salesTodayMap: {},
-  sales7Map: {},
-  salesMap: {},
-  historicalSalesMap: {},
-});
 
 // Amazon's business day. order_date is a LOCAL Pacific date and is complete;
 // purchase_timestamp_utc is UTC and NULL on ~10% of rows, and 23% of rows fall
@@ -1444,73 +1451,66 @@ async function fetchSalesEnrichment(userId: string, targetMarketplace: string): 
   return { ...windows, titleImageMap };
 }
 
-interface AsinSalesRow {
-  asin: string | null;
-  units_today: number | null;
-  units_7d: number | null;
-  units_30d: number | null;
-  units_lifetime: number | null;
-  first_order_date: string | null;
-  last_order_date: string | null;
-}
-
 async function fetchAsinSalesWindows(userId: string): Promise<SalesWindows> {
-  let rows: AsinSalesRow[] | null = null;
+  const startedAt = Date.now();
+  let raw: unknown;
   try {
-    const { data, error } = await supabase.rpc("get_repricer_asin_sales" as never);
+    const { data, error } = await supabase.rpc("get_repricer_asin_sales_json" as never);
     if (error) throw error;
-    rows = (data as unknown as AsinSalesRow[]) ?? [];
+    raw = data;
   } catch (e: unknown) {
     console.warn(
-      `[Repricer] get_repricer_asin_sales unavailable (${describeError(e)}); ` +
-      `falling back to the paged sales_orders scan. Apply migration ` +
-      `20261119040000 to get the fast path.`
+      `[Repricer] get_repricer_asin_sales_json unavailable (${describeError(e)}); ` +
+      `falling back to the paged sales_orders scan. Apply migration 20261119060000 ` +
+      `for the fast path.`
     );
     return fetchAsinSalesWindowsPaged(userId);
   }
 
-  const out = emptySalesWindows();
-  for (const row of rows) {
-    const asin = normalizeIdentifier(row.asin);
-    if (!asin) continue;
-    out.salesTodayMap[asin] = row.units_today ?? 0;
-    out.sales7Map[asin] = row.units_7d ?? 0;
-    out.salesMap[asin] = row.units_30d ?? 0;
-    // Only a real lifetime figure WITH a first-sale date is useful: the
-    // consumer divides by days-since to get a rate, so a count without a date
-    // would read as "sold N in 1 day".
-    const lifetime = row.units_lifetime ?? 0;
-    if (lifetime > 0 && row.first_order_date) {
-      out.historicalSalesMap[asin] = { totalUnits: lifetime, earliestDate: row.first_order_date };
-    }
+  const parsed = parseSalesEnvelope(raw);
+  if (!parsed.ok || !parsed.value) {
+    // LOUD on purpose. A short answer here reads as "this ASIN has never sold",
+    // which is a number the seller acts on, so it must never pass silently.
+    console.error(
+      `[Repricer] get_repricer_asin_sales_json REJECTED: ${parsed.reason}. ` +
+      `Using the paged scan instead (slower, but complete).`
+    );
+    return fetchAsinSalesWindowsPaged(userId);
   }
-  return out;
+
+  console.log(
+    `[Repricer] sales RPC ok in ${Date.now() - startedAt}ms: ${parsed.rows} ASINs ` +
+    `(received = server count, so nothing was truncated)`
+  );
+  return parsed.value;
 }
 
-async function fetchAsinMedia(userId: string): Promise<Record<string, { title?: string; image_url?: string }>> {
-  let rows: Array<{ asin: string | null; title: string | null; image_url: string | null }> | null = null;
+async function fetchAsinMedia(userId: string): Promise<TitleImageMap> {
+  const startedAt = Date.now();
+  let raw: unknown;
   try {
-    const { data, error } = await supabase.rpc("get_repricer_asin_media" as never);
+    const { data, error } = await supabase.rpc("get_repricer_asin_media_json" as never);
     if (error) throw error;
-    rows = (data as unknown as Array<{ asin: string | null; title: string | null; image_url: string | null }>) ?? [];
+    raw = data;
   } catch (e: unknown) {
     console.warn(
-      `[Repricer] get_repricer_asin_media unavailable (${describeError(e)}); ` +
+      `[Repricer] get_repricer_asin_media_json unavailable (${describeError(e)}); ` +
       `falling back to the paged title/image scans.`
     );
     return fetchAsinMediaPaged(userId);
   }
 
-  const titleImageMap: Record<string, { title?: string; image_url?: string }> = {};
-  for (const row of rows) {
-    const asin = normalizeIdentifier(row.asin);
-    if (!asin) continue;
-    titleImageMap[asin] = {
-      title: row.title || undefined,
-      image_url: row.image_url || undefined,
-    };
+  const parsed = parseMediaEnvelope(raw);
+  if (!parsed.ok || !parsed.value) {
+    console.error(
+      `[Repricer] get_repricer_asin_media_json REJECTED: ${parsed.reason}. ` +
+      `Using the paged scans instead.`
+    );
+    return fetchAsinMediaPaged(userId);
   }
-  return titleImageMap;
+
+  console.log(`[Repricer] media RPC ok in ${Date.now() - startedAt}ms: ${parsed.rows} ASINs`);
+  return parsed.value;
 }
 
 // ---------------------------------------------------------------------------
@@ -1645,8 +1645,8 @@ async function fetchAsinSalesWindowsPaged(userId: string): Promise<SalesWindows>
   return out;
 }
 
-async function fetchAsinMediaPaged(userId: string): Promise<Record<string, { title?: string; image_url?: string }>> {
-  const titleImageMap: Record<string, { title?: string; image_url?: string }> = {};
+async function fetchAsinMediaPaged(userId: string): Promise<TitleImageMap> {
+  const titleImageMap: TitleImageMap = {};
   try {
     const clData = await fetchAllPaged(() =>
       supabase.from("created_listings").select("id, asin, title, image_url").eq("user_id", userId)
