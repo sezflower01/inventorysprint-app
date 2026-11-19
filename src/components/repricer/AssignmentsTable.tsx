@@ -8,6 +8,7 @@ import { useRepricerCache } from "@/hooks/use-repricer-cache";
 import { useSubscription } from "@/hooks/use-subscription";
 import { withTimeout } from "@/hooks/use-db-pressure";
 import { deriveAssignmentStatus, isManuallyPaused } from "@/lib/repricer/assignmentStatus";
+import { pageChunkedKeys, DEFAULT_CHUNK_SIZE } from "@/lib/repricer/pageChunked";
 import {
   emptySalesWindows,
   normalizeIdentifier,
@@ -376,25 +377,84 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
   // Helper: batch .in() queries to avoid URL length limits with large inventories (3000+ ASINs).
   // Batches run concurrently too -- each targets a disjoint ASIN slice, so
   // there's no shared state to race on.
-  const BATCH_IN_SIZE = 500;
+  const BATCH_IN_SIZE = DEFAULT_CHUNK_SIZE;
+  const BATCH_PAGE_SIZE = 1000;
+  // Runaway guard, not a cap on truth. 20 pages per 500-ASIN batch is already
+  // 40 rows per ASIN; past that something is wrong with the query, not with
+  // the data, and silently looping forever would be worse than stopping loudly.
+  const BATCH_MAX_ROWS = 20_000;
+
+  /**
+   * Chunked IN-query that PAGES WITHIN EACH CHUNK.
+   *
+   * BOUNDING THE KEY SET DOES NOT BOUND THE ROWS. This is the defect this repo
+   * keeps rediscovering: a batch of 500 ASINs can return far more than 500
+   * rows, because most of these tables hold many rows per ASIN, and PostgREST
+   * clamps ANY response to db-max-rows (1,000 here) no matter what .limit()
+   * says. A single request per chunk could therefore come back full and look
+   * complete while whichever rows fell past the cut vanished without an error.
+   *
+   * It had already bitten the created_listings read a few lines below, which
+   * grew its own paging loop and a comment naming the ASIN it was found on
+   * (B0H1NKJP1X). The helper itself was left single-shot, so its five callers
+   * -- including repricer_competitor_snapshots, a time-series table the
+   * repricer appends to every cycle -- kept the hazard. The snapshot call even
+   * passes .limit(5000), which PostgREST silently clamps to 1,000, and its own
+   * comment calls that limit "just a backstop" while relying on a 6-hour
+   * window as the real bound. A window is a probability, not a guarantee: at
+   * the 2,010 rows measured 2026-08-23 it was fine, but the table only grows,
+   * and the empty-snapshot marker rows added on 2026-11-19 push it further.
+   *
+   * Now every chunk is read until a page comes back SHORT, which is the only
+   * evidence the rows have run out. A full page never ends the loop. The loop
+   * itself lives in @/lib/repricer/pageChunked with tests, rather than being
+   * written again here -- it had already been written twice in this file.
+   *
+   * ORDERING. The tiebreaker is applied AFTER the caller's own filters, so a
+   * caller's .order() stays primary (the snapshot merge depends on fetched_at
+   * DESC) and this only makes ties deterministic -- paging with .range() and
+   * no total order can repeat or skip rows across page boundaries. .range()
+   * goes last so it wins over any .limit() the caller set.
+   */
   const batchInQuery = async (
     table: string,
     selectCols: string,
     inColumn: string,
     inValues: string[],
-    extraFilters?: (q: any) => any
+    extraFilters?: (q: any) => any,
+    // Must be unique, or unique within the caller's own ordering. Every table
+    // read through here has `id` except the asin_cog_for_repricer view, which
+    // is one row per ASIN and so is already total on `asin`.
+    orderBy: string = "id",
   ): Promise<any[]> => {
-    const batches: string[][] = [];
-    for (let i = 0; i < inValues.length; i += BATCH_IN_SIZE) {
-      batches.push(inValues.slice(i, i + BATCH_IN_SIZE));
+    const outcome = await pageChunkedKeys<Record<string, unknown>>(
+      inValues,
+      async (chunk, offset, limit) => {
+        let q = (supabase as any).from(table).select(selectCols).in(inColumn, chunk);
+        if (extraFilters) q = extraFilters(q);
+        const { data, error } = await q
+          .order(orderBy, { ascending: true })
+          .range(offset, offset + limit - 1);
+        return error ? { rows: null, error: error.message } : { rows: data ?? [] };
+      },
+      {
+        chunk: BATCH_IN_SIZE,
+        page: BATCH_PAGE_SIZE,
+        maxRowsPerChunk: BATCH_MAX_ROWS,
+        onNote: (n) => console.error(`[Repricer] ${table}: ${n}`),
+      },
+    );
+
+    if (outcome.pagedChunks > 0) {
+      // Worth saying out loud: every one of these chunks would have been
+      // silently truncated at 1,000 rows by the single-shot version.
+      console.log(
+        `[Repricer] ${table}: ${outcome.pagedChunks} of ${outcome.chunks} batches needed more ` +
+        `than one page, ${outcome.rowsRead} rows total (would have been cut at ` +
+        `${BATCH_PAGE_SIZE} before)`
+      );
     }
-    const results = await Promise.all(batches.map(async (batch) => {
-      let q = (supabase as any).from(table).select(selectCols).in(inColumn, batch);
-      if (extraFilters) q = extraFilters(q);
-      const { data } = await q;
-      return data || [];
-    }));
-    return results.flat();
+    return outcome.rows;
   };
 
   const fetchRulesMap = async (): Promise<Record<string, any>> => {
@@ -587,31 +647,16 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
       // project's row cap or how the table grows. Batches run concurrently
       // (disjoint ASIN slices); only pages *within* one batch stay sequential,
       // since each page's existence depends on whether the previous was full.
-      const CL_PAGE_SIZE = 1000;
-      const clBatches: string[][] = [];
-      for (let i = 0; i < asins.length; i += BATCH_IN_SIZE) {
-        clBatches.push(asins.slice(i, i + BATCH_IN_SIZE));
-      }
-      const clBatchResults = await Promise.all(clBatches.map(async (batch) => {
-        const rows: any[] = [];
-        let clFrom = 0;
-        while (true) {
-          const { data: clPage, error: clPageErr } = await supabase
-            .from("created_listings")
-            .select("asin, cost, units, amount, image_url, title, price, date_created, created_at, id")
-            .eq("user_id", userId)
-            .in("asin", batch)
-            .order("id", { ascending: true })
-            .range(clFrom, clFrom + CL_PAGE_SIZE - 1);
-          if (clPageErr) break;
-          const page = clPage || [];
-          rows.push(...page);
-          if (page.length < CL_PAGE_SIZE) break;
-          clFrom += CL_PAGE_SIZE;
-        }
-        return rows;
-      }));
-      const clRows = clBatchResults.flat();
+      // This loop used to live here, duplicated, because batchInQuery was
+      // single-shot. The helper pages now, so there is ONE implementation of
+      // "read until a page comes back short" instead of two that can drift.
+      const clRows = await batchInQuery(
+        "created_listings",
+        "asin, cost, units, amount, image_url, title, price, date_created, created_at, id",
+        "asin",
+        asins,
+        (q: any) => q.eq("user_id", userId),
+      );
       // Group by ASIN, then pick the NEWEST row (mirrors resolveUnitCost.pickNewestListing:
       // date_created DESC NULLS LAST, created_at DESC, id DESC). This guarantees the
       // most-recently-created listing wins for COG (and image/title/price fallbacks),
@@ -1135,6 +1180,9 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
             "asin",
             orphanAsins,
             (q: any) => q.eq("user_id", userId),
+            // A VIEW with no id column, and one row per ASIN, so asin is
+            // already a total order here.
+            "asin",
           );
           for (const c of cogRows) {
             const v = Number(c.unit_cost);
