@@ -648,8 +648,17 @@ export default function Dashboard() {
             .eq("user_id", user.id)
             .eq("event_type", "shipment")
             .gte("event_date", monthStartDate)
+            // Stable order is REQUIRED for .range() paging: two pages are two
+            // independent queries with no promised row order between them, so
+            // a row can be summed twice or missed. Measured on this page:
+            // sales_orders below reaches offset 3000, so this is four real
+            // pages, not a theoretical risk.
+            .order("id", { ascending: true })
             .range(from, from + PAGE - 1);
-          if (error) break;
+          // Was a bare `break`, which summed a partial month and showed it as
+          // the month. The catch around this block renders an error state, so
+          // failing is visible rather than silently wrong.
+          if (error) throw error;
           if (!data || data.length === 0) break;
           for (const r of data as any[]) {
             fecSales += Number(r.sales || 0);
@@ -683,8 +692,9 @@ export default function Dashboard() {
             .select("total_sale_amount,sold_price,quantity,unit_cost,order_status,is_cancelled")
             .eq("user_id", user.id)
             .gte("order_date", monthStartDate)
+            .order("id", { ascending: true })
             .range(from, from + PAGE - 1);
-          if (error) break;
+          if (error) throw error;
           if (!data || data.length === 0) break;
           for (const r of data as any[]) {
             const status = String(r.order_status || "");
