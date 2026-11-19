@@ -1838,6 +1838,25 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
   
   // Track new price values to push to Amazon
   const [pendingNewPrice, setPendingNewPrice] = useState<Record<string, number | null>>({});
+
+  // WHICH ROW'S SET-PRICE FIELD IS BEING TYPED INTO RIGHT NOW.
+  //
+  // A half-typed number is not a wrong number, it is an unfinished one, and
+  // the Save button used to treat the two the same. The bounds check runs on
+  // pendingNewPrice, which updates on every keystroke, so typing 30 into a row
+  // with Min 23.24 produced newP = 3 first -- below Min, so hasValidationError
+  // was true, canSave was false, and the button stayed in its inert "Live"
+  // state. It only became pressable once enough digits had been typed to clear
+  // Min, which for a price in the same decade as Min (23.50 against Min 23.24)
+  // is the very last character. That is why it looked like the button needed a
+  // click outside the field: blur was not what fixed it, finishing the number
+  // was.
+  //
+  // While the field has focus the bounds violation is shown as a hint (the red
+  // border) but no longer gates the button. Enforcement moves to the moment of
+  // saving, where the value IS final -- so nothing out of bounds can be sent to
+  // Amazon, and the user gets told why instead of being handed a dead button.
+  const [newPriceFocusedId, setNewPriceFocusedId] = useState<string | null>(null);
   
   // Track pending changes per item (for Save button activation)
   const [pendingChanges, setPendingChanges] = useState<Set<string>>(new Set());
@@ -5394,6 +5413,27 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
         return next;
       });
 
+      // HAND THE ROW BACK once a manual price has actually been sent.
+      //
+      // setEditingNewPrice above already empties the field, but the Set/Auto
+      // toggle stayed on "Auto" forever, so a row kept its manual door open
+      // after the one price the user wanted to set. That is the riskier of the
+      // two states to leave behind: while it is open the field accepts another
+      // price with no further confirmation, and the toggle no longer reflects
+      // what the row is actually doing. Closing it returns the row to the
+      // repricer and makes a second manual price a deliberate act again.
+      //
+      // Only on a new-price save. A Min/Max-only save is not the user finishing
+      // with manual pricing, so it leaves the door as they left it.
+      if (hasNewPrice) {
+        setManualPriceOpen(prev => {
+          if (!prev.has(currentItem.id)) return prev;
+          const next = new Set(prev);
+          next.delete(currentItem.id);
+          return next;
+        });
+      }
+
       clearPendingSnapshot(currentItem.id);
       setPendingChanges(prev => {
         const next = new Set(prev);
@@ -6051,6 +6091,11 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
    * Deliberately NOT persisted. This is "let me type a price now", not a
    * setting: it lasts for the visit, and the padlock (ui_edit_locked) is the
    * durable control that already exists and still overrides it.
+   *
+   * CLOSES ITSELF once a manual price is successfully sent (see
+   * syncChangesToAmazon). It used to stay open for the rest of the visit, which
+   * both left the field accepting another price unprompted and made the toggle
+   * stop describing the row.
    */
   const [manualPriceOpen, setManualPriceOpen] = useState<Set<string>>(new Set());
   const openManualPrice = (itemId: string) =>
@@ -7860,8 +7905,32 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                               const hasMinMaxConflict = curMin != null && curMax != null && Number(curMin) > Number(curMax);
                               const newP = pendingNewPrice[item.id];
                               const newPriceOutOfBounds = newP != null && ((curMin != null && newP < Number(curMin)) || (curMax != null && newP > Number(curMax)));
-                              const hasValidationError = hasMinMaxConflict || newPriceOutOfBounds;
-                              const canSave = (hasMinMax || hasNewPrice) && !hasValidationError;
+                              // See newPriceFocusedId: an unfinished number must
+                              // not read as a wrong one. The border still warns
+                              // live; only the gate waits for the value to be
+                              // final.
+                              const isTypingNewPrice = newPriceFocusedId === item.id;
+                              const hasSomethingToSave = hasMinMax || hasNewPrice;
+                              // STRICT. Never relaxed while typing: a click
+                              // blurs the field first, and making the bounds
+                              // check depend on that re-render landing would
+                              // make safety a question of event ordering.
+                              const canSaveNow = hasSomethingToSave && !hasMinMaxConflict && !newPriceOutOfBounds;
+                              // Appearance only -- keeps the button from
+                              // flashing a warning on the first digit of every
+                              // price. The input's red border already says it.
+                              const looksReady = !hasMinMaxConflict && !(newPriceOutOfBounds && !isTypingNewPrice);
+                              // What makes the button a SAVE button, as opposed
+                              // to what makes the save legal. Keeping these
+                              // apart is the fix: the control appears the moment
+                              // there is something to save, and says why if the
+                              // value cannot be sent.
+                              const showAsSave = hasPendingChanges && hasSomethingToSave;
+                              const boundsMessage = hasMinMaxConflict
+                                ? `Min (${curMin}) is above Max (${curMax}) — fix the bounds first`
+                                : newPriceOutOfBounds
+                                ? `Price ${newP} is outside Min ${curMin ?? "—"} / Max ${curMax ?? "—"}`
+                                : "Fix validation errors before saving";
                               const hasRule = !!item.rule_id;
                               // Only treat the row as "paused" in the action button when the
                               // user manually paused. System-disabled / no-rule / no-inventory rows
@@ -7888,8 +7957,8 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                               } else if (isPaused) {
                                 buttonAction = async () => {
                                   if (hasPendingChanges) {
-                                    if (!canSave) {
-                                      toast.error("Fix validation errors before resuming");
+                                    if (!canSaveNow) {
+                                      toast.error(boundsMessage);
                                       return;
                                     }
                                     const saved = await syncChangesToAmazon(item);
@@ -7900,10 +7969,25 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                                 };
                                 title = hasPendingChanges ? "Resume & save changes" : "Rule paused – click to resume";
                                 className += "border-destructive bg-destructive/10 text-destructive hover:bg-destructive/20 dark:bg-destructive/20 dark:hover:bg-destructive/30";
-                              } else if (hasPendingChanges && canSave) {
-                                buttonAction = () => syncChangesToAmazon(item);
-                                title = hasRule ? "Save changes to Amazon" : "Save min/max changes";
-                                className += "border-green-500 bg-green-50 text-green-600 hover:bg-green-100 hover:text-green-700 dark:bg-green-950 dark:text-green-400 dark:hover:bg-green-900";
+                              } else if (showAsSave) {
+                                buttonAction = () => {
+                                  // The value is final at click time, so this is
+                                  // where a bounds violation is refused -- with
+                                  // the reason, instead of a button that looks
+                                  // alive and does nothing.
+                                  if (!canSaveNow) {
+                                    toast.error(boundsMessage);
+                                    return;
+                                  }
+                                  syncChangesToAmazon(item);
+                                };
+                                title = !looksReady
+                                  ? boundsMessage
+                                  : hasRule ? "Save changes to Amazon" : "Save min/max changes";
+                                className += looksReady
+                                  ? "border-green-500 bg-green-50 text-green-600 hover:bg-green-100 hover:text-green-700 dark:bg-green-950 dark:text-green-400 dark:hover:bg-green-900"
+                                  // Pressable, but not pretending to be ready.
+                                  : "border-amber-500 bg-amber-50 text-amber-600 hover:bg-amber-100 dark:bg-amber-950 dark:text-amber-400 dark:hover:bg-amber-900";
                               } else if (hasNeedsEval && hasRule && hasBothMinMax) {
                                 buttonAction = async () => {
                                   setNeedsEval(prev => { const next = new Set(prev); next.delete(item.id); return next; });
@@ -7943,7 +8027,7 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                                     <RefreshCw className="h-3 w-3 animate-spin" />
                                   ) : (!hasBothMinMax || !hasRule || isPaused) ? (
                                     <Pause className="h-3 w-3" />
-                                  ) : (hasPendingChanges && canSave) || hasNeedsEval ? (
+                                  ) : showAsSave || hasNeedsEval ? (
                                     <Play className="h-3 w-3" />
                                   ) : (
                                     <span className="relative flex h-3 w-3">
@@ -8386,11 +8470,13 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                                   setPendingNewPrice(prev => ({ ...prev, [item.id]: numVal }));
                                 }}
                                 onFocus={() => {
+                                  setNewPriceFocusedId(item.id);
                                   if (editingNewPrice[item.id] === undefined) {
                                     setEditingNewPrice(prev => ({ ...prev, [item.id]: "" }));
                                   }
                                 }}
                                 onBlur={() => {
+                                  setNewPriceFocusedId(prev => (prev === item.id ? null : prev));
                                   const val = editingNewPrice[item.id];
                                   if (!val) {
                                     // Cleared — check if reverted to original
