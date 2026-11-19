@@ -2,7 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { waitForApiToken } from "../_shared/rate-limiter.ts";
 import { nextPage } from './itemPagination.ts';
-import { collectShipmentsWithItems } from './itemCursor.ts';
+import { collectKnownEmptyShipments, collectShipmentsWithItems } from './itemCursor.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -1233,6 +1233,11 @@ serve(async (req) => {
     // known already) in chunks that cannot hit the cap, instead of reading the
     // whole table and hoping.
     const haveItemsFor = new Set<string>();
+    // Shipments Amazon has already been ASKED about and reported no items for.
+    // Kept separate from haveItemsFor on purpose: "holds rows" and "was asked
+    // and told none" are two different facts, and merging them is what made
+    // 131 of 136 fetches per run re-learn the same nothing.
+    const knownEmpty = new Set<string>();
     if (skipShipmentsWithItems && !headersOnly) {
       const windowIds = Array.from(
         new Set(allShipments.map((sh: any) => String(sh.ShipmentId)).filter(Boolean)),
@@ -1275,6 +1280,49 @@ serve(async (req) => {
         pages: cursor.pages,
         degraded: cursor.degraded,
       });
+
+      // SECOND QUESTION: which of these did Amazon already answer "none" for?
+      //
+      // GET /fba/inbound/v0/shipments/{id}/items answers that with a 200 and
+      // 27 bytes -- cheap, real and final. Nothing recorded it, so the answer
+      // was thrown away and bought again every run. Migration
+      // 20261119020000 gives it storage (items_checked_at / items_found_count)
+      // and ./itemCursor.ts decides when an answer is still fresh: one day for
+      // an active shipment, which legitimately has no items YET, thirty for a
+      // terminal one, whose contents cannot change but whose answer should
+      // still be re-checked against our own write bugs.
+      //
+      // SAFE TO DEPLOY BEFORE THE MIGRATION IS APPLIED. Migrations here are
+      // not auto-applied, so until the columns exist this select errors, the
+      // read reports itself degraded, the skip set stays empty and the run
+      // behaves exactly as it does today. A degraded read must never be read
+      // as "nothing is empty" -- it is only ever allowed to cost work, never
+      // to hide a shipment.
+      const emptyOut = await collectKnownEmptyShipments(
+        windowIds,
+        async (chunk, offset, limit) => {
+          const { data, error } = await supabase
+            .from('fba_shipments')
+            .select('shipment_id, shipment_status, items_checked_at, items_found_count')
+            .eq('user_id', user.id)
+            .in('shipment_id', chunk)
+            .eq('items_found_count', 0)
+            .order('shipment_id', { ascending: true })
+            .range(offset, offset + limit - 1);
+          return error ? { rows: null, error: error.message } : { rows: data ?? [] };
+        },
+        Date.now(),
+        { chunk: 150, page: 1000, onNote: (n) => console.log(`[known-empty] ${n}`) },
+      );
+      for (const id of emptyOut.knownEmpty) knownEmpty.add(id);
+      await markPhase('known-empty-loaded', {
+        known_empty: knownEmpty.size,
+        checked_and_empty: emptyOut.checkedAndEmpty,
+        stale_empty: emptyOut.staleEmpty,
+        rows_read: emptyOut.rowsRead,
+        pages: emptyOut.pages,
+        degraded: emptyOut.degraded,
+      });
     }
 
     // Upsert shipments and fetch their items
@@ -1287,8 +1335,32 @@ serve(async (req) => {
     let totalBudgetExhausted = false;
     let shipmentsNotReached = 0;
     let itemFetchFailures = 0;
+    let itemsSkippedKnownEmpty = 0;
     const itemFetchErrors: string[] = [];
     const itemProbes: ItemFetchProbe[] = [];
+
+    // Attempt stamps, batched. One write per shipment would be correct but
+    // adds 136 round-trips to a run whose budget is already the binding
+    // constraint. The upsert names only these columns, so every other column
+    // on an existing row is left alone.
+    const pendingChecks: Array<Record<string, unknown>> = [];
+    let checkStampsWritten = 0;
+    let checkStampFailures = 0;
+    const flushChecks = async (force = false) => {
+      if (pendingChecks.length === 0) return;
+      if (!force && pendingChecks.length < 25) return;
+      const batch = pendingChecks.splice(0, pendingChecks.length);
+      const { error } = await supabase
+        .from('fba_shipments')
+        .upsert(batch, { onConflict: 'user_id,shipment_id' });
+      if (error) {
+        // Losing a stamp costs a re-fetch next run. It must not lose items.
+        checkStampFailures += batch.length;
+        console.log(`[items] check-stamp write failed for ${batch.length} shipment(s): ${error.message}`);
+      } else {
+        checkStampsWritten += batch.length;
+      }
+    };
 
     for (const shipment of allShipments) {
       // The hard stop. Unlike the item budget this abandons the loop
@@ -1337,6 +1409,11 @@ serve(async (req) => {
         itemsSkippedAlreadyHave++;
         continue;
       }
+      // Asked before, told none, and that answer has not aged out.
+      if (skipShipmentsWithItems && knownEmpty.has(String(shipment.ShipmentId))) {
+        itemsSkippedKnownEmpty++;
+        continue;
+      }
       if (itemFetchBudgetMs !== null && Date.now() - T0 > itemFetchBudgetMs) {
         if (!budgetExhausted) {
           budgetExhausted = true;
@@ -1370,6 +1447,21 @@ serve(async (req) => {
             }
             console.log(`[items] ${shipment.ShipmentId} failed after ${result.items.length} item(s): ${result.error}`);
           }
+
+          // RECORD THE ATTEMPT, NOT ONLY THE RESULT -- but only a definitive
+          // one. An errored fetch teaches us nothing about the shipment, so it
+          // stays unstamped and is retried; stamping it would turn a 429 into
+          // a permanent "no items".
+          if (!result.error) {
+            pendingChecks.push({
+              user_id: user.id,
+              shipment_id: String(shipment.ShipmentId),
+              items_checked_at: new Date().toISOString(),
+              items_found_count: result.items.length,
+            });
+            await flushChecks();
+          }
+
           
           await new Promise(r => setTimeout(r, 300));
         } catch (itemErr) {
@@ -1379,6 +1471,10 @@ serve(async (req) => {
         }
       }
     }
+
+    // Runs after every exit from the loop above, the total-budget abort
+    // included, so a partial run still keeps what it learned.
+    await flushChecks(true);
 
     if (itemProbes.length > 0) {
       await markPhase('item-fetch-trace', { probes: itemProbes });
@@ -1396,6 +1492,18 @@ serve(async (req) => {
       .select('id, seller_sku, asin, title, image_url')
       .eq('user_id', user.id)
       .or('asin.is.null,title.is.null,image_url.is.null')
+      // The 10,000 is NOT granted -- db-max-rows caps this at 1,000, the same
+      // ceiling that broke the skip cursor twice. The backlog of blank
+      // titles/images is far larger than that, so this read only ever sees a
+      // slice and enrichment is incremental by design.
+      //
+      // What the order fixes is WHICH slice. Without it the cap returned
+      // arbitrary heap order, so the same old rows could come back run after
+      // run while new ones were never reached. Newest-first makes the slice
+      // deterministic and puts the most useful rows in it. Draining the whole
+      // backlog needs explicit paging and a lot of catalog calls -- separate
+      // work, not a side effect of a shipment sync.
+      .order('created_at', { ascending: false })
       .limit(10000);
 
     if (itemsToEnrich && itemsToEnrich.length > 0) {
@@ -1590,7 +1698,10 @@ serve(async (req) => {
       item_rows_sent: itemsCount,
       item_fetch_failures: itemFetchFailures,
       skipped_already_have: itemsSkippedAlreadyHave,
+      skipped_known_empty: itemsSkippedKnownEmpty,
       skipped_budget: itemsSkippedBudget,
+      check_stamps_written: checkStampsWritten,
+      check_stamp_failures: checkStampFailures,
       not_reached: shipmentsNotReached,
       more_work_remaining: itemsSkippedBudget > 0 || shipmentsNotReached > 0,
     });
@@ -1627,7 +1738,9 @@ serve(async (req) => {
       headersUpserted,
       itemFetches,
       itemsSkippedAlreadyHave,
+      itemsSkippedKnownEmpty,
       itemsSkippedBudget,
+      checkStampsWritten,
       budgetExhausted,
       totalBudgetExhausted,
       shipmentsNotReached,

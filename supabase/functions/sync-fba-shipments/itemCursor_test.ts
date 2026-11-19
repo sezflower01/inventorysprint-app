@@ -1,5 +1,5 @@
 import { assert, assertEquals } from 'https://deno.land/std@0.208.0/assert/mod.ts';
-import { collectShipmentsWithItems, type CursorPageFetcher } from './itemCursor.ts';
+import { collectShipmentsWithItems, type PageFetcher, type CursorRow } from './itemCursor.ts';
 
 /**
  * A fake PostgREST that enforces the real `db-max-rows` cap: it never returns
@@ -8,7 +8,7 @@ import { collectShipmentsWithItems, type CursorPageFetcher } from './itemCursor.
  * production read was missing.
  */
 function fakeTable(itemsPerShipment: Map<string, number>, cap = 1000) {
-  const fetchPage: CursorPageFetcher = (chunk, offset, limit) => {
+  const fetchPage: PageFetcher<CursorRow> = (chunk, offset, limit) => {
     const all: Array<{ shipment_id: string }> = [];
     for (const id of [...chunk].sort()) {
       const n = itemsPerShipment.get(id) ?? 0;
@@ -104,7 +104,7 @@ Deno.test('a page that returns exactly the page size is not treated as the end',
 });
 
 Deno.test('the runaway guard bounds a server that always returns a full page', async () => {
-  const fetchPage: CursorPageFetcher = (_chunk, _offset, limit) =>
+  const fetchPage: PageFetcher<CursorRow> = (_chunk, _offset, limit) =>
     Promise.resolve({ rows: Array.from({ length: limit }, () => ({ shipment_id: 'A' })) });
   const out = await collectShipmentsWithItems(['A'], fetchPage, {
     chunk: 150,
