@@ -103,6 +103,10 @@ async function fetchCogOnRecord(userId: string): Promise<Map<string, number>> {
       .select("asin, unit_cost")
       .eq("user_id", userId)
       .not("unit_cost", "is", null)
+      // A VIEW with no id column; one row per ASIN, so asin is a total order.
+      // Needed for the same reason as everywhere else: unordered .range()
+      // paging can repeat or skip a row, and here that is a cost.
+      .order("asin", { ascending: true })
       .range(from, from + PAGE - 1);
     // Throw rather than return a partial map: a short read here silently
     // undervalues stock, which is worse than showing the caller an error.
@@ -114,6 +118,15 @@ async function fetchCogOnRecord(userId: string): Promise<Map<string, number>> {
       if (row.asin && Number.isFinite(cost) && cost > 0) map.set(row.asin, cost);
     }
     if (data.length < PAGE) break;
+    if (from + PAGE >= 50 * PAGE) {
+      // Reached the page bound WITHOUT a short page, so rows remain unread.
+      // Ending here quietly is exactly how stock gets undervalued with no
+      // symptom -- the comment above already says to throw instead.
+      throw new Error(
+        `fetchCogOnRecord: hit the ${50 * PAGE}-row bound with rows still ` +
+        `unread; the valuation would be understated.`,
+      );
+    }
   }
   return map;
 }
@@ -419,8 +432,13 @@ async function fetchFeeCacheMap(userId: string): Promise<Map<string, { fba_fee_f
       .select("asin, fba_fee_fixed, referral_rate")
       .eq("user_id", userId)
       .eq("marketplace", "US")
+      .order("id", { ascending: true })
       .range(from, from + pageSize - 1);
-    if (error || !data) break;
+    // Was `if (error || !data) break`, which handed back a PARTIAL fee map and
+    // let the caller value stock with it -- missing fees overstate value.
+    // Matches fetchCogOnRecord above: throw rather than answer quietly wrong.
+    if (error) throw error;
+    if (!data) break;
     for (const row of data) {
       if (row.asin) map.set(row.asin, { fba_fee_fixed: Number(row.fba_fee_fixed) || 0, referral_rate: Number(row.referral_rate) || 0.15 });
     }

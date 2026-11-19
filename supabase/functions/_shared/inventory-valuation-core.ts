@@ -85,6 +85,8 @@ async function fetchCogOnRecord(supabase: any, userId: string): Promise<Map<stri
       .select("asin, unit_cost")
       .eq("user_id", userId)
       .not("unit_cost", "is", null)
+      // A VIEW with no id column; one row per ASIN, so asin is a total order.
+      .order("asin", { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw error;
     if (!data) break;
@@ -93,6 +95,12 @@ async function fetchCogOnRecord(supabase: any, userId: string): Promise<Map<stri
       if (row.asin && Number.isFinite(cost) && cost > 0) map.set(row.asin, cost);
     }
     if (data.length < PAGE) break;
+    if (from + PAGE >= 50 * PAGE) {
+      throw new Error(
+        `fetchCogOnRecord: hit the ${50 * PAGE}-row bound with rows still ` +
+        `unread; the valuation would be understated.`,
+      );
+    }
   }
   return map;
 }

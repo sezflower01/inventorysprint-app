@@ -564,7 +564,7 @@ export default function ProfitLoss() {
             .gte("event_date", startDate)
             .lte("event_date", endDate);
           q = applyMpFilter(q);
-          const { data, error } = await q.range(from, from + PAGE_SIZE - 1);
+          const { data, error } = await q.order("id", { ascending: true }).range(from, from + PAGE_SIZE - 1);
           if (error) throw error;
           for (const row of data || []) {
             const orderId = String((row as any).amazon_order_id || "").trim();
@@ -588,7 +588,7 @@ export default function ProfitLoss() {
             .gte("order_date", startDate)
             .lte("order_date", endDate);
           q = applyMpFilter(q);
-          const { data, error } = await q.range(from, from + PAGE_SIZE - 1);
+          const { data, error } = await q.order("id", { ascending: true }).range(from, from + PAGE_SIZE - 1);
           if (error) throw error;
           for (const row of data || []) {
             const r = row as any;
@@ -1883,7 +1883,7 @@ export default function ProfitLoss() {
               .gte("event_date", yearStartIso)
               .lte("event_date", yearEndIso);
             q = applyMpFilter(q);
-            const { data, error } = await q.range(from, from + PAGE - 1);
+            const { data, error } = await q.order("id", { ascending: true }).range(from, from + PAGE - 1);
             if (error) throw error;
             for (const row of data || []) {
               const id = String((row as any).amazon_order_id || "").trim();
@@ -1903,7 +1903,7 @@ export default function ProfitLoss() {
               .gte("order_date", yearStartIso)
               .lte("order_date", yearEndIso);
             q = applyMpFilter(q);
-            const { data, error } = await q.range(from, from + PAGE - 1);
+            const { data, error } = await q.order("id", { ascending: true }).range(from, from + PAGE - 1);
             if (error) throw error;
             for (const row of data || []) {
               const r = row as any;

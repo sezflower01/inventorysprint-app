@@ -282,6 +282,11 @@ export default function HybridPLPanel({
         .eq("user_id", userId)
         .gte("event_date", startDate)
         .lte("event_date", endDate)
+        // Stable order is REQUIRED for .range() paging: two pages are two
+        // independent queries, and Postgres promises no row order between
+        // them -- so without a total order a financial event can be counted
+        // twice or missed entirely.
+        .order("id", { ascending: true })
         .range(from, from + PAGE - 1);
       if (e1) throw e1;
       if (!data || data.length === 0) break;
@@ -439,6 +444,7 @@ export default function HybridPLPanel({
           .eq("user_id", userId)
           .gte("order_date", startDate)
           .lte("order_date", endDate)
+          .order("id", { ascending: true })
           .range(from, from + PAGE - 1);
         if (e1) throw e1;
         if (!data || data.length === 0) break;
@@ -545,6 +551,7 @@ export default function HybridPLPanel({
           .select("category,name,amount,expense_date,end_date,frequency")
           .eq("user_id", userId)
           .lte("expense_date", endDate)
+          .order("id", { ascending: true })
           .range(from, from + PAGE - 1);
         if (e1) throw e1;
         if (!data || data.length === 0) break;

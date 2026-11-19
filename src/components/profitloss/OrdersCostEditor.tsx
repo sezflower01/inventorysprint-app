@@ -68,7 +68,11 @@ const PAGE_LOOKUP = 1000;
 async function loadAllRows<T = any>(builder: () => any): Promise<T[]> {
   const all: T[] = [];
   for (let from = 0; ; from += PAGE_LOOKUP) {
-    const { data, error } = await builder().range(from, from + PAGE_LOOKUP - 1);
+    // Stable order applied HERE, where the paging happens: callers pass a
+    // builder, so none of them can be relied on to remember.
+    const { data, error } = await builder()
+      .order("id", { ascending: true })
+      .range(from, from + PAGE_LOOKUP - 1);
     if (error) {
       console.error("[loadAllRows] paging failed:", error);
       throw error;

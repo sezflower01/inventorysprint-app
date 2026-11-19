@@ -266,6 +266,7 @@ export default function SoFecParityBanner({ userId, startDate, endDate }: Props)
         .eq("user_id", userId)
         .gte("order_date", start)
         .lte("order_date", end)
+        .order("id", { ascending: true })
         .range(from, from + PAGE - 1);
       if (error || !data || data.length === 0) break;
       for (const r of data as RowSnap[]) {

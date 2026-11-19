@@ -157,6 +157,7 @@ export async function aggregateLive(
       .eq("user_id", userId)
       .gte("order_date", startYmd)
       .lte("order_date", endYmd)
+      .order("id", { ascending: true })
       .range(from, from + PAGE - 1);
 
     if (marketplace && marketplace !== "ALL") {
