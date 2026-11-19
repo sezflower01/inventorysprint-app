@@ -61,3 +61,8 @@ print-clients/windows/obj/
 # Scrubbing a 12,000-line file by inspection is not a thing anyone does
 # reliably, which is why the raw file is never the fixture.
 captures/
+
+# TypeScript incremental build state. Written by `tsc --build` / any
+# `-p tsconfig.app.json` run, including the typecheck gate, so it reappears
+# constantly and is pure local cache -- it describes this machine, not the code.
+*.tsbuildinfo

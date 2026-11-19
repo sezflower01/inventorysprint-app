@@ -23,6 +23,7 @@
  */
 
 import { supabase } from "@/integrations/supabase/client";
+import { fetchAllPagesResult } from "./paginatedFetch";
 
 export type PromoDeductionSource = "sales_orders" | "fec";
 
@@ -87,28 +88,25 @@ export async function fetchPromotionDeductions(params: {
   const PAGE_SIZE = 1000;
   const HARD_CAP = 100_000; // safety brake
 
+  // This was a byte-for-byte copy of the shared helper in ./paginatedFetch,
+  // and it carried both of that helper's old defects into the P&L money path:
+  // it paged an UNORDERED query (so a row could arrive twice or never across a
+  // page boundary), and on a page error it broke and returned a short array
+  // that the caller below sums as if it were the whole period.
+  //
+  // Delegating means both fixes apply here: the shared helper now orders by
+  // `id` itself, retries a failed page once, and reports incompleteness. These
+  // are promotion DEDUCTIONS, so a dropped row makes profit look better than
+  // it was -- the direction of error that does not prompt anyone to check.
+  let incompleteReads = 0;
   const fetchAllPages = async <T>(buildQuery: () => any, label: string): Promise<T[]> => {
-    const all: T[] = [];
-    let from = 0;
-    // Loop until we get a short page or hit the safety cap.
-    // eslint-disable-next-line no-constant-condition
-    while (true) {
-      const to = from + PAGE_SIZE - 1;
-      const { data, error } = await buildQuery().range(from, to);
-      if (error) {
-        console.warn(`[promotionDeductions] ${label} page ${from}-${to} error:`, error.message);
-        break;
-      }
-      const chunk = (data || []) as T[];
-      all.push(...chunk);
-      if (chunk.length < PAGE_SIZE) break;
-      from += PAGE_SIZE;
-      if (from >= HARD_CAP) {
-        console.warn(`[promotionDeductions] ${label} hit HARD_CAP ${HARD_CAP}`);
-        break;
-      }
-    }
-    return all;
+    const res = await fetchAllPagesResult<T>(buildQuery, {
+      pageSize: PAGE_SIZE,
+      hardCap: HARD_CAP,
+      label: `promotionDeductions ${label}`,
+    });
+    if (!res.complete) incompleteReads++;
+    return res.rows;
   };
 
   // ── 1. SO promotion_discount (USD-safe rows only) ────────────────────────
@@ -202,6 +200,16 @@ export async function fetchPromotionDeductions(params: {
   console.log(
     `[promotionDeductions] mode=${attributionMode} SO=${soRows.length} FEC=${fecRows.length} range=${rangeStart}..${rangeEnd} mp=${marketplace}`
   );
+  if (incompleteReads > 0) {
+    // Said out loud next to the figures it affects. The reads themselves have
+    // already logged what failed; this is so the deduction total is never
+    // reported without the caveat attached.
+    console.error(
+      `[promotionDeductions] ${incompleteReads} read(s) came back INCOMPLETE -- ` +
+      `promotion deductions for ${rangeStart}..${rangeEnd} are UNDERSTATED, ` +
+      `which overstates profit.`
+    );
+  }
 
   const rows: PromoDeductionRow[] = [];
 

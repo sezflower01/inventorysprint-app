@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { fetchAllPages, type QueryBuilderFactory } from "@/lib/sales/paginatedFetch";
 import { useAuth } from "@/contexts/AuthContext";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -233,37 +234,25 @@ export default function SkippedAsinWorkQueue() {
     const todayISO = todayStart.toISOString();
 
     try {
-      const pageSize = 1000;
-
-      const fetchAllPages = async (buildQuery: (from: number, to: number) => any) => {
-        const all: any[] = [];
-        let from = 0;
-
-        while (true) {
-          const to = from + pageSize - 1;
-          const { data, error } = await buildQuery(from, to);
-          if (error) throw error;
-
-          const batch = data || [];
-          all.push(...batch);
-
-          if (batch.length < pageSize) break;
-          from += pageSize;
-        }
-
-        return all;
-      };
+      // The third copy of this loop in the codebase, now retired in favour of
+      // @/lib/sales/paginatedFetch. This copy already threw on a page error --
+      // the right call, and the reason the shared helper gained
+      // throwOnIncomplete rather than this one being downgraded to a silent
+      // partial result. It paged an UNORDERED query, though, which the shared
+      // helper fixes by applying an `id` tiebreaker itself, and it now also
+      // retries a transient page failure once before giving up.
+      const paged = (buildQuery: QueryBuilderFactory) =>
+        fetchAllPages(buildQuery, { throwOnIncomplete: true, label: "SkippedAsinWorkQueue" });
 
       const [assignmentsRaw, actions, inventoryRaw, rulesRes] = await Promise.all([
-        fetchAllPages((from, to) =>
+        paged(() =>
           supabase
             .from("repricer_assignments")
             .select("id, asin, sku, marketplace, status, is_enabled, rule_id, min_price_override, max_price_override, amazon_min_price, amazon_max_price, last_sp_api_check_at, last_evaluated_at, last_recommendation_reason, last_skip_reason, consecutive_zero_offers, updated_at, last_recommended_price, last_buybox_price")
             .eq("user_id", user.id)
             .eq("status", "active")
-            .range(from, to)
         ),
-        fetchAllPages((from, to) =>
+        paged(() =>
           supabase
             .from("repricer_price_actions")
             .select("asin, marketplace, action_type, reason, error_type, error_message, intelligence_factors, created_at")
@@ -280,14 +269,12 @@ export default function SkippedAsinWorkQueue() {
               "throttled",
               "empty_snapshot",
             ])
-            .range(from, to)
         ),
-        fetchAllPages((from, to) =>
+        paged(() =>
           supabase
             .from("inventory")
             .select("asin, sku, title, image_url, available, reserved, inbound, listing_status, source, price, my_price, cost")
             .eq("user_id", user.id)
-            .range(from, to)
         ),
         supabase
           .from("repricer_rules")
