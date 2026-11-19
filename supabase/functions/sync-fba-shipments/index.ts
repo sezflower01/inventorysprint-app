@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { waitForApiToken } from "../_shared/rate-limiter.ts";
 import { nextPage } from './itemPagination.ts';
+import { collectShipmentsWithItems } from './itemCursor.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -1236,33 +1237,43 @@ serve(async (req) => {
       const windowIds = Array.from(
         new Set(allShipments.map((sh: any) => String(sh.ShipmentId)).filter(Boolean)),
       );
-      const CHUNK = 150;
-      let pages = 0;
-      let capHit = false;
-      for (let i = 0; i < windowIds.length; i += CHUNK) {
-        const chunk = windowIds.slice(i, i + CHUNK);
-        const { data: existing, error: curErr } = await supabase
-          .from('fba_shipment_items')
-          .select('shipment_id')
-          .eq('user_id', user.id)
-          .in('shipment_id', chunk);
-        pages++;
-        if (curErr) {
-          // A broken cursor must not look like an empty one: an empty cursor
-          // means "fetch everything" and would burn the whole budget.
-          console.log(`[cursor] chunk ${pages} failed: ${curErr.message}`);
-          capHit = true;
-          continue;
-        }
-        for (const r of existing ?? []) {
-          if (r?.shipment_id) haveItemsFor.add(String(r.shipment_id));
-        }
-      }
+      // ...AND THEN THE CHUNKED READ HIT THE SAME CAP ONE LAYER DOWN.
+      //
+      // 2026-11-19: this asked for 150 shipment IDs but selected ITEM rows,
+      // ~1,800 of them against the same 1,000-row cap and with no ORDER BY, so
+      // it reported 136 of 487 in-window shipments and the run re-fetched ~106
+      // it already had. The rule now lives in ./itemCursor.ts -- pure, and
+      // tested against a fake PostgREST that enforces the real cap, so "a full
+      // page means there is more" is a regression test rather than a comment.
+      // That file's header carries the measurement.
+      //
+      // A degraded cursor is reported, not corrected: an incomplete skip set
+      // costs quota by re-fetching, while an EMPTY one would mean "fetch
+      // everything" and burn the whole budget. Erring toward work is safe here;
+      // erring toward silence is what lost October.
+      const cursor = await collectShipmentsWithItems(
+        windowIds,
+        async (chunk, offset, limit) => {
+          const { data, error } = await supabase
+            .from('fba_shipment_items')
+            .select('shipment_id')
+            .eq('user_id', user.id)
+            .in('shipment_id', chunk)
+            // Without an explicit order, a capped page is arbitrary heap order
+            // and paging past it can return rows it already showed.
+            .order('shipment_id', { ascending: true })
+            .range(offset, offset + limit - 1);
+          return error ? { rows: null, error: error.message } : { rows: data ?? [] };
+        },
+        { chunk: 150, page: 1000, onNote: (n) => console.log(`[cursor] ${n}`) },
+      );
+      for (const id of cursor.haveItemsFor) haveItemsFor.add(id);
       await markPhase('cursor-loaded', {
         shipments_with_items: haveItemsFor.size,
         window_shipments: windowIds.length,
-        chunks: pages,
-        degraded: capHit,
+        item_rows_read: cursor.rowsRead,
+        pages: cursor.pages,
+        degraded: cursor.degraded,
       });
     }
 
@@ -1567,6 +1578,23 @@ serve(async (req) => {
 
     console.log(`Sync complete: ${allShipments.length} shipments synced, ${shipmentCount} total in DB, ${itemsCount} item rows written this run, ${totalItemCount} in table`);
 
+    // The wrapper keeps only {ok, mode, users, deferred} in
+    // cron_run_history.detail, so every tally below was invisible from SQL --
+    // the only readable number was items_processed, and on 2026-11-19 it said
+    // 1,389 for a run that added 135 rows across 14 shipments. Phase rows are
+    // queryable, so the run's own account of itself goes in one.
+    await markPhase('run-tally', {
+      shipments_found: allShipments.length,
+      headers_upserted: headersUpserted,
+      item_fetches: itemFetches,
+      item_rows_sent: itemsCount,
+      item_fetch_failures: itemFetchFailures,
+      skipped_already_have: itemsSkippedAlreadyHave,
+      skipped_budget: itemsSkippedBudget,
+      not_reached: shipmentsNotReached,
+      more_work_remaining: itemsSkippedBudget > 0 || shipmentsNotReached > 0,
+    });
+
     return new Response(JSON.stringify({
       success: true,
       message: `Synced ${allShipments.length} shipments`,
@@ -1581,6 +1609,11 @@ serve(async (req) => {
       // row had been written. A run that achieved nothing reported five
       // figures of progress. The table total is still useful, under a name
       // that says what it is.
+      //
+      // Still note what this counts: rows SENT to the upsert. An upsert that
+      // lands on an existing row updates it, so this equals newly-created rows
+      // only while the skip cursor above is accurate. When that cursor was
+      // capped, 1,389 rows sent produced 135 new ones.
       itemsUpserted: itemsCount,
       itemCount: itemsCount,
       itemRowsInTable: totalItemCount,
