@@ -31,6 +31,113 @@ export interface AdminOverride {
   override_plan_id: string | null;
 }
 
+/**
+ * ONE ANSWER PER USER, NOT ONE PER COMPONENT.
+ *
+ * useSubscription() is called from 20 places, and it used to issue its four
+ * identity reads plus the listings-count RPC from EVERY instance. Measured on
+ * /tools/repricer on 2026-11-19 (client caches cleared): 23 identity requests
+ * -- user_roles 8, user_subscriptions 5, subscription_plans 5,
+ * admin_subscription_override 5 -- for four facts that cannot differ between
+ * callers, costing 13.9s of cumulative request time on the cold path.
+ *
+ * Nothing here is per-component, so the result is shared at module level:
+ *  - an in-flight promise, so instances that mount in the same tick (which is
+ *    what actually happens -- React mounts the whole page at once) join the
+ *    first request instead of starting their own;
+ *  - a short TTL, so navigating between pages does not re-ask. Plan and role
+ *    data changes on the order of months, not seconds;
+ *  - explicit invalidation on every write below, so a plan switch is visible
+ *    immediately rather than up to TTL later, and refetch() always forces.
+ *
+ * Deliberately not persisted anywhere. This is a request-collapsing cache, not
+ * a store: entitlement is re-read on reload, and the server remains the only
+ * authority. It is keyed by user id so a sign-out/sign-in as someone else
+ * cannot be served the previous user's plan.
+ */
+interface IdentitySnapshot {
+  plans: SubscriptionPlan[];
+  subscription: UserSubscription | null;
+  override: AdminOverride | null;
+  isAdmin: boolean;
+  listings: { total: number; per_marketplace: Record<string, number> };
+}
+
+const IDENTITY_TTL_MS = 60_000;
+
+let identityCache: { userId: string; at: number; value: IdentitySnapshot } | null = null;
+let identityInFlight: { userId: string; promise: Promise<IdentitySnapshot> } | null = null;
+
+export function invalidateSubscriptionCache() {
+  identityCache = null;
+  identityInFlight = null;
+}
+
+async function loadIdentity(userId: string): Promise<IdentitySnapshot> {
+  const [plansRes, subRes, overrideRes, adminRes] = await Promise.all([
+    supabase.from('subscription_plans').select('*').order('sort_order'),
+    supabase
+      .from('user_subscriptions')
+      .select('plan_id, billing_interval, status, cancel_at_period_end, current_period_end, stripe_subscription_id, trial_end_date')
+      .eq('user_id', userId)
+      .maybeSingle(),
+    supabase
+      .from('admin_subscription_override')
+      .select('override_enabled, override_plan_id')
+      .eq('user_id', userId)
+      .maybeSingle(),
+    supabase.from('user_roles').select('role').eq('user_id', userId).eq('role', 'admin').maybeSingle(),
+  ]);
+
+  // The listings count is a separate concern and must not be able to fail the
+  // entitlement read: a count of 0 shows a wrong usage bar, a missing plan
+  // locks the user out of the app.
+  let listings = { total: 0, per_marketplace: {} as Record<string, number> };
+  try {
+    const { data, error } = await supabase.rpc('get_managed_listings_counts', { p_user_id: userId });
+    if (!error && data) {
+      const result = data as { total: number; per_marketplace: Record<string, number> };
+      listings = { total: result.total || 0, per_marketplace: result.per_marketplace || {} };
+    }
+  } catch { /* leave the zeroed default */ }
+
+  return {
+    plans: (plansRes.data as SubscriptionPlan[]) || [],
+    subscription: (subRes.data as UserSubscription | null) || null,
+    override: (overrideRes.data as AdminOverride | null) || null,
+    isAdmin: !!adminRes.data,
+    listings,
+  };
+}
+
+function getIdentity(userId: string, force: boolean): Promise<IdentitySnapshot> {
+  if (force) {
+    identityCache = null;
+    identityInFlight = null;
+  } else {
+    if (identityCache && identityCache.userId === userId && Date.now() - identityCache.at < IDENTITY_TTL_MS) {
+      return Promise.resolve(identityCache.value);
+    }
+    if (identityInFlight && identityInFlight.userId === userId) {
+      return identityInFlight.promise;
+    }
+  }
+
+  const promise = loadIdentity(userId)
+    .then(value => {
+      identityCache = { userId, at: Date.now(), value };
+      return value;
+    })
+    .finally(() => {
+      // Clear the slot either way: a failed read must not be remembered as
+      // in-flight forever, and a successful one is now in identityCache.
+      if (identityInFlight?.promise === promise) identityInFlight = null;
+    });
+
+  identityInFlight = { userId, promise };
+  return promise;
+}
+
 
 export function useSubscription() {
   const { user } = useAuth();
@@ -57,7 +164,7 @@ export function useSubscription() {
   const trialDaysRemaining = trialEndDate ? Math.max(0, Math.ceil((trialEndDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24))) : null;
   const canUseRepricer = isActive || (isTrial && trialDaysRemaining !== null && trialDaysRemaining > 0) || isAdmin;
 
-  const fetchAll = async () => {
+  const fetchAll = async (force = false) => {
     if (!user) {
       setPlans([]);
       setSubscription(null);
@@ -74,25 +181,13 @@ export function useSubscription() {
     setListingsLoading(true);
 
     try {
-      const [plansRes, subRes, overrideRes, adminRes] = await Promise.all([
-        supabase.from('subscription_plans').select('*').order('sort_order'),
-        supabase
-          .from('user_subscriptions')
-          .select('plan_id, billing_interval, status, cancel_at_period_end, current_period_end, stripe_subscription_id, trial_end_date')
-          .eq('user_id', user.id)
-          .maybeSingle(),
-        supabase
-          .from('admin_subscription_override')
-          .select('override_enabled, override_plan_id')
-          .eq('user_id', user.id)
-          .maybeSingle(),
-        supabase.from('user_roles').select('role').eq('user_id', user.id).eq('role', 'admin').maybeSingle(),
-      ]);
-
-      setPlans((plansRes.data as SubscriptionPlan[]) || []);
-      setSubscription((subRes.data as UserSubscription | null) || null);
-      setOverride((overrideRes.data as AdminOverride | null) || null);
-      setIsAdmin(!!adminRes.data);
+      const snap = await getIdentity(user.id, force);
+      setPlans(snap.plans);
+      setSubscription(snap.subscription);
+      setOverride(snap.override);
+      setIsAdmin(snap.isAdmin);
+      setActiveListings(snap.listings.total);
+      setMarketplaceCounts(snap.listings.per_marketplace);
     } catch {
       setPlans([]);
       setSubscription(null);
@@ -100,35 +195,15 @@ export function useSubscription() {
       setIsAdmin(false);
       setActiveListings(0);
       setMarketplaceCounts({});
-      setListingsLoading(false);
-      return;
     } finally {
       setLoading(false);
-    }
-
-    try {
-      const { data, error } = await supabase.rpc('get_managed_listings_counts', {
-        p_user_id: user.id,
-      });
-
-      if (error || !data) {
-        setActiveListings(0);
-        setMarketplaceCounts({});
-      } else {
-        const result = data as { total: number; per_marketplace: Record<string, number> };
-        setActiveListings(result.total || 0);
-        setMarketplaceCounts(result.per_marketplace || {});
-      }
-    } catch {
-      setActiveListings(0);
-      setMarketplaceCounts({});
-    } finally {
       setListingsLoading(false);
     }
   };
 
   useEffect(() => {
     void fetchAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
   const switchOverridePlan = async (planId: string) => {
@@ -137,6 +212,7 @@ export function useSubscription() {
       .from('admin_subscription_override')
       .upsert({ user_id: user.id, override_enabled: true, override_plan_id: planId }, { onConflict: 'user_id' });
     if (!error) {
+      invalidateSubscriptionCache();
       setOverride({ override_enabled: true, override_plan_id: planId });
     }
     return error;
@@ -148,6 +224,7 @@ export function useSubscription() {
       .from('admin_subscription_override')
       .upsert({ user_id: user.id, override_enabled: enabled, override_plan_id: override?.override_plan_id ?? 'advanced' }, { onConflict: 'user_id' });
     if (!error) {
+      invalidateSubscriptionCache();
       setOverride(prev => prev ? { ...prev, override_enabled: enabled } : { override_enabled: enabled, override_plan_id: 'advanced' });
     }
     return error;
@@ -159,6 +236,7 @@ export function useSubscription() {
       .from('user_subscriptions')
       .upsert({ user_id: user.id, plan_id: planId, billing_interval: subscription?.billing_interval ?? 'monthly', status: 'active' }, { onConflict: 'user_id' });
     if (!error) {
+      invalidateSubscriptionCache();
       setSubscription(prev => prev ? { ...prev, plan_id: planId } : { plan_id: planId, billing_interval: 'monthly', status: 'active' });
     }
     return error;
@@ -184,6 +262,6 @@ export function useSubscription() {
     switchOverridePlan,
     toggleOverride,
     switchPlan,
-    refetch: fetchAll,
+    refetch: () => fetchAll(true),
   };
 }

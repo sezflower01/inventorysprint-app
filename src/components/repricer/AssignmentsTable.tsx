@@ -753,7 +753,7 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
       : (clEnrich?.unitCost != null && clEnrich.unitCost > 0)
         ? clEnrich.unitCost
         : ((inv.cost != null && inv.cost > 0) ? inv.cost : null);
-    const enrichment = titleImageMap[inv.asin];
+    const enrichment = titleImageMap[normalizeIdentifier(inv.asin)];
     const enrichedTitle = (!inv.title || inv.title === '' || inv.title.toLowerCase().includes('unknown') || inv.title.toLowerCase().includes('untitled'))
       ? (clEnrich?.title || enrichment?.title || inv.title)
       : inv.title;
@@ -974,8 +974,8 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
       amazon_fees: amazonFees,
       bb_percentage: null,
       position: null,
-      units_sold_7d: sales7Map[inv.asin] ?? null,
-      units_sold_30d: salesMap[inv.asin] ?? null,
+      units_sold_7d: sales7Map[normalizeIdentifier(inv.asin)] ?? null,
+      units_sold_30d: salesMap[normalizeIdentifier(inv.asin)] ?? null,
       units_sold_today: salesTodayMap[normalizeIdentifier(inv.asin)] || 0,
       actual_roi: null,
       buybox_roi: null,
@@ -1005,7 +1005,7 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
       })(),
       roi_range_updated_at: assignment?.roi_range_updated_at || null,
       // Replenishment historical data
-      historical_sales: historicalSalesMap[inv.asin]?.totalUnits ?? null,
+      historical_sales: historicalSalesMap[normalizeIdentifier(inv.asin)]?.totalUnits ?? null,
       historical_days: null, // populated by deferred sales enrichment
       // Fulfillment type: HARD FBA evidence overrides any stored assignment value
       // (FBM merchant-listings sync can incorrectly tag an assignment as FBM even
@@ -1370,38 +1370,180 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
 }
 
 // Phase 2: Deferred sales + enrichment data (loaded after table is visible)
-async function fetchSalesEnrichment(userId: string, targetMarketplace: string): Promise<{
+//
+// TWO ROUND TRIPS, WHERE THERE USED TO BE ~36.
+//
+// Measured in the live UI on 2026-11-19 with the client caches cleared, so
+// the cold path actually ran: opening this page made 145 Supabase requests and
+// network work was still finishing at 16.6 SECONDS, to annotate 898 listings.
+// The worst single contributor was this function. It paged ALL of sales_orders
+// filtered on user_id alone -- 24 pages of 1,000, max offset 23,000, each page
+// awaiting the previous -- so it was ~15 seconds of SERIAL latency spent
+// shipping ~29,000 rows to the browser in order to sum quantity per ASIN in
+// JavaScript. The answer is ~900 rows. Titles and images did the same thing
+// twice more, over all of created_listings and all of sales_orders.
+//
+// The grouping now happens in Postgres (get_repricer_asin_sales,
+// get_repricer_asin_media), which also fixes the four sales columns having
+// disagreed about what a sale is: today/7d/30d each excluded asin = 'PENDING'
+// and order_id like '%-REFUND', while the lifetime scan excluded nothing, so
+// the Historical column counted refunds and PENDING rows and the other three
+// did not. One filter now serves all four.
+//
+// BOTH CALLS FALL BACK TO THE OLD PAGED SCAN IF THE RPC IS MISSING, because
+// migrations in this repo are applied by hand and the frontend auto-deploys
+// from main -- the client is therefore guaranteed to be live BEFORE the
+// function exists. Until it is applied this file behaves exactly as it did
+// before, just with one wasted round trip and a console warning.
+interface SalesEnrichment {
   salesTodayMap: Record<string, number>;
   sales7Map: Record<string, number>;
   salesMap: Record<string, number>;
   historicalSalesMap: Record<string, { totalUnits: number; earliestDate: string }>;
   titleImageMap: Record<string, { title?: string; image_url?: string }>;
-}> {
-  const AMAZON_BUSINESS_TZ = "America/Los_Angeles";
+}
+
+type SalesWindows = Omit<SalesEnrichment, "titleImageMap">;
+
+const describeError = (e: unknown): string =>
+  e instanceof Error ? e.message : typeof e === "string" ? e : JSON.stringify(e);
+
+const emptySalesWindows = (): SalesWindows => ({
+  salesTodayMap: {},
+  sales7Map: {},
+  salesMap: {},
+  historicalSalesMap: {},
+});
+
+// Amazon's business day. order_date is a LOCAL Pacific date and is complete;
+// purchase_timestamp_utc is UTC and NULL on ~10% of rows, and 23% of rows fall
+// on a different calendar day between the two -- so the two fields are never
+// mixed. The RPC computes the same boundary in SQL; these constants exist only
+// for the fallback path.
+const AMAZON_BUSINESS_TZ = "America/Los_Angeles";
+
+const addDaysISO = (dateISO: string, delta: number): string => {
+  const d = new Date(dateISO + "T12:00:00");
+  d.setDate(d.getDate() + delta);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+async function fetchSalesEnrichment(userId: string, targetMarketplace: string): Promise<SalesEnrichment> {
+  void targetMarketplace; // sales columns are not marketplace-scoped (unchanged)
+  const startedAt = Date.now();
+  const [windows, titleImageMap] = await Promise.all([
+    fetchAsinSalesWindows(userId),
+    fetchAsinMedia(userId),
+  ]);
+  console.log(
+    `[Repricer] Sales enrichment done in ${Date.now() - startedAt}ms: ` +
+    `today=${Object.keys(windows.salesTodayMap).length}, 7d=${Object.keys(windows.sales7Map).length}, ` +
+    `30d=${Object.keys(windows.salesMap).length}, historical=${Object.keys(windows.historicalSalesMap).length}, ` +
+    `media=${Object.keys(titleImageMap).length} ASINs`
+  );
+  return { ...windows, titleImageMap };
+}
+
+interface AsinSalesRow {
+  asin: string | null;
+  units_today: number | null;
+  units_7d: number | null;
+  units_30d: number | null;
+  units_lifetime: number | null;
+  first_order_date: string | null;
+  last_order_date: string | null;
+}
+
+async function fetchAsinSalesWindows(userId: string): Promise<SalesWindows> {
+  let rows: AsinSalesRow[] | null = null;
+  try {
+    const { data, error } = await supabase.rpc("get_repricer_asin_sales" as never);
+    if (error) throw error;
+    rows = (data as unknown as AsinSalesRow[]) ?? [];
+  } catch (e: unknown) {
+    console.warn(
+      `[Repricer] get_repricer_asin_sales unavailable (${describeError(e)}); ` +
+      `falling back to the paged sales_orders scan. Apply migration ` +
+      `20261119040000 to get the fast path.`
+    );
+    return fetchAsinSalesWindowsPaged(userId);
+  }
+
+  const out = emptySalesWindows();
+  for (const row of rows) {
+    const asin = normalizeIdentifier(row.asin);
+    if (!asin) continue;
+    out.salesTodayMap[asin] = row.units_today ?? 0;
+    out.sales7Map[asin] = row.units_7d ?? 0;
+    out.salesMap[asin] = row.units_30d ?? 0;
+    // Only a real lifetime figure WITH a first-sale date is useful: the
+    // consumer divides by days-since to get a rate, so a count without a date
+    // would read as "sold N in 1 day".
+    const lifetime = row.units_lifetime ?? 0;
+    if (lifetime > 0 && row.first_order_date) {
+      out.historicalSalesMap[asin] = { totalUnits: lifetime, earliestDate: row.first_order_date };
+    }
+  }
+  return out;
+}
+
+async function fetchAsinMedia(userId: string): Promise<Record<string, { title?: string; image_url?: string }>> {
+  let rows: Array<{ asin: string | null; title: string | null; image_url: string | null }> | null = null;
+  try {
+    const { data, error } = await supabase.rpc("get_repricer_asin_media" as never);
+    if (error) throw error;
+    rows = (data as unknown as Array<{ asin: string | null; title: string | null; image_url: string | null }>) ?? [];
+  } catch (e: unknown) {
+    console.warn(
+      `[Repricer] get_repricer_asin_media unavailable (${describeError(e)}); ` +
+      `falling back to the paged title/image scans.`
+    );
+    return fetchAsinMediaPaged(userId);
+  }
+
+  const titleImageMap: Record<string, { title?: string; image_url?: string }> = {};
+  for (const row of rows) {
+    const asin = normalizeIdentifier(row.asin);
+    if (!asin) continue;
+    titleImageMap[asin] = {
+      title: row.title || undefined,
+      image_url: row.image_url || undefined,
+    };
+  }
+  return titleImageMap;
+}
+
+// ---------------------------------------------------------------------------
+// FALLBACK PATH. This is the pre-2026-11-19 implementation, kept intact so a
+// client deployed ahead of its migration still works. It is slow by nature --
+// ~36 serial round trips and ~29,000 rows -- and is not the path to optimise;
+// if it is running, the migration has not been applied.
+//
+// One deliberate difference from the original: the lifetime scan now carries
+// the same PENDING/-REFUND exclusions as the three short windows, so the two
+// paths cannot disagree about what a sale is. That was the original bug.
+// ---------------------------------------------------------------------------
+type FallbackSalesRow = { asin: string; quantity: number | null };
+
+const fetchAllSalesRows = async (builderBase: any): Promise<FallbackSalesRow[]> => {
+  const pageSize = 1000;
+  let from = 0;
+  const all: FallbackSalesRow[] = [];
+  while (true) {
+    const { data, error } = await builderBase.order("id", { ascending: true }).range(from, from + pageSize - 1);
+    if (error) throw error;
+    const rows = (data || []) as Array<{ id: string; asin: string; quantity: number | null }>;
+    all.push(...rows.map(r => ({ asin: (r.asin || "").trim(), quantity: r.quantity })));
+    if (rows.length < pageSize) break;
+    from += pageSize;
+  }
+  return all;
+};
+
+async function fetchAsinSalesWindowsPaged(userId: string): Promise<SalesWindows> {
   const todayPT = new Date().toLocaleDateString("en-CA", { timeZone: AMAZON_BUSINESS_TZ });
-  const addDaysISO = (dateISO: string, delta: number): string => {
-    const d = new Date(dateISO + "T12:00:00");
-    d.setDate(d.getDate() + delta);
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  };
   const sevenDaysAgoPT = addDaysISO(todayPT, -7);
   const thirtyDaysAgoPT = addDaysISO(todayPT, -30);
-
-  type SalesRow = { asin: string; quantity: number | null };
-  const fetchAllSalesRows = async (builderBase: any): Promise<SalesRow[]> => {
-    const pageSize = 1000;
-    let from = 0;
-    const all: SalesRow[] = [];
-    while (true) {
-      const { data, error } = await builderBase.order("id", { ascending: true }).range(from, from + pageSize - 1);
-      if (error) throw error;
-      const rows = (data || []) as Array<{ id: string; asin: string; quantity: number | null }>;
-      all.push(...rows.map(r => ({ asin: (r.asin || "").trim(), quantity: r.quantity })));
-      if (rows.length < pageSize) break;
-      from += pageSize;
-    }
-    return all;
-  };
 
   type HistoricalRow = { asin: string; quantity: number | null; order_date: string };
   const fetchAllHistoricalRows = async (builderBase: any): Promise<HistoricalRow[]> => {
@@ -1419,7 +1561,7 @@ async function fetchSalesEnrichment(userId: string, targetMarketplace: string): 
     return all;
   };
 
-  const fetchTodaySales = async (): Promise<SalesRow[]> => {
+  const fetchTodaySales = async (): Promise<FallbackSalesRow[]> => {
     const [rollupRes, ordersRes] = await Promise.all([
       supabase.from("asin_sales_daily").select("asin, units").eq("user_id", userId).eq("date", todayPT),
       fetchAllSalesRows(
@@ -1465,49 +1607,55 @@ async function fetchSalesEnrichment(userId: string, targetMarketplace: string): 
         .neq("asin", "PENDING")
         .not("order_id", "like", "%-REFUND")
     ),
-    fetchAllHistoricalRows(supabase.from("sales_orders").select("id, asin, quantity, order_date").eq("user_id", userId)),
+    fetchAllHistoricalRows(
+      supabase
+        .from("sales_orders")
+        .select("id, asin, quantity, order_date")
+        .eq("user_id", userId)
+        .neq("asin", "PENDING")
+        .not("order_id", "like", "%-REFUND")
+    ),
   ]);
 
-  const salesTodayMap: Record<string, number> = {};
+  const out = emptySalesWindows();
   for (const r of todayRows) {
     const asin = normalizeIdentifier(r.asin);
-    if (asin) salesTodayMap[asin] = (salesTodayMap[asin] || 0) + (r.quantity || 1);
+    if (asin) out.salesTodayMap[asin] = (out.salesTodayMap[asin] || 0) + (r.quantity || 1);
   }
-  const sales7Map: Record<string, number> = {};
   for (const r of last7Rows) {
     const asin = normalizeIdentifier(r.asin);
-    if (asin) sales7Map[asin] = (sales7Map[asin] || 0) + (r.quantity || 1);
+    if (asin) out.sales7Map[asin] = (out.sales7Map[asin] || 0) + (r.quantity || 1);
   }
-  const salesMap: Record<string, number> = {};
   for (const r of last30Rows) {
     const asin = normalizeIdentifier(r.asin);
-    if (asin) salesMap[asin] = (salesMap[asin] || 0) + (r.quantity || 1);
+    if (asin) out.salesMap[asin] = (out.salesMap[asin] || 0) + (r.quantity || 1);
   }
-
-  const historicalSalesMap: Record<string, { totalUnits: number; earliestDate: string }> = {};
-  
   for (const r of allHistoricalRows) {
-    if (!r.asin || r.asin === "PENDING") continue;
+    const asin = normalizeIdentifier(r.asin);
+    if (!asin || !r.order_date) continue;
     const qty = r.quantity || 1;
-    const existing = historicalSalesMap[r.asin];
+    const existing = out.historicalSalesMap[asin];
     if (existing) {
       existing.totalUnits += qty;
       if (r.order_date < existing.earliestDate) existing.earliestDate = r.order_date;
     } else {
-      historicalSalesMap[r.asin] = { totalUnits: qty, earliestDate: r.order_date };
+      out.historicalSalesMap[asin] = { totalUnits: qty, earliestDate: r.order_date };
     }
   }
+  return out;
+}
 
-  // Title/image enrichment from created_listings and sales_orders as fallback
+async function fetchAsinMediaPaged(userId: string): Promise<Record<string, { title?: string; image_url?: string }>> {
   const titleImageMap: Record<string, { title?: string; image_url?: string }> = {};
   try {
     const clData = await fetchAllPaged(() =>
       supabase.from("created_listings").select("id, asin, title, image_url").eq("user_id", userId)
     );
     for (const cl of clData) {
-      if (!cl.asin) continue;
-      const existing = titleImageMap[cl.asin];
-      titleImageMap[cl.asin] = {
+      const asin = normalizeIdentifier(cl.asin);
+      if (!asin) continue;
+      const existing = titleImageMap[asin];
+      titleImageMap[asin] = {
         title: existing?.title || cl.title || undefined,
         image_url: existing?.image_url || cl.image_url || undefined,
       };
@@ -1519,19 +1667,19 @@ async function fetchSalesEnrichment(userId: string, targetMarketplace: string): 
       supabase.from("sales_orders").select("id, asin, title, image_url").eq("user_id", userId).not("image_url", "is", null)
     );
     for (const so of soData) {
-      if (!so.asin || so.asin === "PENDING") continue;
-      const existing = titleImageMap[so.asin];
-      titleImageMap[so.asin] = {
+      const asin = normalizeIdentifier(so.asin);
+      if (!asin || so.asin === "PENDING") continue;
+      const existing = titleImageMap[asin];
+      titleImageMap[asin] = {
         title: existing?.title || so.title || undefined,
         image_url: existing?.image_url || so.image_url || undefined,
       };
     }
   } catch { /* ignore */ }
 
-  console.log(`[Repricer] Sales enrichment done: today=${Object.keys(salesTodayMap).length}, 7d=${Object.keys(sales7Map).length}, 30d=${Object.keys(salesMap).length}, historical=${Object.keys(historicalSalesMap).length} ASINs`);
-
-  return { salesTodayMap, sales7Map, salesMap, historicalSalesMap, titleImageMap };
+  return titleImageMap;
 }
+
 /**
  * Is the repricer holding this listing in a cooldown right now?
  *
@@ -1689,8 +1837,8 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
         if (!prev) return prev;
         return (prev as InventoryWithAssignment[]).map(item => {
           const normAsin = normalizeIdentifier(item.asin);
-          const hist = enrichment.historicalSalesMap[item.asin];
-          const titleEnrich = enrichment.titleImageMap[item.asin];
+          const hist = enrichment.historicalSalesMap[normAsin];
+          const titleEnrich = enrichment.titleImageMap[normAsin];
           const needsTitleEnrich = !item.title || item.title === '' || item.title.toLowerCase().includes('unknown') || item.title.toLowerCase().includes('untitled');
           return {
             ...item,
@@ -2520,7 +2668,73 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
     return false;
   };
 
-  // Auto-fetch for CURRENT marketplace items missing snapshots
+  /**
+   * Write "we asked Amazon about this ASIN and it had no competitive data".
+   *
+   * All prices NULL on purpose: this is not a price, it is the record of a
+   * question. source distinguishes it from a real reading so the rows can be
+   * told apart later, and hasSnapshotSignal in buildSnapshotsMap already
+   * treats a signal-less snapshot as "fall back to an older one with real
+   * data", which is exactly the behaviour wanted here.
+   *
+   * An error here is swallowed: failing to record the attempt costs one
+   * redundant SP-API call next load, which is the behaviour we are improving
+   * on, not a reason to fail the fetch that just succeeded.
+   */
+  const recordSnapshotAttempt = async (asin: string, mp: string, offersCount: number | null) => {
+    if (!user?.id) return;
+    const { error } = await supabase.from("repricer_competitor_snapshots").insert({
+      user_id: user.id,
+      asin,
+      marketplace: mp,
+      buybox_price: null,
+      buybox_seller_id: null,
+      buybox_is_fba: null,
+      lowest_fba_price: null,
+      lowest_overall_price: null,
+      offers_count: offersCount,
+      fetched_at: new Date().toISOString(),
+      source: "sp-api-auto-empty",
+    });
+    if (error) {
+      console.warn(`[Repricer] Could not record empty-snapshot attempt for ${asin}:`, error.message);
+    }
+  };
+
+  // Auto-fetch for CURRENT marketplace items missing snapshots.
+  //
+  // RECORD THAT AMAZON WAS ASKED, NOT ONLY WHAT IT ANSWERED.
+  //
+  // "No snapshot row" meant two different things -- "we have never asked about
+  // this ASIN" and "we asked and Amazon had no competitive data to give" --
+  // and only the first is worth spending SP-API quota on. Two reasons the
+  // second was invisible:
+  //
+  //  1. The success-but-empty branches set snapshot_fetched_at in REACT STATE
+  //     only (setItems). Nothing was written to the database, and
+  //     snapshot_fetched_at is read back from repricer_competitor_snapshots on
+  //     the next load -- so the stamp died with the component and every ASIN
+  //     Amazon has nothing for was re-asked on every single page open. The
+  //     "Guard: Don't persist empty snapshots (no pricing data = waste)" below
+  //     is right about the PRICES and is what created the loop: it is the
+  //     attempt that needed recording, not the empty result.
+  //
+  //  2. This effect lists autoFetchingSnapshots among its dependencies and
+  //     also sets it, so finishing a batch of 3 re-runs the effect, which
+  //     picks the next 3, and so on. It is not a 3-item sample, it is a full
+  //     sweep of every item missing a snapshot, 3 at a time, ~2s apart. That
+  //     is deliberate and stays -- but it means defect 1 was re-buying the
+  //     whole set of permanently-empty ASINs from Amazon on each load.
+  //
+  // The attempt is now written as a snapshot row with every price NULL and
+  // source 'sp-api-auto-empty'. That is safe against hiding real data:
+  // buildSnapshotsMap already prefers an older snapshot WITH market signal
+  // over a newer one without it (hasSnapshotSignal), so an attempt marker can
+  // never shadow a genuine price -- it only answers "has this been asked?".
+  //
+  // Measured on the shipment-items sync, which had the identical defect: 131
+  // of 136 calls per run were re-learning the same nothing, spending ~65s of a
+  // 70s budget and starving the work that could still succeed.
   useEffect(() => {
     if (!user?.id || loading || items.length === 0 || autoFetchingSnapshots) return;
 
@@ -2593,6 +2807,10 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                   fetched_at: new Date().toISOString(),
                   source: "sp-api-auto",
                 });
+              } else {
+                // Amazon answered and had nothing. Record the ASKING, so the
+                // next page load does not buy this same nothing again.
+                await recordSnapshotAttempt(item.asin, marketplace, cd.totalOfferCount);
               }
 
               setItems(prev => prev.map(i => {
@@ -2612,6 +2830,9 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                 };
               }));
             } else if (!compError && compData?.success && !compData.data) {
+              // Definitive "nothing here". Same reasoning as above: the
+              // in-memory stamp alone died with the component.
+              await recordSnapshotAttempt(item.asin, marketplace, null);
               setItems(prev => prev.map(i => {
                 if (i.asin !== item.asin || i.marketplace !== marketplace) return i;
                 return { ...i, snapshot_fetched_at: new Date().toISOString() };
@@ -2724,7 +2945,16 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
                 fetched_at: new Date().toISOString(),
                 source: "sp-api-auto-intl",
               });
+            } else {
+              // Same defect as the current-marketplace sweep: without a
+              // record of the asking, every ASIN this marketplace has no
+              // offers for is re-bought on the next mount. Bounded here only
+              // because the eligibility check uses a 2-hour recency window --
+              // the attempt row satisfies that window, which is the point.
+              await recordSnapshotAttempt(item.asin, item.marketplace, cd.totalOfferCount);
             }
+          } else if (!compError && compData?.success && !compData.data) {
+            await recordSnapshotAttempt(item.asin, item.marketplace, null);
           }
 
           // 3s delay between cross-marketplace fetches (more conservative)
