@@ -472,6 +472,9 @@ export default function Dashboard() {
             .lte("order_date", todayDate)
             .not("order_id", "like", "%-REFUND")
             .order("purchase_timestamp_utc", { ascending: false })
+            // purchase_timestamp_utc is not unique, so it cannot order pages on its own:
+            // a tie spanning a page boundary repeats or skips rows. id breaks it.
+            .order("id", { ascending: true })
             .range(from, from + PAGE - 1);
           if (pageError) throw pageError;
           if (!page || page.length === 0) break;

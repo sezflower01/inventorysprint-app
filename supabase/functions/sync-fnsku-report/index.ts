@@ -511,7 +511,9 @@ async function phaseDownloadParseFbm(ctx: Ctx, row: any): Promise<PhaseResult> {
     const pageSize = 1000;
     let from = 0;
     for (;;) {
-      const { data } = await ctx.supabase.from('fnsku_sync_report_rows').select('sku').eq('sync_id', ctx.syncRecordId).eq('report_type', 'fba').range(from, from + pageSize - 1);
+      const { data } = await ctx.supabase.from('fnsku_sync_report_rows').select('sku').eq('sync_id', ctx.syncRecordId).eq('report_type', 'fba')
+        .order('id', { ascending: true })
+        .range(from, from + pageSize - 1);
       if (!data || data.length === 0) break;
       data.forEach((r: any) => existingFbaSkus.add(r.sku));
       if (data.length < pageSize) break;
@@ -587,6 +589,7 @@ async function phaseEnrichFba(ctx: Ctx, deadline: number, row: any): Promise<Pha
         .from('fnsku_sync_report_rows')
         .select('asin, available, reserved, inbound, unfulfilled')
         .eq('sync_id', ctx.syncRecordId).eq('report_type', 'fba').eq('enriched', false)
+        .order("id", { ascending: true })
         .range(from, from + pageSize - 1);
       if (!eligible || eligible.length === 0) break;
       for (const r of eligible) {
@@ -837,6 +840,7 @@ async function phaseBackfill(ctx: Ctx, deadline: number, row: any): Promise<Phas
       .eq('user_id', ctx.userId)
       .or('image_url.is.null,price.is.null,price.eq.0,amount.is.null,amount.eq.0')
       .eq('unit_cost_manual', false)
+      .order("id", { ascending: true })
       .range(offset, offset + BACKFILL_PAGE - 1);
     if (error) { console.error('Error fetching backfill page:', error); break; }
     if (!page || page.length === 0) break;
@@ -893,6 +897,7 @@ async function phaseOuterEnrich(ctx: Ctx, deadline: number, row: any): Promise<P
       .eq('user_id', ctx.userId)
       .eq('source', 'amazon_sync')
       .or('image_url.is.null,price.is.null,price.eq.0,unit_cost.is.null,unit_cost.eq.0')
+      .order("id", { ascending: true })
       .range(offset, offset + OUTER_ENRICH_BATCH - 1);
     if (error) {
       console.error('Error fetching outer-enrichment page:', error);

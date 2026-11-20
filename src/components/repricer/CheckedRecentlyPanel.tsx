@@ -159,6 +159,9 @@ export default function CheckedRecentlyPanel() {
           )
         )
           .order("created_at", { ascending: false })
+          // created_at is not unique, so it cannot order pages on its own:
+          // a tie spanning a page boundary repeats or skips rows. id breaks it.
+          .order("id", { ascending: true })
           .range(pageIndex * ROW_PAGE_SIZE, (pageIndex + 1) * ROW_PAGE_SIZE - 1);
 
         if (res.error) {

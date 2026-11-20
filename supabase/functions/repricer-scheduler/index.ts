@@ -190,7 +190,16 @@ Deno.serve(async (req) => {
       .in('status', ['active', 'needs_attention'])
       .not('min_price_override', 'is', null)
       .gt('min_price_override', 0)
-      .order('last_sp_api_check_at', { ascending: true, nullsFirst: true });
+      // last_sp_api_check_at is NOT unique -- many rows share a check time and
+      // the nullsFirst block can be large -- so on its own it cannot order the
+      // pages below: a tie spanning a page boundary means some assignments are
+      // dispatched twice and others never. id makes the order total while
+      // keeping stalest-first as the priority.
+      //
+      // Applied HERE and not in the loop: assignmentsQuery is a reused builder,
+      // so a modifier added inside the loop is appended again every iteration.
+      .order('last_sp_api_check_at', { ascending: true, nullsFirst: true })
+      .order('id', { ascending: true });
 
     // Force-all mode: also require rule_id
     if (force_all) {

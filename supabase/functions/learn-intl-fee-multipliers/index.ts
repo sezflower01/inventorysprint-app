@@ -293,6 +293,7 @@ async function processUserMarketplace(
       .eq("marketplace", marketplace)
       .gte("event_date", windowStart)
       .lte("event_date", windowEnd)
+      .order("id", { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) {
       console.warn(

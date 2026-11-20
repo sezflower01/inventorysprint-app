@@ -63,7 +63,15 @@ async function loadPaged(
         .in("user_id", uniqueUsers)
         .in("asin", chunk);
       if (extra) q = extra(q);
-      const { data, error } = await q.range(from, from + PAGE - 1);
+      // asin_cog_for_repricer is a VIEW with no id column; (user_id, asin) is
+      // unique in it, so this is a total order. Required because two .range()
+      // pages are two independent queries with no promised row order between
+      // them -- and a COG this loop drops falls back to the old cost source,
+      // which is the bug this module exists to remove.
+      const { data, error } = await q
+        .order("user_id", { ascending: true })
+        .order("asin", { ascending: true })
+        .range(from, from + PAGE - 1);
       // Throw rather than return a partial map: a short read silently hands
       // those ASINs back to the old cost source, which is the bug this
       // module exists to remove.

@@ -188,6 +188,7 @@ async function aggregateLive(
       .eq("user_id", userId)
       .gte("order_date", startISO)
       .lte("order_date", endISO)
+      .order("id", { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw new Error(`promo query failed: ${error.message}`);
     const rows = data ?? [];

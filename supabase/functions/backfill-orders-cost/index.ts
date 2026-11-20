@@ -100,6 +100,7 @@ Deno.serve(async (req) => {
         .or(
           "unit_cost.is.null,unit_cost.eq.0,title.is.null,title.eq.,title.eq.-,title.eq.Order Processing...,image_url.is.null,image_url.eq."
         )
+        .order("id", { ascending: true })
         .range(from, from + PAGE - 1);
       if (error) throw error;
       if (!data || data.length === 0) break;
@@ -126,10 +127,12 @@ Deno.serve(async (req) => {
     ): Promise<T[]> {
       const all: T[] = [];
       for (let from = 0; ; from += PAGE_LOOKUP) {
-        const { data, error } = await builder().range(
-          from,
-          from + PAGE_LOOKUP - 1
-        );
+        // Applied HERE rather than in each caller's builder: all three
+        // tables below carry an id, and a caller cannot be relied on to
+        // remember an ORDER BY that only matters past row 1000.
+        const { data, error } = await builder()
+          .order("id", { ascending: true })
+          .range(from, from + PAGE_LOOKUP - 1);
         if (error) {
           console.error(`[backfill-orders-cost] load ${label} failed:`, error.message);
           throw error;

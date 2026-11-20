@@ -135,6 +135,7 @@ export default function FbaEligibilityIssues() {
           .from("inventory")
           .select("id, asin, sku, fnsku, title, image_url, available, reserved, inbound, fba_blocked, fba_block_reason, listing_status")
           .eq("user_id", user.id)
+          .order("id", { ascending: true })
           .range(from, from + PAGE - 1);
         if (error) throw error;
         if (!data || data.length === 0) break;

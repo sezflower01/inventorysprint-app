@@ -282,6 +282,7 @@ Deno.serve(async (req) => {
         .eq("user_id", userId)
         .not("asin", "is", null)
         .not("sku", "is", null)
+        .order("id", { ascending: true })
         .range(invPageStart, invPageStart + INV_PAGE_SIZE - 1);
       if (invErr) {
         console.error("[auto-assign-bulk] Inventory fetch error:", invErr);
@@ -339,6 +340,7 @@ Deno.serve(async (req) => {
             .eq('user_id', userId)
             .not('asin', 'is', null)
             .not('sku', 'is', null)
+            .order("id", { ascending: true })
             .range(fbmStart, fbmStart + FBM_PAGE - 1);
           if (!page || page.length === 0) break;
           fbmListingsAll.push(...page);
@@ -428,6 +430,7 @@ Deno.serve(async (req) => {
           .select("id, asin, sku, marketplace, rule_id, is_enabled, min_price_override, max_price_override, roi_at_min_percent, roi_at_max_percent, last_applied_price, manual_paused, last_disabled_by, intl_listing_status, marketplace_sellable, is_listing_inactive_not_buyable")
           .eq("user_id", userId)
           .eq("marketplace", marketplace)
+          .order("id", { ascending: true })
           .range(start, start + EA_PAGE - 1);
         if (!page || page.length === 0) break;
         existingAssignmentsAll.push(...page);
@@ -464,6 +467,7 @@ Deno.serve(async (req) => {
           .select("asin, sku, price, cost, units, amount")
           .eq("user_id", userId)
           .not("asin", "is", null)
+          .order("id", { ascending: true })
           .range(start, start + CL_PAGE - 1);
         if (!page || page.length === 0) break;
         costListingsAll.push(...page);

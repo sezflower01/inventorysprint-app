@@ -177,6 +177,9 @@ export default function ActivityLog() {
         .from("repricer_price_actions")
         .select("*", { count: "exact" })
         .order("created_at", { ascending: false })
+        // created_at is not unique, so it cannot order pages on its own:
+        // a tie spanning a page boundary repeats or skips rows. id breaks it.
+        .order("id", { ascending: true })
         .range(from, to);
 
       const dateStart = getDateRange();

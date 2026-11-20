@@ -234,6 +234,9 @@ export default function FeeBreakdownSections({ rangeStart, rangeEnd, label, dark
           .gte("event_date", rangeStart)
           .lte("event_date", rangeEnd)
           .order("event_date", { ascending: false })
+          // event_date is not unique, so it cannot order pages on its own:
+          // a tie spanning a page boundary repeats or skips rows. id breaks it.
+          .order("id", { ascending: true })
           .range(from, from + PAGE - 1);
         if (error) {
           console.warn("[FeeBreakdownSections] fetch error:", error.message);

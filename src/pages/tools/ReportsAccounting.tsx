@@ -284,6 +284,9 @@ export default function ReportsAccounting() {
         // Apply ordering and pagination last
         const { data, error } = await query
           .order("order_date", { ascending: false })
+          // order_date is not unique, so it cannot order pages on its own:
+          // a tie spanning a page boundary repeats or skips rows. id breaks it.
+          .order("id", { ascending: true })
           .range(offset, offset + PAGE_SIZE - 1);
 
         if (error) throw error;

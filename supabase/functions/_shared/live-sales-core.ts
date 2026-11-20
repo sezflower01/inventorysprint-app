@@ -783,6 +783,7 @@ async function fetchRefundsByDay(admin: any, userId: string, startISO: string, e
       .select("event_date, refunds, promotional_rebate_refunds, shipping_credit_refunds, shipping_chargeback_refund, gift_wrap_credit_refunds, referral_fees, amazon_order_id")
       .eq("user_id", userId).eq("event_type", "refund")
       .gte("event_date", startISO).lte("event_date", endISO)
+      .order("id", { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw error;
     if (!data || data.length === 0) break;

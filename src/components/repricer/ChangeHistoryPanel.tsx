@@ -204,6 +204,9 @@ export default function ChangeHistoryPanel() {
         .select("*")
         .gte("created_at", rangeStart.toISOString())
         .order("created_at", { ascending: false })
+        // created_at is not unique, so it cannot order pages on its own:
+        // a tie spanning a page boundary repeats or skips rows. id breaks it.
+        .order("id", { ascending: true })
         .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
       if (targetUserId) {

@@ -29,6 +29,7 @@ Deno.serve(async (req) => {
     const { data, error } = await admin.from("sales_orders")
       .select("user_id, order_date")
       .gte("order_date", since)
+      .order("id", { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) { console.error("user enumeration error", error); break; }
     if (!data || data.length === 0) break;

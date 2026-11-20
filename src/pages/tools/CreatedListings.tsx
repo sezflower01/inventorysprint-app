@@ -264,6 +264,7 @@ export default function CreatedListings() {
       const { data, error } = await (supabase as any)
         .from("active_created_listings")
         .select("id")
+        .order("id", { ascending: true })
         .range(offset, offset + PAGE - 1);
       if (error) {
         console.warn("[Phase3] active_created_listings fetch failed:", error);
@@ -489,6 +490,9 @@ export default function CreatedListings() {
           .from("created_listings")
           .select("*")
           .order("created_at", { ascending: false })
+          // created_at is not unique, so it cannot order pages on its own:
+          // a tie spanning a page boundary repeats or skips rows. id breaks it.
+          .order("id", { ascending: true })
           .range(offset, offset + batchSize - 1);
 
         if (error) {
@@ -963,6 +967,9 @@ export default function CreatedListings() {
           .select("asin, sku, created_at")
           .eq("user_id", user.id)
           .order("created_at", { ascending: true })
+          // created_at is not unique, so it cannot order pages on its own:
+          // a tie spanning a page boundary repeats or skips rows. id breaks it.
+          .order("id", { ascending: true })
           .range(from, from + PAGE - 1);
         if (error) throw error;
         const rows = data || [];
@@ -980,6 +987,7 @@ export default function CreatedListings() {
           .from("inventory")
           .select("asin, sku")
           .eq("user_id", user.id)
+          .order("id", { ascending: true })
           .range(invFrom, invFrom + PAGE - 1);
         if (error) break;
         const rows = data || [];

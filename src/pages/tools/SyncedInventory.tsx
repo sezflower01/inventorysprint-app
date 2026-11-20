@@ -344,6 +344,7 @@ const fetchFeeCacheMap = async (userId: string): Promise<Map<string, { fba_fee_f
       .select("asin, fba_fee_fixed, referral_rate")
       .eq("user_id", userId)
       .eq("marketplace", "US")
+      .order("id", { ascending: true })
       .range(from, from + pageSize - 1);
     if (error) {
       console.warn("[fetchFeeCacheMap] query failed:", error);
@@ -522,6 +523,9 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
         .select("asin, sku, cost, amount, units, image_url, price, created_at, date_created")
         .eq('user_id', userId)
         .order("created_at", { ascending: false })
+        // created_at is not unique, so it cannot order pages on its own:
+        // a tie spanning a page boundary repeats or skips rows. id breaks it.
+        .order("id", { ascending: true })
         .range(clFrom, clFrom + clBatchSize - 1);
       if (clError) {
         console.error("Error fetching created listings for cost map:", clError);
@@ -561,6 +565,9 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
         .select("asin, unit_cost")
         .eq("user_id", userId)
         .not("unit_cost", "is", null)
+        // A VIEW with no id column; (user_id, asin) is unique here,
+        // so it is a total order for .range() paging.
+        .order("user_id", { ascending: true }).order("asin", { ascending: true })
         .range(cogFrom, cogFrom + cogBatchSize - 1);
       if (cogError) {
         console.error("Error fetching COG on record:", cogError);
@@ -646,6 +653,7 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
       .select('asin, quantity, order_date')
       .eq('user_id', userId)
       .gte('order_date', periodStartStr)
+      .order("id", { ascending: true })
       .range(salesFrom, salesFrom + salesBatchSize - 1);
     
     if (salesError) {
@@ -699,6 +707,7 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
       .from('sales_orders')
       .select('asin, quantity, order_date')
       .eq('user_id', userId)
+      .order("id", { ascending: true })
       .range(histSalesFrom, histSalesFrom + salesBatchSize - 1);
     
     if (histSalesError) {
@@ -749,6 +758,7 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
         .from("created_listings")
         .select("*")
         .eq('user_id', userId)
+        .order("id", { ascending: true })
         .range(clMergeFrom, clMergeFrom + clMergeBatch - 1);
       if (clError2) {
         console.error("Error fetching created_listings for merge:", clError2);
@@ -773,6 +783,7 @@ const fetchInventoryData = async (userId: string, salesPeriodDays: number): Prom
       .select('asin, title, image_url')
       .eq('user_id', userId)
       .not('title', 'is', null)
+      .order("id", { ascending: true })
       .range(infoFrom, infoFrom + infoBatchSize - 1);
     
     if (infoError) {
@@ -1759,6 +1770,7 @@ export default function SyncedInventory() {
           .from('created_listings')
           .select('sku, asin, cost, amount, units')
           .eq('user_id', user.id)
+          .order("id", { ascending: true })
           .range(listingsFrom, listingsFrom + listingsBatchSize - 1);
         
         if (listingsError) throw listingsError;
@@ -1798,6 +1810,7 @@ export default function SyncedInventory() {
           .from('inventory')
           .select('id, sku, asin, cost')
           .eq('user_id', user.id)
+          .order("id", { ascending: true })
           .range(invFrom, invFrom + invBatchSize - 1);
         
         if (invError) throw invError;

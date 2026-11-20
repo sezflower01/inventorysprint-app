@@ -52,6 +52,7 @@ export default function SetupIncompletePanel({ marketplace }: { marketplace?: st
           .eq("user_id", user.id)
           .eq("status", "active")
           .eq("is_enabled", true)
+          .order("id", { ascending: true })
           .range(page * PAGE, (page + 1) * PAGE - 1);
         if (error || !data || data.length === 0) break;
         all = all.concat(data);
@@ -183,6 +184,7 @@ export default function SetupIncompletePanel({ marketplace }: { marketplace?: st
           .eq("status", "active")
           .eq("is_enabled", true)
           .is("last_applied_price", null)
+          .order("id", { ascending: true })
           .range(page * PAGE, (page + 1) * PAGE - 1);
         if (error || !data || data.length === 0) break;
         caNoPrice = caNoPrice.concat(data);

@@ -121,6 +121,7 @@ async function runFromCursor(ctx: Ctx) {
             .from('inventory')
             .select('asin, sku, listing_status, source')
             .eq('user_id', userId)
+            .order("id", { ascending: true })
             .range(from, from + PAGE - 1);
           if (error) { console.error(`[${ctx.runId}] ${userId} inventory query error: ${error.message}`); break; }
           if (!data || data.length === 0) break;
@@ -272,7 +273,9 @@ Deno.serve(async (req) => {
     let from = 0;
     const PAGE = 1000;
     for (let i = 0; i < 200; i++) {
-      const { data, error } = await supabase.from('repricer_assignments').select('user_id').eq('is_enabled', true).range(from, from + PAGE - 1);
+      const { data, error } = await supabase.from('repricer_assignments').select('user_id').eq('is_enabled', true)
+        .order('id', { ascending: true })
+        .range(from, from + PAGE - 1);
       if (error) { console.error(`[${runTag}] users query error: ${error.message}`); break; }
       if (!data || data.length === 0) break;
       for (const r of data) if (r.user_id) seen.add(r.user_id);

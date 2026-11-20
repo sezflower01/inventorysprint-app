@@ -91,6 +91,7 @@ Deno.serve(async (req) => {
         .eq('user_id', user.id)
         .eq('status', 'active')
         .is('min_price_override', null)
+        .order("id", { ascending: true })
         .range(page * PAGE, (page + 1) * PAGE - 1);
 
       if (marketplace) {

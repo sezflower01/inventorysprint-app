@@ -165,6 +165,7 @@ export default function NeedBuyAgain() {
           supabase.from("inventory")
             .select("asin, title, image_url, available, inbound, reserved, sku, amazon_price, my_price, price, cost, amount, units, listing_status")
             .eq("user_id", userId)
+            .order("id", { ascending: true })
             .range(from, to)
         ),
         fetchAllPaged((from, to) =>
@@ -172,12 +173,14 @@ export default function NeedBuyAgain() {
             .select("asin, quantity, order_date")
             .eq("user_id", userId)
             .gte("order_date", periodStartStr)
+            .order("id", { ascending: true })
             .range(from, to)
         ),
         fetchAllPaged((from, to) =>
           supabase.from("sales_orders")
             .select("asin, quantity, order_date")
             .eq("user_id", userId)
+            .order("id", { ascending: true })
             .range(from, to)
         ),
         fetchAllPaged((from, to) =>
@@ -196,6 +199,7 @@ export default function NeedBuyAgain() {
             .select("asin, sku, title, supplier_links, image_url, amount, cost, units, updated_at, validation_status")
             .or("validation_status.is.null,validation_status.eq.ACTIVE")
             .eq("user_id", userId)
+            .order("id", { ascending: true })
             .range(from, to)
         ),
         fetchAllPaged((from, to) =>
@@ -203,6 +207,7 @@ export default function NeedBuyAgain() {
             .select("asin, marketplace, fba_fee_fixed, referral_rate, is_media")
             .eq("user_id", userId)
             .eq("marketplace", "US")
+            .order("id", { ascending: true })
             .range(from, to)
         ),
         fetchAllPaged((from, to) =>
@@ -210,6 +215,7 @@ export default function NeedBuyAgain() {
             .select("shipment_id, received_date")
             .eq("user_id", userId)
             .not("received_date", "is", null)
+            .order("id", { ascending: true })
             .range(from, to)
         ),
         fetchAllPaged((from, to) =>
@@ -217,6 +223,7 @@ export default function NeedBuyAgain() {
             .select("shipment_id, asin, quantity_received")
             .eq("user_id", userId)
             .gt("quantity_received", 0)
+            .order("id", { ascending: true })
             .range(from, to)
         ),
       ]);
@@ -275,6 +282,9 @@ export default function NeedBuyAgain() {
             .select("asin, unit_cost")
             .eq("user_id", user.id)
             .not("unit_cost", "is", null)
+            // A VIEW with no id column; (user_id, asin) is unique here,
+            // so it is a total order for .range() paging.
+            .order("user_id", { ascending: true }).order("asin", { ascending: true })
             .range(from, from + PAGE - 1);
           if (cogErr) { console.warn("[NeedBuyAgain] COG read failed:", cogErr.message); break; }
           if (!cogRows) break;

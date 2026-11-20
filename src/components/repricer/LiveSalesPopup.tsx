@@ -432,6 +432,7 @@ const LiveSalesPopup = ({ open, onOpenChange, marketplace: initialMarketplace = 
               .eq("event_type", "shipment")
               .gte("event_date", cutoffDate)
               .lte("event_date", todayStr)
+              .order("id", { ascending: true })
               .range(from, from + FEC_PAGE - 1);
             if (fecErr) { console.warn("[LiveSalesPopup] FEC fallback error:", fecErr); break; }
             if (!fecPage || fecPage.length === 0) break;

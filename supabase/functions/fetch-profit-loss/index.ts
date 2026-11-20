@@ -354,6 +354,7 @@ async function aggregateFromCacheLegacy(
       .eq('user_id', userId)
       .gte('event_date', startDate)
       .lte('event_date', endDate)
+      .order("id", { ascending: true })
       .range(from, from + PAGE_SIZE - 1);
 
     if (error) {
@@ -2252,6 +2253,7 @@ serve(async (req) => {
           .eq('user_id', userId)
           .gte('order_date', startDate.split('T')[0])
           .lte('order_date', endDate.split('T')[0])
+          .order("id", { ascending: true })
           .range(offset, offset + PAGE_SIZE - 1);
 
         if (salesError) {
@@ -2497,6 +2499,7 @@ serve(async (req) => {
             .eq('user_id', userId)
             .gte('order_date', startDate.split('T')[0])
             .lte('order_date', endDate.split('T')[0])
+            .order("id", { ascending: true })
             .range(offset, offset + PAGE_SIZE - 1);
 
           if (salesError) {

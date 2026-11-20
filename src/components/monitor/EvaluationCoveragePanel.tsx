@@ -86,6 +86,7 @@ export default function EvaluationCoveragePanel() {
             .from("repricer_assignments")
             .select("id, asin, sku, status, last_sp_api_check_at, paused_reason, is_enabled, rule_id, marketplace, is_priority")
             .eq("user_id", user!.id)
+            .order("id", { ascending: true })
             .range(page * PAGE, (page + 1) * PAGE - 1);
           if (error || !data || data.length === 0) break;
           all = all.concat(data);

@@ -227,6 +227,7 @@ Deno.serve(async (req) => {
           .from('inventory')
           .select('id, asin, sku, listing_status, source')
           .eq('user_id', userId)
+          .order("id", { ascending: true })
           .range(_from, _from + 999);
         if (!page?.length) break;
         for (const r of page) existingRecordsMapArr.push(r as any);
@@ -444,7 +445,9 @@ Deno.serve(async (req) => {
       const localSkusToCheck: { id: string; sku: string; asin: string }[] = [];
       let checkFrom = 0;
       while (true) {
-        const { data: batch } = await supabase.from('inventory').select('id, sku, asin, source, listing_status').eq('user_id', userId).range(checkFrom, checkFrom + 999);
+        const { data: batch } = await supabase.from('inventory').select('id, sku, asin, source, listing_status').eq('user_id', userId)
+          .order('id', { ascending: true })
+          .range(checkFrom, checkFrom + 999);
         if (!batch?.length) break;
         for (const r of batch) {
           const listingStatus = String(r.listing_status || '').toUpperCase();

@@ -141,7 +141,12 @@ const MyDatabaseProducts = () => {
       let query = (supabase.from('user_owned_products' as any) as any)
         .select('*', { count: 'exact' })
         .eq('user_id', user.id)
-        .order('delivered_at', { ascending: false });
+        // delivered_at is NULL on many rows, so on its own it is not an order
+        // at all for those: paging a tie block repeats some rows on one page
+        // and loses others entirely. id makes it total while leaving
+        // newest-delivered-first as the visible sort.
+        .order('delivered_at', { ascending: false })
+        .order('id', { ascending: true });
 
       if (q.trim()) {
         const term = q.trim();
@@ -225,6 +230,9 @@ const MyDatabaseProducts = () => {
           .select('*')
           .eq('user_id', user.id)
           .order('delivered_at', { ascending: false })
+          // delivered_at is not unique, so it cannot order pages on its own:
+          // a tie spanning a page boundary repeats or skips rows. id breaks it.
+          .order("id", { ascending: true })
           .range(offset, offset + batch - 1);
         if (error) throw error;
         if (!data || data.length === 0) break;

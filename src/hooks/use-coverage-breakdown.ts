@@ -66,6 +66,7 @@ export function useCoverageBreakdown(): CoverageBreakdown {
           .eq("user_id", user.id)
           .eq("is_enabled", true)
           .eq("status", "active")
+          .order("id", { ascending: true })
           .range(page * PAGE, (page + 1) * PAGE - 1);
         if (!batch || batch.length === 0) break;
         allAssignments = allAssignments.concat(batch);

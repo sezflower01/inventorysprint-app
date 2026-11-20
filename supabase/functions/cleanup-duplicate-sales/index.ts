@@ -66,6 +66,7 @@ Deno.serve(async (req) => {
       .select('id, order_id, asin, quantity, sold_price')
       .eq('user_id', userId)
       .not('order_id', 'like', '%-REFUND')
+      .order("id", { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) {
       console.error('[CLEANUP_DUPES] Fetch error:', (error as Error).message);

@@ -270,6 +270,9 @@ export default function Inventory() {
           .select("*")
           .eq('user_id', user?.id)
           .order("created_at", { ascending: false })
+          // created_at is not unique, so it cannot order pages on its own:
+          // a tie spanning a page boundary repeats or skips rows. id breaks it.
+          .order("id", { ascending: true })
           .range(from, from + batchSize - 1);
 
         if (error) {

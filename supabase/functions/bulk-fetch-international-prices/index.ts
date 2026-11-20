@@ -234,6 +234,7 @@ Deno.serve(async (req) => {
           .from("inventory")
           .select("asin, sku")
           .eq("user_id", userId)
+          .order("id", { ascending: true })
           .range(from, from + pageSize - 1);
         if (error) throw error;
         if (!data?.length) break;
@@ -316,6 +317,7 @@ Deno.serve(async (req) => {
         .eq("marketplace_id", mktConfig.id)
         .gt("fetched_at", recentCutoff)
         .neq("seller_sku", "__NO_SKU__")
+        .order("id", { ascending: true })
         .range(cacheFrom, cacheFrom + 999);
       if (!cachedItems?.length) break;
       for (const c of cachedItems) cachedKeys.add(`${c.asin}|${c.seller_sku}`);

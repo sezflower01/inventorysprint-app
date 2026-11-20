@@ -120,7 +120,14 @@ Deno.serve(async (req) => {
       const { data: oldest } = await supabase
         .from('repricer_competitor_snapshots')
         .select('fetched_at')
+        // Not paging -- this reads ONE row, the (overflow-1)th oldest, to use
+        // its fetched_at as a delete cutoff. fetched_at is not unique, so
+        // without a tiebreaker "the Nth oldest row" is whichever row Postgres
+        // happened to place there, and the cutoff moved between runs. id makes
+        // the pick deterministic. The cutoff value itself is unchanged except
+        // within a tie.
         .order('fetched_at', { ascending: true })
+        .order('id', { ascending: true })
         .limit(1)
         .range(overflow - 1, overflow - 1);
 
@@ -155,6 +162,7 @@ Deno.serve(async (req) => {
             .from('repricer_assignments')
             .select('id, asin, sku, user_id, marketplace')
             .eq('is_enabled', true)
+            .order("id", { ascending: true })
             .range(page * 500, (page + 1) * 500 - 1);
           if (!batch || batch.length === 0) break;
           allEnabled = allEnabled.concat(batch);

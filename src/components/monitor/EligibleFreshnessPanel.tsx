@@ -402,6 +402,7 @@ export default function EligibleFreshnessPanel({ onMetricsReady }: EligibleFresh
           .eq("user_id", user.id)
           .eq("status", "active")
           .eq("is_enabled", true)
+          .order("id", { ascending: true })
           .range(page * PAGE, (page + 1) * PAGE - 1);
         if (error || !rows || rows.length === 0) break;
         allAssignments = allAssignments.concat(rows);

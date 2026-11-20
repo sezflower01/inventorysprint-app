@@ -774,6 +774,7 @@ async function scoreAllCandidates(
       .in('status', ['active', 'needs_attention'])
       .not('min_price_override', 'is', null)
       .gt('min_price_override', 0)
+      .order("id", { ascending: true })
       .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
     if (error) { console.error('[unified-dispatch] fetch error:', error); break; }

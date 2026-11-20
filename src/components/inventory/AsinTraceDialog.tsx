@@ -139,6 +139,7 @@ export default function AsinTraceDialog({ asin, title, open, onOpenChange }: Pro
           .select("marketplace, quantity, refund_quantity, order_date")
           .eq("user_id", user.id)
           .eq("asin", asin)
+          .order("id", { ascending: true })
           .range(from, from + 999);
         if (error) { console.warn("[asin-trace] sales_orders:", error.message); break; }
         const batch = data ?? [];

@@ -140,6 +140,9 @@ export default function OrdersCostEditor({
           .gte("order_date", startDate)
           .lte("order_date", endDate)
           .order("order_date", { ascending: false })
+          // order_date is not unique, so it cannot order pages on its own:
+          // a tie spanning a page boundary repeats or skips rows. id breaks it.
+          .order("id", { ascending: true })
           .range(from, from + PAGE - 1);
 
         if (error) {

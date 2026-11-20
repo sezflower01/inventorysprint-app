@@ -890,6 +890,7 @@ const LiveSales = ({
             .eq("user_id", user.id)
             .gte("event_date", rangeStart)
             .lte("event_date", rangeEnd)
+            .order("id", { ascending: true })
             .range(from, from + PAGE - 1);
           if (selectedMarketplace && selectedMarketplace !== "ALL") {
             // Settlement credits (warehouse_lost/damage, reimbursements, other_income) and

@@ -1267,6 +1267,9 @@ serve(async (req) => {
             // Without an explicit order, a capped page is arbitrary heap order
             // and paging past it can return rows it already showed.
             .order('shipment_id', { ascending: true })
+            // shipment_id is not unique, so it cannot order pages on its own:
+            // a tie spanning a page boundary repeats or skips rows. id breaks it.
+            .order("id", { ascending: true })
             .range(offset, offset + limit - 1);
           return error ? { rows: null, error: error.message } : { rows: data ?? [] };
         },
@@ -1308,6 +1311,9 @@ serve(async (req) => {
             .in('shipment_id', chunk)
             .eq('items_found_count', 0)
             .order('shipment_id', { ascending: true })
+            // shipment_id is not unique, so it cannot order pages on its own:
+            // a tie spanning a page boundary repeats or skips rows. id breaks it.
+            .order("id", { ascending: true })
             .range(offset, offset + limit - 1);
           return error ? { rows: null, error: error.message } : { rows: data ?? [] };
         },

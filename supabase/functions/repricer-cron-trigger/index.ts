@@ -69,6 +69,7 @@ async function classifyAssignments(
       .not('min_price_override', 'is', null)
       .gt('min_price_override', 0)
       .in('status', ['active', 'needs_attention'])
+      .order("id", { ascending: true })
       .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
     
     if (error) { fetchError = error; break; }
@@ -95,6 +96,7 @@ async function classifyAssignments(
         .gt('min_price_override', 0)
         .in('marketplace', ['CA', 'MX', 'BR'])
         .in('status', ['active', 'needs_attention'])
+        .order("id", { ascending: true })
         .range(intlPage * PAGE_SIZE, (intlPage + 1) * PAGE_SIZE - 1);
       
       if (error) { console.error('[cron-trigger] intl inheritance fetch error:', error); break; }

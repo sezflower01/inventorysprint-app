@@ -81,6 +81,9 @@ export default function CancelledOrdersSection({ rangeStart, rangeEnd, label, da
           .not("order_id", "like", "%-REFUND")
           .or("is_cancelled.eq.true,order_status.eq.Canceled,order_status.eq.Cancelled")
           .order("order_date", { ascending: false })
+          // order_date is not unique, so it cannot order pages on its own:
+          // a tie spanning a page boundary repeats or skips rows. id breaks it.
+          .order("id", { ascending: true })
           .range(from, from + PAGE - 1);
 
         if (error) {

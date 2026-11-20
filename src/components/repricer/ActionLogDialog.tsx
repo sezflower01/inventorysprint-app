@@ -1523,6 +1523,9 @@ export default function ActionLogDialog({ asin, sku, marketplace, open, onOpenCh
         .eq("asin", asin)
         .eq("marketplace", marketplace)
         .order("created_at", { ascending: false })
+        // created_at is not unique, so it cannot order pages on its own:
+        // a tie spanning a page boundary repeats or skips rows. id breaks it.
+        .order("id", { ascending: true })
         .range(priceActions.length, priceActions.length + ACTION_LOG_PAGE_SIZE - 1);
       if (error) throw error;
       const more = ((data || []) as unknown as PriceAction[]).map((a) =>

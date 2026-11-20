@@ -143,6 +143,9 @@ Deno.serve(async (req) => {
         .eq('user_id', user.id)
         .eq('qualified', true)
         .order('detected_at', { ascending: true })
+        // detected_at is not unique, so it cannot order pages on its own:
+        // a tie spanning a page boundary repeats or skips rows. id breaks it.
+        .order("id", { ascending: true })
         .range(from, from + PAGE - 1);
       if (error) return json({ error: error.message }, 500);
       if (!data?.length) break;

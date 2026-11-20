@@ -125,6 +125,7 @@ Deno.serve(async (req) => {
         .from("inventory")
         .select("user_id, asin, available, reserved, inbound, listing_status")
         .or("available.gt.0,reserved.gt.0,inbound.gt.0")
+        .order("id", { ascending: true })
         .range(from, from + pageSize - 1);
       if (invErr) throw invErr;
       const rows = invRows || [];

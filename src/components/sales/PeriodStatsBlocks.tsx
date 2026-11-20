@@ -1827,6 +1827,9 @@ export default function PeriodStatsBlocks({
           .lte('order_date', range.end)
           .not('order_id', 'like', '%-REFUND')
           .order('order_date', { ascending: true })
+          // order_date is not unique, so it cannot order pages on its own:
+          // a tie spanning a page boundary repeats or skips rows. id breaks it.
+          .order("id", { ascending: true })
           .range(from, from + PAGE - 1);
 
         if (Array.isArray(selectedMarketplaces) && selectedMarketplaces.length > 0 && selectedMarketplaces.length < 4) {

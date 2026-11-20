@@ -212,6 +212,7 @@ export function NeedBuyAgainDialog({ open, onOpenChange, userId }: NeedBuyAgainD
           supabase.from("inventory")
             .select("asin, title, image_url, available, inbound, reserved, unfulfilled, sku, listing_status")
             .eq("user_id", userId)
+            .order("id", { ascending: true })
             .range(from, to)
         ),
         fetchAllPaged((from, to) =>
@@ -219,18 +220,21 @@ export function NeedBuyAgainDialog({ open, onOpenChange, userId }: NeedBuyAgainD
             .select("asin, quantity, order_date")
             .eq("user_id", userId)
             .gte("order_date", periodStartStr)
+            .order("id", { ascending: true })
             .range(from, to)
         ),
         fetchAllPaged((from, to) =>
           supabase.from("sales_orders")
             .select("asin, quantity, order_date")
             .eq("user_id", userId)
+            .order("id", { ascending: true })
             .range(from, to)
         ),
         fetchAllPaged((from, to) =>
           supabase.from("created_listings")
             .select("asin, sku, title, supplier_links, image_url")
             .eq("user_id", userId)
+            .order("id", { ascending: true })
             .range(from, to)
         ),
       ]);

@@ -180,6 +180,9 @@ export default function PriceHistoryTab({ marketplace }: { marketplace: string }
         .gte("created_at", from)
         .lte("created_at", to)
         .order("created_at", { ascending: false })
+        // created_at is not unique, so it cannot order pages on its own:
+        // a tie spanning a page boundary repeats or skips rows. id breaks it.
+        .order("id", { ascending: true })
         .range(pageNum * PAGE_SIZE, (pageNum + 1) * PAGE_SIZE - 1);
 
       if (filterAsin.trim()) q = q.ilike("asin", `%${filterAsin.trim()}%`);

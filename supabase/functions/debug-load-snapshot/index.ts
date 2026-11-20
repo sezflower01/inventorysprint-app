@@ -879,6 +879,7 @@ Deno.serve(async (req) => {
           .neq('marketplace', 'US')
           .not('intl_listing_status', 'is', null)
           .neq('intl_listing_status', 'NOT_FOUND')
+          .order("id", { ascending: true })
           .range(from, from + pageSize - 1);
         if (onlyEnabled) q = q.eq('is_enabled', true);
         const { data: page, error } = await q;
@@ -958,6 +959,7 @@ Deno.serve(async (req) => {
           .neq('marketplace', 'US')
           .not('intl_listing_status', 'is', null)
           .neq('intl_listing_status', 'NOT_FOUND')
+          .order("id", { ascending: true })
           .range(from, from + pageSize - 1);
         if (error) return new Response(JSON.stringify({ error: error.message }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         const rows = page || [];

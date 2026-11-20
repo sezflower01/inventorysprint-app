@@ -359,6 +359,16 @@ export default function CogOnRecord() {
     }
     try {
       const all: ProductRow[] = [];
+      // No .order() here ON PURPOSE. get_cog_page_products ends in
+      //   ORDER BY p.date_created DESC NULLS LAST, p.last_created_at DESC, k.asin
+      // and returns one row per ASIN, so k.asin makes that a TOTAL order. Each
+      // .range() page re-executes the function and gets the same sequence, so
+      // paging it is safe. Adding .order() here would override the function's
+      // own newest-first sort and change what the page shows.
+      //
+      // That is the test for any set-returning function paged with .range():
+      // a PARTIAL internal ORDER BY is not enough -- it has to end in a column
+      // that is unique in the result.
       for (let from = 0; ; from += FETCH_CHUNK) {
         const { data, error } = await db.rpc("get_cog_page_products").range(from, from + FETCH_CHUNK - 1);
         if (error) throw error;

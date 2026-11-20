@@ -88,6 +88,7 @@ async function detectFromListingCount(
       .eq("user_id", userId)
       .eq("is_enabled", true)
       .not("rule_id", "is", null)
+      .order("id", { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw error;
     if (!page || page.length === 0) break;
@@ -143,6 +144,7 @@ async function detectForUser(
       .eq("user_id", userId)
       .eq("is_cancelled", false)
       .gte("order_date", since)
+      .order("id", { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) throw error;
     if (!page || page.length === 0) break;

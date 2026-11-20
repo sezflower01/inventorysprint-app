@@ -201,6 +201,7 @@ export default function ShipmentTracking() {
           .select("shipment_id, quantity_shipped, quantity_received")
           .eq("user_id", user.id)
           .in("shipment_id", chunk)
+          .order("id", { ascending: true })
           .range(from, from + 999);
         if (error) throw error;
         ((data || []) as ShipmentProgressRow[]).forEach((item) => {
@@ -315,6 +316,9 @@ export default function ShipmentTracking() {
           .select("*")
           .eq("user_id", user?.id)
           .order("updated_at", { ascending: false })
+          // updated_at is not unique, so it cannot order pages on its own:
+          // a tie spanning a page boundary repeats or skips rows. id breaks it.
+          .order("id", { ascending: true })
           .range(from, from + pageSize - 1);
         if (error) throw error;
         const batch = data || [];

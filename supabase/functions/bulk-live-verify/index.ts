@@ -132,6 +132,17 @@ function buildInventoryRowsQuery(supabase: any, userId: string, mode: string) {
     query = query.order('id', { ascending: true });
   }
 
+  // Checked 2026-11-19 during the .range() paging sweep and left as-is, which
+  // is NOT obvious from here: the two branches above order by
+  // last_inventory_sync_at, which is not unique (and the nullsFirst block is
+  // large), so paging them would repeat and skip rows. They are safe only
+  // because fetchInventoryRowsToVerify pages in ONE mode -- full_catalog/all --
+  // and that mode takes the `else` branch, whose `id` order is total. The
+  // partial orders are reached only through the single-request .limit() path,
+  // where there is no page boundary for a tie to straddle.
+  //
+  // So: if paging is ever extended to the suspicious / in_stock modes, those
+  // two branches need `.order('id')` appended first.
   return query;
 }
 
@@ -1021,6 +1032,7 @@ Deno.serve(async (req) => {
               .from('inventory')
               .select('sku')
               .eq('user_id', userId)
+              .order("id", { ascending: true })
               .range(from, from + PAGE - 1);
             // Abort rather than continue with a partial known-set: a short read
             // here would make real inventory look orphaned and duplicate it.
@@ -1156,6 +1168,7 @@ Deno.serve(async (req) => {
               .select('asin, sku, title, image_url, price, cost, amount, units, fnsku')
               .eq('user_id', userId)
               .not('fnsku', 'is', null)
+              .order("id", { ascending: true })
               .range(from, from + PAGE - 1);
             if (error) { fnskuErr = error; break; }
             if (data) fnskuOrphans.push(...data);

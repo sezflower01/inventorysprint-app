@@ -79,6 +79,9 @@ const KeepaProductFinder = () => {
         .select('category')
         .not('category', 'is', null)
         .order('category')
+        // category is not unique, so it cannot order pages on its own:
+        // a tie spanning a page boundary repeats or skips rows. asin breaks it.
+        .order("asin", { ascending: true })
         .range(catOffset, catOffset + catPageSize - 1);
       if (!data || data.length === 0) break;
       for (const row of data as any[]) {
@@ -101,6 +104,9 @@ const KeepaProductFinder = () => {
         .select('brand')
         .not('brand', 'is', null)
         .order('brand')
+        // brand is not unique, so it cannot order pages on its own:
+        // a tie spanning a page boundary repeats or skips rows. asin breaks it.
+        .order("asin", { ascending: true })
         .range(brandOffset, brandOffset + brandPageSize - 1);
       if (!data || data.length === 0) break;
       for (const row of data as any[]) {
@@ -216,6 +222,7 @@ const KeepaProductFinder = () => {
         .select('asin')
         .eq('user_id', user.id)
         .eq('marketplace', 'US')
+        .order("id", { ascending: true })
         .range(offset, offset + pageSize - 1);
       if (error || !data || data.length === 0) break;
       for (const row of data as any[]) owned.add(row.asin);
@@ -462,6 +469,9 @@ const KeepaProductFinder = () => {
           .from('keepa_simple_products' as any)
           .select('asin, title, brand, category, image_url, imported_at')
           .order('title', { ascending: true, nullsFirst: false })
+          // title is not unique, so it cannot order pages on its own:
+          // a tie spanning a page boundary repeats or skips rows. asin breaks it.
+          .order("asin", { ascending: true })
           .range(offset, offset + batchSize - 1);
         if (error) throw error;
         if (!data || data.length === 0) break;

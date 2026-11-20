@@ -264,6 +264,7 @@ async function processUser(supabase: any, userId: string) {
       .from('inventory')
       .select('id, asin, sku, listing_status, available, reserved, last_inventory_sync_at')
       .eq('user_id', userId)
+      .order("id", { ascending: true })
       .range(page * 1000, (page + 1) * 1000 - 1);
     if (!batch?.length) break;
     allInventory = allInventory.concat(batch);

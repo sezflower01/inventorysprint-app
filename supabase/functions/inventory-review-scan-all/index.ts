@@ -34,6 +34,7 @@ Deno.serve(async (req) => {
       .from("inventory")
       .select("user_id, updated_at")
       .gte("updated_at", since)
+      .order("id", { ascending: true })
       .range(from, from + PAGE - 1);
     if (error) { console.error("[inventory-review-scan-all] active-user enumeration error", error); break; }
     if (!data || data.length === 0) break;

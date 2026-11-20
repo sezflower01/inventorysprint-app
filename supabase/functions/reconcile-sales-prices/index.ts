@@ -115,6 +115,7 @@ Deno.serve(async (req) => {
         .eq('event_type', 'shipment')
         .not('amazon_order_id', 'is', null)
         .neq('amazon_order_id', '')
+        .order("id", { ascending: true })
         .range(from, from + FEC_PAGE - 1);
 
       if (startDate) q = q.gte('event_date', startDate);

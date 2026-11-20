@@ -209,7 +209,9 @@ Deno.serve(async (req) => {
     const usAssignedAsins = new Set<string>();
     let usFrom = 0;
     while (true) {
-      const { data: usBatch } = await supabase.from('repricer_assignments').select('asin').eq('user_id', userId).eq('marketplace', 'US').eq('is_enabled', true).range(usFrom, usFrom + 999);
+      const { data: usBatch } = await supabase.from('repricer_assignments').select('asin').eq('user_id', userId).eq('marketplace', 'US').eq('is_enabled', true)
+        .order('id', { ascending: true })
+        .range(usFrom, usFrom + 999);
       if (!usBatch?.length) break;
       for (const r of usBatch) usAssignedAsins.add(r.asin);
       if (usBatch.length < 1000) break;
@@ -227,7 +229,9 @@ Deno.serve(async (req) => {
         const existingIntlSkus = new Set<string>();
         let existFrom = 0;
         while (true) {
-          const { data: batch } = await supabase.from('repricer_assignments').select('sku').eq('user_id', userId).eq('marketplace', mktLabel).range(existFrom, existFrom + 999);
+          const { data: batch } = await supabase.from('repricer_assignments').select('sku').eq('user_id', userId).eq('marketplace', mktLabel)
+            .order('id', { ascending: true })
+            .range(existFrom, existFrom + 999);
           if (!batch?.length) break;
           for (const r of batch) existingIntlSkus.add(r.sku);
           if (batch.length < 1000) break;

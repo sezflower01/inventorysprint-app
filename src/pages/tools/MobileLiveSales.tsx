@@ -1052,6 +1052,7 @@ const MobileLiveSales = () => {
         .eq("user_id", user.id)
         .gte("event_date", rangeStart)
         .lte("event_date", rangeEnd)
+        .order("id", { ascending: true })
         .range(from, from + PAGE - 1);
       if (marketplaceFilter && marketplaceFilter !== "ALL") {
         if (marketplaceFilter === "US") q = q.or("marketplace.eq.US,marketplace.is.null,marketplace.eq.UNKNOWN");
@@ -1075,7 +1076,9 @@ const MobileLiveSales = () => {
         .select("order_id")
         .eq("user_id", user.id)
         .gte("order_date", rangeStart)
-        .lte("order_date", rangeEnd);
+        .lte("order_date", rangeEnd)
+        // Ordered at construction because the pages below reuse this builder.
+        .order("id", { ascending: true });
       if (marketplaceFilter && marketplaceFilter !== "ALL") {
         if (marketplaceFilter === "US") soIdsQ = soIdsQ.or("marketplace.eq.US,marketplace.is.null");
         else soIdsQ = soIdsQ.eq("marketplace", marketplaceFilter);
@@ -1135,6 +1138,7 @@ const MobileLiveSales = () => {
         .gt("estimated_price", 0)
         .or("sold_price.is.null,sold_price.eq.0")
         .or("total_sale_amount.is.null,total_sale_amount.eq.0")
+        .order("id", { ascending: true })
         .range(from, from + PAGE - 1);
       if (marketplaceFilter && marketplaceFilter !== "ALL") {
         if (marketplaceFilter === "US") q = q.or("marketplace.eq.US,marketplace.is.null");
@@ -2776,7 +2780,8 @@ const MobileLiveSales = () => {
                                 .select("order_id, asin, title, quantity, marketplace, order_date")
                                 .eq("user_id", user.id)
                                 .gte("order_date", start)
-                                .lte("order_date", end);
+                                .lte("order_date", end)
+                                .order("id", { ascending: true });
                               if (marketplaceFilter && marketplaceFilter !== "ALL") {
                                 if (marketplaceFilter === "US") soQ = soQ.or("marketplace.eq.US,marketplace.is.null");
                                 else soQ = soQ.eq("marketplace", marketplaceFilter);
