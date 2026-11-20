@@ -254,12 +254,26 @@ export default function SoFecParityBanner({ userId, startDate, endDate }: Props)
   // ---- Snapshot helpers used to compute insert/update/skipped deltas ----
   type RowSnap = { order_id: string; updated_at: string | null };
 
+  // This is the BEFORE/AFTER snapshot used to compute the insert / update /
+  // skipped deltas reported after a backfill. It is NOT the parity verdict --
+  // that comes from the check_sync_parity RPC above.
+  //
+  // Why the 5-page cap is fine, and why it still has to be loud: a backfill run
+  // is capped at 14 days, and this account runs ~150 orders/day, so a window
+  // holds roughly 2,100 rows against 5,000 of headroom. But a SHORT snapshot
+  // does not fail safe. The deltas are computed by absence -- an order_id that
+  // is not in this map is reported as newly inserted -- so every row the
+  // snapshot misses inflates the "+N new" count in the success toast. Both
+  // ways of coming up short therefore have to be visible rather than silently
+  // folded into a smaller map:
+  //   - a page error used to `break` and return a partial map
+  //   - reaching the page bound without a short page means rows remain unread
   async function snapshotOrderRows(start: string, end: string): Promise<Map<string, string | null>> {
     const map = new Map<string, string | null>();
     const PAGE = 1000;
+    const MAX_PAGES = 5;
     let from = 0;
-    // Cap to ~5000 rows per range — gap windows are small.
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < MAX_PAGES; i++) {
       const { data, error } = await supabase
         .from("sales_orders")
         .select("order_id, updated_at")
@@ -268,14 +282,20 @@ export default function SoFecParityBanner({ userId, startDate, endDate }: Props)
         .lte("order_date", end)
         .order("id", { ascending: true })
         .range(from, from + PAGE - 1);
-      if (error || !data || data.length === 0) break;
+      if (error) throw new Error(`snapshotOrderRows(${start}..${end}): ${error.message}`);
+      if (!data || data.length === 0) return map;
       for (const r of data as RowSnap[]) {
         map.set(r.order_id, r.updated_at ?? null);
       }
-      if (data.length < PAGE) break;
+      if (data.length < PAGE) return map; // the only proof the rows ran out
       from += PAGE;
     }
-    return map;
+    // Every page came back full, so there are more rows than the bound allows.
+    throw new Error(
+      `snapshotOrderRows(${start}..${end}): more than ${MAX_PAGES * PAGE} orders ` +
+      `in the window, so the before-snapshot is incomplete and the insert/update ` +
+      `counts would be overstated. Narrow the backfill window.`,
+    );
   }
 
   async function pollForCompletion(

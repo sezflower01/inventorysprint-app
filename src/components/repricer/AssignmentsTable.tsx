@@ -9,6 +9,7 @@ import { useSubscription } from "@/hooks/use-subscription";
 import { withTimeout } from "@/hooks/use-db-pressure";
 import { deriveAssignmentStatus, isManuallyPaused } from "@/lib/repricer/assignmentStatus";
 import { pageChunkedKeys, DEFAULT_CHUNK_SIZE } from "@/lib/repricer/pageChunked";
+import { fetchAllPages } from "@/lib/sales/paginatedFetch";
 import {
   emptySalesWindows,
   normalizeIdentifier,
@@ -726,7 +727,13 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
     const costMap: Record<string, number> = {};
     if (asins.length === 0) return costMap;
     const PAGE = 1000;
-    const pagedByBatch = async (table: string, columns: string, extra?: (q: any) => any) => {
+    // orderBy is a parameter because the two tables below disagree: the view
+    // asin_cog_for_repricer has no id column, asin_cost_overrides does. A
+    // stable order is required either way -- two .range() pages are two
+    // independent queries, so without a total order a COG row can arrive
+    // twice or never, and a dropped COG silently reverts that ASIN to the
+    // old cost source.
+    const pagedByBatch = async (table: string, columns: string, orderBy: string[], extra?: (q: any) => any) => {
       const batches: string[][] = [];
       for (let i = 0; i < asins.length; i += BATCH_IN_SIZE) batches.push(asins.slice(i, i + BATCH_IN_SIZE));
       const results = await Promise.all(batches.map(async (batch) => {
@@ -734,6 +741,7 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
         for (let from = 0; ; from += PAGE) {
           let q = supabase.from(table as any).select(columns).eq("user_id", userId).in("asin", batch);
           if (extra) q = extra(q);
+          for (const col of orderBy) q = q.order(col, { ascending: true });
           const { data, error } = await q.range(from, from + PAGE - 1);
           if (error) throw error;
           rows.push(...(data || []));
@@ -746,8 +754,8 @@ async function fetchRepricerData(userId: string, targetMarketplace: string): Pro
     try {
       const today = new Date().toISOString().slice(0, 10);
       const [cogRows, overrideRows] = await Promise.all([
-        pagedByBatch("asin_cog_for_repricer", "asin, unit_cost"),
-        pagedByBatch("asin_cost_overrides", "asin, unit_cost, effective_from, created_at",
+        pagedByBatch("asin_cog_for_repricer", "asin, unit_cost", ["asin"]),
+        pagedByBatch("asin_cost_overrides", "asin, unit_cost, effective_from, created_at", ["id"],
           (q) => q.lte("effective_from", today).gt("unit_cost", 0)),
       ]);
       for (const c of cogRows) {
@@ -5945,46 +5953,84 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
     }
   };
 
+  // ============================================================
+  // BULK DISABLE ZERO STOCK
+  //
+  // This is a DESTRUCTIVE write driven by a read, which makes the read's
+  // completeness a correctness requirement rather than a performance detail.
+  // It decides "zero stock" by ABSENCE from the in-stock set, so any in-stock
+  // row the read fails to return is disabled as though Amazon reported no
+  // inventory.
+  //
+  // It previously read the in-stock set in ONE request with no .range() and no
+  // ORDER BY. PostgREST caps every response at db-max-rows (1000 on this
+  // project) and truncates silently, and this account has ~4.6k inventory
+  // rows -- so the set was an arbitrary 1,000-row sample, and EVERY in-stock
+  // ASIN outside that sample was disabled. The button's own prompt promises
+  // "all ASINs with 0 sellable inventory"; what it did was disable everything
+  // it had not happened to see. Found 2026-11-19 while sweeping .range()
+  // paging; the same defect class as auto-assign-bulk and the FBA/FBM stock
+  // writers -- a bounded read standing in for the whole table.
+  //
+  // Both reads now go through fetchAllPages, which pages past the cap, applies
+  // a stable ORDER BY (two .range() pages are two independent queries, so
+  // without a total order a row can arrive twice or never), and THROWS on an
+  // incomplete read rather than returning a short array. Throwing is right
+  // here: the catch below shows a toast, so the user sees "it did not run"
+  // instead of silently losing repricing on in-stock listings.
+  // ============================================================
   const runBulkDisableZeroStock = async () => {
     if (!confirm("This will disable repricing for all ASINs with 0 sellable inventory. Continue?")) return;
+    if (!user?.id) { toast.error("Not signed in"); return; }
     try {
       setRunningBulkDisable(true);
       toast.info("Finding zero-stock ASINs...");
 
-      // Get all in-stock ASINs from inventory
-      const { data: inStockItems } = await supabase
-        .from("inventory")
-        .select("asin, sku")
-        .gt("available", 0);
+      // Every in-stock row, not the first page of them. Scoped to this user
+      // explicitly: RLS already does it, but an unscoped filter makes WHICH
+      // rows a cap would have kept arbitrary, and that is what decides a
+      // disable here.
+      const inStockItems = await fetchAllPages<{ asin: string | null; sku: string | null }>(
+        () => supabase
+          .from("inventory")
+          .select("asin, sku")
+          .eq("user_id", user.id)
+          .gt("available", 0),
+        { throwOnIncomplete: true, label: "bulk-disable in-stock inventory" },
+      );
 
-      const inStockKeys = new Set((inStockItems || []).map(i => `${i.asin}:${i.sku}`));
+      const inStockKeys = new Set(inStockItems.map(i => `${i.asin}:${i.sku}`));
 
-      // Get all enabled assignments
-      let allEnabled: any[] = [];
-      let page = 0;
-      const PAGE_SIZE = 1000;
-      while (true) {
-        const { data: batch } = await supabase
+      const allEnabled = await fetchAllPages<{ id: string; asin: string | null; sku: string | null }>(
+        () => supabase
           .from("repricer_assignments")
           .select("id, asin, sku")
-          .eq("is_enabled", true)
-          .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
-        if (!batch || batch.length === 0) break;
-        allEnabled = allEnabled.concat(batch);
-        if (batch.length < PAGE_SIZE) break;
-        page++;
-      }
+          .eq("user_id", user.id)
+          .eq("is_enabled", true),
+        { throwOnIncomplete: true, label: "bulk-disable enabled assignments" },
+      );
 
       const zeroStockIds = allEnabled
         .filter(a => !inStockKeys.has(`${a.asin}:${a.sku}`))
         .map(a => a.id);
+
+      // Both counts are reported so a future truncation is visible in the UI
+      // rather than only in the console.
+      console.log(
+        `[Repricer] bulk disable: ${inStockItems.length} in-stock rows, ` +
+        `${allEnabled.length} enabled assignments, ${zeroStockIds.length} to disable`,
+      );
 
       if (zeroStockIds.length === 0) {
         toast.success("No zero-stock ASINs to disable!");
         return;
       }
 
-      toast.info(`Disabling ${zeroStockIds.length} zero-stock ASINs...`, { duration: 15000 });
+      toast.info(
+        `Disabling ${zeroStockIds.length} of ${allEnabled.length} enabled ASINs ` +
+        `(${inStockItems.length} in stock)...`,
+        { duration: 15000 },
+      );
 
       // Batch update in chunks of 200
       const CHUNK = 200;
@@ -6002,7 +6048,18 @@ export default function AssignmentsTable({ rules, marketplace = "US", onMarketpl
             last_disabled_at: nowIso,
           })
           .in("id", chunk);
-        if (!error) disabled += chunk.length;
+        // Was `if (!error) disabled += chunk.length` -- a failed chunk was
+        // skipped in silence and the success toast still claimed a total. A
+        // partial bulk write is worth stopping for: the rows already disabled
+        // stay disabled, and saying so is better than reporting a number that
+        // was never achieved.
+        if (error) {
+          throw new Error(
+            `Disabled ${disabled} of ${zeroStockIds.length} before failing on ` +
+            `chunk ${i / CHUNK + 1}: ${error.message}`,
+          );
+        }
+        disabled += chunk.length;
       }
 
       toast.success(`Disabled ${disabled} zero-stock ASINs. Active queue reduced to ~${allEnabled.length - disabled} items.`, { duration: 10000 });

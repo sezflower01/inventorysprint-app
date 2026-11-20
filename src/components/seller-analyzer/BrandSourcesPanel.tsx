@@ -3,6 +3,7 @@ import {
   Loader2, Plus, Trash2, ExternalLink, Pencil, Check, X, Globe, EyeOff, Eye,
 } from "lucide-react";
 import { toast } from "sonner";
+import { fetchAllPagesResult } from "@/lib/sales/paginatedFetch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -66,14 +67,26 @@ export function BrandSourcesPanel() {
   useEffect(() => {
     void (async () => {
       setBrandsLoading(true);
-      const { data, error: e } = await supabase
-        .from("user_brands")
-        .select("brand, asin_count")
-        .neq("status", "ignore")
-        .order("brand")
-        .range(0, 4999);
-      if (e) toast.error(e.message);
-      setBrands((data as BrandRow[]) || []);
+      // Was a single .range(0, 4999). PostgREST caps every response at
+      // db-max-rows (1000 here) regardless of the range asked for, so that
+      // read returned at most 1,000 brands while the code -- and the 4999 --
+      // assumed up to 5,000. The filter box below searches this array, so any
+      // brand sorting after the 1,000th was simply unfindable.
+      //
+      // user_brands has PK (user_id, brand) and RLS scopes to one user, so
+      // ordering by brand is already a TOTAL order and safe to page.
+      const rows = await fetchAllPagesResult<BrandRow>(
+        () => supabase
+          .from("user_brands")
+          .select("brand, asin_count")
+          .neq("status", "ignore")
+          .order("brand"),
+        { orderBy: null, label: "user_brands" },
+      );
+      if (!rows.complete) {
+        toast.error("Brand list is incomplete; some brands are missing from the filter.");
+      }
+      setBrands(rows.rows);
       setBrandsLoading(false);
     })();
   }, []);
