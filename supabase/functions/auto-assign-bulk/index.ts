@@ -1326,12 +1326,45 @@ Deno.serve(async (req) => {
         }
       }
 
-      const toDisable: string[] = [];
+      // ONE REASON STRING FOR THREE CONDITIONS MADE THE RESULT UNREADABLE.
+      //
+      // Until 2026-11-21 every disable below wrote the single string
+      // "auto-assign-bulk: broken/deleted assignment". Three unrelated
+      // conditions reach it:
+      //
+      //   1. inverted bounds  -- a config error; the listing is fine
+      //   2. dead + zero stock -- the listing really is gone
+      //   3. dedupe loser      -- the listing is fine; it is a DUPLICATE row,
+      //                           which exists only because repricer_assignments
+      //                           has no unique constraint on (asin, sku)
+      //
+      // This is by far the largest source of disabling on a real account, and
+      // the overwhelming majority of those rows are still disabled -- yet
+      // nothing in the data said which of the three causes applied to any of
+      // them. So a count of "broken listings" could not be told apart from a
+      // count of "duplicate rows doing their job", and two of the three causes
+      // are benign. Same defect shape as the rest of this repo's
+      // one-state-two-jobs bugs, but carried in a LABEL rather than a value.
+      //
+      // A dedupe loser is not a fault in the LISTING, it is a consequence of
+      // repricer_assignments having no unique constraint on (asin, sku).
+      // Reading those as breakage sends you looking for the wrong problem.
+      const DISABLE_INVERTED = "auto-assign-bulk: inverted min > max";
+      const DISABLE_DEAD = "auto-assign-bulk: listing dead and zero stock";
+      const DISABLE_DUPLICATE = "auto-assign-bulk: duplicate of a better row";
+
+      const toDisable: Array<{ id: string; reason: string }> = [];
+      const markedIds = new Set<string>();
+      const mark = (id: string, reason: string) => {
+        if (markedIds.has(id)) return; // first cause wins, as before
+        markedIds.add(id);
+        toDisable.push({ id, reason });
+      };
       for (const a of allEnabled) {
         if (a.min_price_override !== null && a.max_price_override !== null &&
             a.min_price_override > a.max_price_override) {
           console.log(`[auto-assign-bulk] ⚠️ Disabling ${a.asin}/${a.sku}: inverted min $${a.min_price_override} > max $${a.max_price_override}`);
-          toDisable.push(a.id);
+          mark(a.id, DISABLE_INVERTED);
           continue;
         }
 
@@ -1341,7 +1374,7 @@ Deno.serve(async (req) => {
           const zeroStock = inv.available + inv.reserved + inv.inbound === 0;
           if (badStatus && zeroStock) {
             console.log(`[auto-assign-bulk] ⚠️ Disabling ${a.asin}/${a.sku}: status=${inv.status}, stock=0`);
-            toDisable.push(a.id);
+            mark(a.id, DISABLE_DEAD);
           }
         }
       }
@@ -1396,7 +1429,7 @@ Deno.serve(async (req) => {
       };
       const bestForAsin = new Map<string, { id: string; sku: string; rank: number; createdAt: string }>();
       for (const a of allEnabled) {
-        if (toDisable.includes(a.id)) continue; // already marked for disable
+        if (markedIds.has(a.id)) continue; // already marked for disable
         const rank = rankFor(a);
         const key = `${a.asin}:${channelOf(a)}`;
         const existing = bestForAsin.get(key);
@@ -1408,7 +1441,7 @@ Deno.serve(async (req) => {
         const loserId = thisIsBetter ? existing.id : a.id;
         const loserSku = thisIsBetter ? existing.sku : a.sku;
         console.log(`[auto-assign-bulk] ⚠️ Dedup: disabling duplicate ${key}/${loserSku} (id=${loserId}, rank=${thisIsBetter ? existing.rank : rank}) in favor of ${thisIsBetter ? a.sku : existing.sku} (rank=${thisIsBetter ? rank : existing.rank})`);
-        toDisable.push(loserId);
+        mark(loserId, DISABLE_DUPLICATE);
         deduplicatedCount++;
         if (thisIsBetter) {
           bestForAsin.set(key, { id: a.id, sku: a.sku, rank, createdAt: a.created_at });
@@ -1416,23 +1449,39 @@ Deno.serve(async (req) => {
       }
 
       if (toDisable.length > 0) {
-        const { error: cleanupErr } = await supabase
-          .from("repricer_assignments")
-          .update({
-            is_enabled: false,
-            manual_paused: false,
-            last_disabled_by: "cleanup",
-            last_disabled_reason: "auto-assign-bulk: broken/deleted assignment",
-            last_disabled_at: new Date().toISOString(),
-          })
-          .in("id", toDisable);
-
-        if (!cleanupErr) {
-          cleanedUpCount = toDisable.length;
-          console.log(`[auto-assign-bulk] Cleaned up ${cleanedUpCount} broken/deleted assignments`);
-        } else {
-          console.error("[auto-assign-bulk] Cleanup error:", cleanupErr);
+        // One UPDATE per reason (at most three) so each row records the cause
+        // that actually applied to it.
+        const byReason = new Map<string, string[]>();
+        for (const d of toDisable) {
+          const list = byReason.get(d.reason);
+          if (list) list.push(d.id);
+          else byReason.set(d.reason, [d.id]);
         }
+
+        const nowIso = new Date().toISOString();
+        for (const [reason, ids] of byReason) {
+          const { error: cleanupErr } = await supabase
+            .from("repricer_assignments")
+            .update({
+              is_enabled: false,
+              manual_paused: false,
+              last_disabled_by: "cleanup",
+              last_disabled_reason: reason,
+              last_disabled_at: nowIso,
+            })
+            .in("id", ids);
+
+          // Only a group that actually landed is counted. The previous version
+          // set cleanedUpCount from the full list and logged the error beside
+          // it, so a failed cleanup still reported a total it had not achieved.
+          if (cleanupErr) {
+            console.error(`[auto-assign-bulk] Cleanup FAILED for ${ids.length} rows (${reason}):`, cleanupErr);
+            continue;
+          }
+          cleanedUpCount += ids.length;
+          console.log(`[auto-assign-bulk] Disabled ${ids.length} assignments: ${reason}`);
+        }
+        console.log(`[auto-assign-bulk] Cleaned up ${cleanedUpCount} of ${toDisable.length} marked assignments`);
       }
     }
 
