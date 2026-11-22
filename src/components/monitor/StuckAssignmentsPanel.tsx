@@ -5,6 +5,10 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
+import {
+  disableStuckAssignments,
+  type StuckDisableClient,
+} from "@/lib/repricer/stuckAssignments";
 
 interface StuckRow {
   asin: string;
@@ -69,29 +73,34 @@ export default function StuckAssignmentsPanel() {
 
   useEffect(() => { fetchStuck(); }, []);
 
+  // The write lives in @/lib/repricer/stuckAssignments so the FILTER can be
+  // tested. It decides which listings get switched off, and the version that
+  // used to sit here matched on (asin, marketplace) with no sku -- so one
+  // stuck row disabled every SKU on that ASIN, including an in-stock sibling
+  // listing with its own Buy Box. See that module's header.
   const handleFixAll = async () => {
     if (!rows.length) return;
     setFixing(true);
     try {
-      // Disable all stuck assignments
-      for (const r of rows) {
-        await supabase
-          .from("repricer_assignments")
-          .update({
-            is_enabled: false,
-            manual_paused: false,
-            last_disabled_by: "user",
-            last_disabled_reason: "Stuck assignments panel: bulk fix",
-            last_disabled_at: new Date().toISOString(),
-          })
-          .eq("asin", r.asin)
-          .eq("marketplace", r.marketplace)
-          .eq("is_enabled", true);
+      const outcome = await disableStuckAssignments(
+        supabase as unknown as StuckDisableClient,
+        rows.map((r) => ({ asin: r.asin, sku: r.sku, marketplace: r.marketplace })),
+      );
+
+      // Report what landed, not what was attempted. The previous version
+      // awaited each update without reading `error` and then claimed
+      // `rows.length` regardless, so a rejected write still read as fixed.
+      if (outcome.failures.length > 0) {
+        console.error("[StuckAssignments] some disables failed", outcome.failures);
+        toast.error(
+          `Disabled ${outcome.disabled} of ${outcome.attempted}; ${outcome.failures.length} failed`,
+        );
+      } else {
+        toast.success(`Disabled ${outcome.disabled} stuck assignments`);
       }
-      toast.success(`Disabled ${rows.length} stuck assignments`);
       await fetchStuck();
-    } catch (e: any) {
-      toast.error("Fix failed: " + e.message);
+    } catch (e: unknown) {
+      toast.error("Fix failed: " + (e instanceof Error ? e.message : String(e)));
     }
     setFixing(false);
   };
