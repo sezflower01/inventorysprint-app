@@ -8,7 +8,7 @@ const FinalCTA = () => {
           <p>Track supplier links and product history in one place</p>
           <p>Reorder faster with direct supplier access</p>
           <p>Know what to reorder before you run out</p>
-          <p>Automate pricing with AI reviewed by Gemini to improve performance over time</p>
+          <p>Automate pricing with rule-based decisions, reviewed by Gemini</p>
         </div>
       </div>
     </section>

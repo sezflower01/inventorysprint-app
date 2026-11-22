@@ -553,13 +553,18 @@ export default function SmartEngineReview() {
         />
       )}
 
-      {/* Empty state */}
+      {/* Empty state.
+          The previous copy promised "automated batches run at 8:00 AM and
+          8:00 PM UTC daily". That promise is NOT made here any more: the two
+          pg_cron jobs send a hardcoded anon JWT that requireInternalOrUser
+          rejects, so whether they have run at all since the guard landed on
+          2026-07-09 is unresolved. Until it is, this says only what is
+          certainly true -- the on-demand path works. */}
       {!loading && batch.length === 0 && (
         <Card>
           <CardContent className="py-12 text-center">
             <Sparkles className="h-10 w-10 text-muted-foreground/40 mx-auto mb-3" />
-            <p className="text-muted-foreground">Click "Generate Batch" to analyze the most significant ASINs from recent activity</p>
-            <p className="text-xs text-muted-foreground mt-1">Automated batches run at 8:00 AM and 8:00 PM UTC daily</p>
+            <p className="text-muted-foreground">Click “Generate Batch” to analyze the most significant ASINs from recent activity</p>
           </CardContent>
         </Card>
       )}

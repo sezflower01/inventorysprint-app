@@ -212,11 +212,11 @@ export const MODULE_COPY: Record<string, Partial<ModuleCopy>> = {
   },
   "repricer": {
     tagline: "AI repricing that protects your margin first",
-    hero: "Not just undercutting. ROI-aware floors, Buy Box optimization, fulfillment-aware lanes, and a Gemini AI review layer that learns from real outcomes.",
+    hero: "Not just undercutting. ROI-aware floors, Buy Box optimization and fulfillment-aware lanes, with every decision recorded and explainable.",
     bullets: [
       "Respects the minimum price you set — never sells below it",
       "FBA & FBM lane selection per ASIN",
-      "Self-learning engine reviewed by Gemini",
+      "Every price change logged with the reason behind it",
       "Inventory-aware: pre-positioning, oscillation relief, restock snap-back",
     ],
   },

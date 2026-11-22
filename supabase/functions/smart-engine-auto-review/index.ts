@@ -2,6 +2,7 @@ import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { routeBatch, type RouterCase, type RoutingDecision } from "../_shared/caseRouter.ts";
 import { requireInternalOrUser } from '../_shared/require-internal.ts';
+import { resolveNextCompetitorPrice } from './competitorPrice.ts';
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -200,7 +201,14 @@ serve(async (req) => {
                   d.buybox_price != null && d.current_price != null
                     ? Math.abs(d.buybox_price - d.current_price) < 0.02
                     : false,
-                next_competitor_price: d.lowest_overall_price ?? null,
+                // Was `d.lowest_overall_price ?? null`. That field includes
+                // OUR OWN offer, so whenever we held the lowest price this
+                // handed the model our own price labelled "Next Competitor".
+                // See competitorPrice.ts for the full reasoning and tests.
+                next_competitor_price: resolveNextCompetitorPrice(
+                  d.current_price,
+                  d.lowest_overall_price,
+                ),
               },
               price_trace: {
                 buybox_price: d.buybox_price,

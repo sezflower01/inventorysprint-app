@@ -135,10 +135,10 @@ const features = [
     title: "Smart Engine Learning",
     color: "purple",
     content: [
-      "The engine learns from outcomes. It tracks which price changes won the Buy Box, which raises held, and which drops were unnecessary — then adapts its behavior over time.",
+      "The engine records outcomes. It tracks which price changes won the Buy Box, which raises held, and which drops were unnecessary — so the patterns are visible instead of guessed at.",
       "An AI review system analyzes decision patterns twice daily and suggests tuning improvements. All changes require manual approval — safety-critical values are never auto-tuned.",
     ],
-    highlight: "An engine that gets smarter with every cycle.",
+    highlight: "An engine that records why it did what it did.",
   },
   {
     icon: RefreshCw,
@@ -271,7 +271,7 @@ const BlogRepricerFeatures = () => {
                 Every Feature Inside Our Amazon AI Repricer
               </h1>
               <p className="text-white/80 text-xl mb-6 leading-relaxed">
-                Most repricers change prices. Ours understands the market, protects your profit, and learns from every decision. Here's everything it does — and why it matters.
+                Most repricers change prices. Ours reads the market, protects your profit, and records the reason behind every decision. Here's everything it does — and why it matters.
               </p>
               <div className="flex flex-wrap gap-2">
                 {["AI Engine", "Live Sales", "Buy Box", "Profit Protection", "Multi-Marketplace", "Analytics"].map((tag) => (

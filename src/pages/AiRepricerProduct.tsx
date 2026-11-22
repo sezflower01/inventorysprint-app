@@ -45,8 +45,8 @@ const AiRepricerProduct: React.FC = () => {
     },
     {
       icon: Brain,
-      title: "Self-Learning Engine",
-      desc: "Learns from real outcomes and continuously improves its decisions.",
+      title: "Reviewed by Gemini",
+      desc: "Gemini reviews pricing decisions and flags the ones worth a second look. Tuning changes are yours to approve.",
     },
     {
       icon: Target,
@@ -107,10 +107,10 @@ const AiRepricerProduct: React.FC = () => {
             </span>
           </div>
           <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold mb-6 bg-gradient-to-r from-white to-white/70 bg-clip-text text-transparent leading-tight">
-            Gemini reviews your pricing decisions —<br className="hidden md:block" /> your system continuously gets smarter.
+            Gemini reviews your pricing decisions —<br className="hidden md:block" /> so you can see the reasoning behind each one.
           </h1>
           <p className="text-lg md:text-xl text-muted-foreground mb-3 max-w-2xl mx-auto">
-            Analyzes outcomes. Finds patterns. Improves future pricing automatically.
+            Analyzes outcomes. Flags patterns. Every tuning change needs your approval.
           </p>
           <p className="text-sm text-muted-foreground/70 max-w-2xl mx-auto mb-8">
             Every decision is logged, explainable, and continuously improved.

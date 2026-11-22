@@ -35,7 +35,7 @@ const Hero = () => {
             </h1>
 
             <p className="text-base md:text-lg text-white/90 mb-6 animate-slide-up leading-relaxed" style={{ animationDelay: '0.15s' }}>
-              InventorySprint helps you organize proven Amazon products, track suppliers, and automate pricing with AI that protects your margins — and gets smarter over time.
+              InventorySprint helps you organize proven Amazon products, track suppliers, and automate pricing with margin-aware rules that never sell below your floor.
             </p>
 
             <div className="mb-7 animate-slide-up text-left w-full" style={{ animationDelay: '0.25s' }}>
@@ -58,7 +58,7 @@ const Hero = () => {
                 </div>
                 <div className="flex items-start gap-3 text-white/90">
                   <CheckCircle className="w-5 h-5 text-green-400 flex-shrink-0 mt-0.5" />
-                  <span className="break-words min-w-0">Automate pricing with AI reviewed by Gemini to improve performance over time</span>
+                  <span className="break-words min-w-0">Automate pricing with rule-based decisions, reviewed by Gemini</span>
                 </div>
               </div>
             </div>
@@ -66,7 +66,7 @@ const Hero = () => {
             {/* AI Pricing Points */}
             <div className="pt-6 mt-1 border-t border-white/10">
               <h3 className="text-lg font-bold mb-1">
-                <span className="bg-gradient-to-r from-primary to-purple-400 bg-clip-text text-transparent">AI Pricing Powered by Gemini</span>
+                <span className="bg-gradient-to-r from-primary to-purple-400 bg-clip-text text-transparent">AI-Reviewed Pricing, Powered by Gemini</span>
               </h3>
               <p className="text-white/90 text-sm mb-4">Smart pricing that protects your margins — not a bot racing to the bottom.</p>
               <div className="grid grid-cols-2 gap-3 text-left">
