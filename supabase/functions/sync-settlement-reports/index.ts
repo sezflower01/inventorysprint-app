@@ -11,7 +11,23 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { signRequest, getLWAAccessToken, getSpApiEndpoint } from "../_shared/sp-api-sigv4.ts";
-import { mapSettlementRow, parsePostedDate, parseAmount, SettlementRow, SETTLEMENT_CATEGORIES } from "../_shared/settlement-mapper.ts";
+// mapSettlementRow / parsePostedDate / parseAmount now live behind
+// buildLineItems.ts, which both ingest paths share; only the row type is still
+// named here. (SETTLEMENT_CATEGORIES was already unused before that move.)
+import { SettlementRow } from "../_shared/settlement-mapper.ts";
+import { buildLineItems, BuiltReport } from "./buildLineItems.ts";
+
+// Carries the HTTP status out of an SP-API call so a caller can answer 429
+// with 429 instead of a generic 500. Extends Error, so every existing
+// `err.message` handler keeps working unchanged.
+class SpApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'SpApiError';
+    this.status = status;
+  }
+}
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -178,7 +194,7 @@ async function getReportDocument(
   const url = `${endpoint}/reports/2021-06-30/documents/${encodeURIComponent(documentId)}`;
   const headers = await signRequest('GET', url, '', accessToken);
   const res = await fetch(url, { headers });
-  if (!res.ok) throw new Error(`getReportDocument failed: ${res.status} ${await res.text()}`);
+  if (!res.ok) throw new SpApiError(res.status, `getReportDocument failed: ${res.status} ${await res.text()}`);
   return await res.json();
 }
 
@@ -260,58 +276,46 @@ async function processReport(
   const rows = parseTsv(tsvText);
   console.log(`Report ${amazonReportId}: parsed ${rows.length} TSV rows`);
 
-  // The first non-blank row of a settlement report is a "header" row with
-  // settlement-id, settlement-start-date, settlement-end-date, deposit-date, total-amount, currency
-  let settlementId: string | undefined;
-  let settlementStart: string | undefined;
-  let settlementEnd: string | undefined;
-  let depositDate: string | undefined;
-  let totalAmount = 0;
-  let currency: string | undefined;
-  for (const r of rows) {
-    if (r['settlement-id'] && r['settlement-start-date'] && r['total-amount']) {
-      settlementId = r['settlement-id'];
-      settlementStart = parsePostedDate({ 'posted-date': r['settlement-start-date'] }) || undefined;
-      settlementEnd = parsePostedDate({ 'posted-date': r['settlement-end-date'] }) || undefined;
-      depositDate = parsePostedDate({ 'posted-date': r['deposit-date'] }) || undefined;
-      totalAmount = parseAmount(r['total-amount']);
-      currency = r['currency'];
-      break;
-    }
-  }
+  const built = await storeParsedReport(supabase, {
+    userId, reportRowId, amazonReportId, rows, fallbackMeta: amazonReport,
+  });
+
+  return {
+    rows: built.items.length,
+    settlementId: built.settlementId,
+    startDate: built.settlementStart,
+    endDate: built.settlementEnd,
+    currency: built.currency,
+  };
+}
+
+// Shared tail of both ingest paths: parsed rows in, line items and the report
+// header row written, nothing else. Extracted 2026-11-23 so the targeted
+// re-fetch below cannot drift from the discovery sync (see buildLineItems.ts
+// for why a second copy would be the wrong answer).
+//
+// Write order is load-bearing and unchanged: the caller has already finished
+// downloading and parsing before this runs, so a failed download can never
+// reach the delete and wipe good line items.
+async function storeParsedReport(
+  supabase: any,
+  opts: {
+    userId: string;
+    reportRowId: string;
+    amazonReportId: string;
+    rows: SettlementRow[];
+    fallbackMeta?: { dataStartTime?: string; dataEndTime?: string } | null;
+  },
+): Promise<BuiltReport> {
+  const { userId, reportRowId, amazonReportId, rows, fallbackMeta } = opts;
+  const built = buildLineItems(rows, { userId, reportRowId, amazonReportId });
 
   // Wipe any prior line items for this report (idempotency)
   await supabase.from('settlement_line_items').delete().eq('settlement_report_id', reportRowId);
 
-  // Map and bulk insert line items
-  const items: any[] = [];
-  for (const r of rows) {
-    const mapped = mapSettlementRow(r);
-    if (!mapped) continue;
-    if (!mapped.amount) continue;
-    items.push({
-      user_id: userId,
-      settlement_report_id: reportRowId,
-      amazon_report_id: amazonReportId,
-      posted_date: parsePostedDate(r),
-      transaction_type: r['transaction-type'] || null,
-      order_id: r['order-id'] || null,
-      shipment_id: r['shipment-id'] || null,
-      marketplace_name: r['marketplace-name'] || null,
-      amount_type: r['amount-type'] || null,
-      amount_description: r['amount-description'] || null,
-      amount: mapped.amount,
-      fulfillment_id: r['fulfillment-id'] || null,
-      sku: r['sku'] || null,
-      asin: null,
-      quantity_purchased: r['quantity-purchased'] ? parseInt(r['quantity-purchased']) : null,
-      category: mapped.category,
-    });
-  }
-
   // Insert in chunks of 500
-  for (let i = 0; i < items.length; i += 500) {
-    const chunk = items.slice(i, i + 500);
+  for (let i = 0; i < built.items.length; i += 500) {
+    const chunk = built.items.slice(i, i + 500);
     const { error } = await supabase.from('settlement_line_items').insert(chunk);
     if (error) throw new Error(`insert line items: ${error.message}`);
   }
@@ -319,22 +323,106 @@ async function processReport(
   // Update master row
   await supabase.from('settlement_reports').update({
     status: 'parsed',
-    rows_parsed: items.length,
-    settlement_id: settlementId,
-    settlement_start_date: settlementStart || amazonReport.dataStartTime?.slice(0,10) || null,
-    settlement_end_date: settlementEnd || amazonReport.dataEndTime?.slice(0,10) || null,
-    deposit_date: depositDate,
-    total_amount: totalAmount,
-    currency,
+    rows_parsed: built.items.length,
+    settlement_id: built.settlementId,
+    settlement_start_date: built.settlementStart || fallbackMeta?.dataStartTime?.slice(0, 10) || null,
+    settlement_end_date: built.settlementEnd || fallbackMeta?.dataEndTime?.slice(0, 10) || null,
+    deposit_date: built.depositDate,
+    total_amount: built.totalAmount,
+    currency: built.currency,
     parsed_at: new Date().toISOString(),
     error_message: null,
   }).eq('id', reportRowId);
 
-  return { rows: items.length, settlementId, startDate: settlementStart, endDate: settlementEnd, currency };
+  return built;
 }
 
+// Re-download and re-parse ONE report we have already stored, by its Amazon
+// report id.
+//
+// WHY THIS EXISTS SEPARATELY FROM THE SYNC
+//
+// The sync path cannot do this, for three independent reasons, and each one
+// alone would be enough:
+//   1. it discovers reports by date window, so it cannot be pointed at one;
+//   2. processReport returns early on status = 'parsed', which is every report
+//      we would want to repair;
+//   3. it finishes by calling recomputeMonthlyTotals for every year in the
+//      window -- which still has the 1,000-row cap and the Math.abs sign loss,
+//      so running it is exactly what we are avoiding until that is fixed.
+//
+// So this spends ONE getReportDocument call, writes only that report's rows,
+// and DOES NOT TOUCH THE TOTALS. Deliberately no 429 retry: the caller is a
+// human pacing calls by hand, and a throttle should stop the run rather than
+// sit in a backoff loop burning the retention window. Nothing is written
+// before the download succeeds, so a 429 leaves the database untouched.
+async function refetchReport(
+  supabase: any, userId: string, endpoint: string, accessToken: string, amazonReportId: string,
+) {
+  const { data: row, error: rowErr } = await supabase
+    .from('settlement_reports')
+    .select('id, amazon_report_document_id, currency, raw_metadata')
+    .eq('user_id', userId)
+    .eq('amazon_report_id', amazonReportId)
+    .maybeSingle();
+  if (rowErr) throw new Error(`lookup settlement_reports: ${rowErr.message}`);
+  if (!row) throw new SpApiError(404, `No stored settlement report with amazon_report_id ${amazonReportId}`);
+  if (!row.amazon_report_document_id) {
+    // Without a stored document id the only way back is getReports, which is
+    // a different and much more expensive call. Refuse rather than silently
+    // widen the blast radius of a "re-fetch one report" request.
+    throw new SpApiError(409, `Report ${amazonReportId} has no stored amazon_report_document_id`);
+  }
+
+  // One call. Then the download. Only then do we write anything.
+  const docInfo = await getReportDocument(endpoint, accessToken, row.amazon_report_document_id);
+  const tsvText = await downloadAndDecompress(docInfo);
+  const rows = parseTsv(tsvText);
+
+  const built = await storeParsedReport(supabase, {
+    userId,
+    reportRowId: row.id,
+    amazonReportId,
+    rows,
+    fallbackMeta: row.raw_metadata || null,
+  });
+
+  return {
+    report_id: amazonReportId,
+    currency: built.currency ?? null,
+    settlement_id: built.settlementId ?? null,
+    start: built.settlementStart ?? null,
+    end: built.settlementEnd ?? null,
+    deposit_date: built.depositDate ?? null,
+    tsv_rows: rows.length,
+    rows_written: built.items.length,
+    posted_dates_filled: built.postedDatesFilled,
+    posted_dates_null: built.postedDatesNull,
+    totals_recomputed: false,
+  };
+}
+
+// Aggregate settlement_line_items into settlement_category_totals for a year.
+//
+// ⚠️ STILL BROKEN IN TWO WAYS, ON PURPOSE UNTOUCHED (2026-11-23). The currency
+// filter below was added because it had to ship with the date-parser fix; the
+// rest of this function is a separate, larger job and the totals it writes are
+// on hold until then:
+//
+//   1. THE 1,000-ROW CAP. `.limit(50000)` is a REQUEST, and PostgREST clamps
+//      it to this project's db-max-rows of 1,000. There is no ORDER BY, so the
+//      1,000 rows that survive are arbitrary. Any year with more than 1,000
+//      categorised lines is therefore aggregated from an arbitrary subset --
+//      silently, because a full page looks exactly like a complete read.
+//   2. THE SIGN IS DISCARDED. `cur.total += Math.abs(...)` sums fees, refunds
+//      and sales as positive magnitudes, so a month's "total" for a category
+//      is not a signed figure and refunds inflate rather than reduce.
+//
+// The fix is one server-side aggregate (join the reports, filter the currency,
+// bucket by month in SQL, keep the sign, upsert non-destructively) and it needs
+// its own before/after comparison against a >1,000-line mixed-sign fixture.
+// Until that lands, treat settlement_category_totals as untrusted.
 async function recomputeMonthlyTotals(supabase: any, userId: string, year: number) {
-  // Aggregate settlement_line_items into settlement_category_totals for the requested year.
   // We compute per (user, year, month, marketplace=ALL, category).
   const startDate = `${year}-01-01`;
   const endDate = `${year + 1}-01-01`;
@@ -345,10 +433,26 @@ async function recomputeMonthlyTotals(supabase: any, userId: string, year: numbe
   }).select?.() ?? { data: null, error: null } as any;
 
   // RPC may not exist — do it manually with a SELECT
+  //
+  // USD ONLY, EXPLICITLY. settlement_line_items has no currency column of its
+  // own; the currency lives on the parent report, so this aggregate was
+  // currency-blind. Until 2026-11-23 that was harmless by accident: every
+  // non-USD line had a NULL posted_date (the dotted-date parser bug) and the
+  // posted_date range filter below already excluded them, so no foreign amount
+  // ever entered a USD total. Fixing the parser removes that accident -- newly
+  // re-fetched CAD/MXN/BRL lines arrive dated, and without this join they
+  // would be summed into the same bucket as USD at face value, no conversion.
+  // The filter has to land in the same commit as the parser fix for that
+  // reason; on its own today it changes nothing.
+  //
+  // !inner makes the join a filter rather than an optional embed, so a line
+  // whose report is missing or non-USD is dropped from the result, not
+  // returned with a null child.
   const { data: rows, error: aggErr } = await supabase
     .from('settlement_line_items')
-    .select('posted_date, category, amount')
+    .select('posted_date, category, amount, settlement_reports!inner(currency)')
     .eq('user_id', userId)
+    .eq('settlement_reports.currency', 'USD')
     .gte('posted_date', startDate)
     .lt('posted_date', endDate)
     .not('category', 'is', null)
@@ -444,6 +548,51 @@ serve(async (req) => {
       return new Response(JSON.stringify({ ok: true, action: 'recompute', categoryTotalsUpdated: updated }), {
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       });
+    }
+
+    // === REFETCH ONE REPORT ===
+    // Repairs a single already-parsed report in place. One getReportDocument
+    // call, that report's rows only, and NO recompute -- see refetchReport.
+    // Meant to be driven one id at a time, spaced by hand, stopping at the
+    // first 429, which is why it neither loops nor retries.
+    if (action === 'refetch') {
+      const reportId = body.reportId || body.report_id;
+      if (!reportId) {
+        return new Response(JSON.stringify({ error: 'reportId is required for action=refetch' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const { data: authRows } = await supabaseAdmin
+        .from('seller_authorizations')
+        .select('refresh_token, marketplace_id')
+        .eq('user_id', user.id);
+      const refetchAuth = authRows?.find((a: any) => a.marketplace_id === 'ATVPDKIKX0DER') || authRows?.[0];
+      if (!refetchAuth?.refresh_token) {
+        return new Response(JSON.stringify({ error: 'No Amazon seller authorization found' }), {
+          status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      try {
+        const accessToken = await getLWAAccessToken(refetchAuth.refresh_token);
+        const endpoint = getSpApiEndpoint(refetchAuth.marketplace_id);
+        const out = await refetchReport(supabaseAdmin, user.id, endpoint, accessToken, String(reportId));
+        return new Response(JSON.stringify({ ok: true, action: 'refetch', ...out }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (err: any) {
+        // A throttle, a missing report and a missing document id each get their
+        // own status so the caller can tell "stop pacing and wait" apart from
+        // "this report can never be re-fetched". Nothing was written in any of
+        // those cases: every failure here happens before the first write.
+        const status = err instanceof SpApiError ? err.status : 500;
+        console.error(`[refetch] report ${reportId} failed (${status}): ${err.message}`);
+        return new Response(
+          JSON.stringify({ ok: false, action: 'refetch', report_id: reportId, status, error: err.message, wrote_anything: false }),
+          { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+        );
+      }
     }
 
     // === SYNC ===

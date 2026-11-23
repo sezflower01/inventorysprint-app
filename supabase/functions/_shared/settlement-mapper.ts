@@ -39,17 +39,89 @@ export function parseAmount(s?: string): number {
   return parseFloat(t) || 0;
 }
 
+// Build YYYY-MM-DD from numeric parts, verifying the day actually exists in
+// that month. Date.UTC(2026, 1, 31) silently rolls to 3 March, so the
+// round-trip comparison is what makes an impossible date return null instead
+// of a plausible wrong one.
+function isoFromParts(year: number, month: number, day: number): string | null {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
+  if (year < 1970 || year > 2200) return null;
+  if (month < 1 || month > 12) return null;
+  if (day < 1 || day > 31) return null;
+  const d = new Date(Date.UTC(year, month - 1, day));
+  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== month - 1 || d.getUTCDate() !== day) {
+    return null;
+  }
+  return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+/**
+ * Settlement rows carry their posted date in the MARKETPLACE's own date
+ * convention, not one canonical format. Measured 2026-11-23 by downloading a
+ * single CAD settlement report (one getReportDocument call, read-only probe):
+ *
+ *   US  (USD) -> "2026-11-08 12:00:00 UTC"   year-first, dash-separated
+ *   CA  (CAD) -> "28.10.2026 15:54:28 UTC"   DAY-first, DOT-separated
+ *
+ * The CA form is why every non-USD line in settlement_line_items has a NULL
+ * posted_date (100% of the CAD, MXN and BRL lines): the old implementation
+ * handed the string straight to new Date(), which cannot read a dotted
+ * day-first date, so it returned null and the row was stored undated. The
+ * monthly aggregate skips undated lines, so no USD total was ever
+ * contaminated -- the cost was missing months on foreign lines, not wrong ones.
+ *
+ * MX and BR are assumed to be dotted day-first too (100% of their lines are
+ * undated, which is the same signature), but only the CAD file was sampled.
+ * Re-fetching one MXN and one BRL report after this ships is what confirms it:
+ * dates appear => same format; still null => a third format to add here.
+ *
+ * AMBIGUOUS INPUT RETURNS NULL ON PURPOSE. "08/11/2026" is 8 November in a
+ * day-first marketplace and 11 August in a month-first one, and nothing in the
+ * row says which. The old code fell through to new Date(), which always chose
+ * month-first, so a day-first file would have been stored with the day and
+ * month SWAPPED -- a wrong date that looks completely plausible and can never
+ * be spotted afterwards. A null is visibly missing and can be re-fetched; a
+ * silently swapped date cannot. So a slash- or dash-separated date is only
+ * accepted when one component is > 12 and therefore FORCES the order. That is
+ * deduction, not a guess.
+ *
+ * Returns the date as written in the file. Both sampled formats carry an
+ * explicit " UTC" suffix, so the written date is already the UTC date and the
+ * time of day is not needed.
+ */
 export function parsePostedDate(row: SettlementRow): string | null {
   const raw = row['posted-date-time'] || row['posted-date'];
   if (!raw) return null;
-  // Handle "YYYY-MM-DD HH:MM:SS UTC", ISO, or "MM/DD/YYYY"
-  let s = raw.trim().replace(' UTC', 'Z').replace(' ', 'T');
-  let d = new Date(s);
-  if (isNaN(d.getTime())) {
-    // try MM/DD/YYYY
-    const m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-    if (m) d = new Date(`${m[3]}-${m[1].padStart(2,'0')}-${m[2].padStart(2,'0')}`);
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  // 1. Dotted: day-first (CA, and very likely MX/BR). Dots are only ever used
+  //    day-first, so this order is a convention and not an inference. A
+  //    trailing time is ignored; isoFromParts rejects a month > 12, so a
+  //    hypothetical dotted month-first file fails loudly instead of flipping.
+  const dotted = trimmed.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\D|$)/);
+  if (dotted) {
+    return isoFromParts(Number(dotted[3]), Number(dotted[2]), Number(dotted[1]));
   }
+
+  // 2. Slash or dash with the YEAR LAST: accepted only when forced.
+  //    (A dash-separated date with the year FIRST is ISO and falls through to
+  //    step 3; this pattern cannot match it, because the year is 4 digits.)
+  const yearLast = trimmed.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})(?:\D|$)/);
+  if (yearLast) {
+    const first = Number(yearLast[1]);
+    const second = Number(yearLast[2]);
+    const year = Number(yearLast[3]);
+    if (first > 12 && second <= 12) return isoFromParts(year, second, first); // DD/MM forced
+    if (second > 12 && first <= 12) return isoFromParts(year, first, second); // MM/DD forced
+    return null; // ambiguous -- see the header comment
+  }
+
+  // 3. Year-first / ISO, which is what the US flat file sends. Unchanged
+  //    behaviour: " UTC" becomes "Z" and the single separating space becomes
+  //    "T", then the runtime parses it.
+  const s = trimmed.replace(' UTC', 'Z').replace(' ', 'T');
+  const d = new Date(s);
   if (isNaN(d.getTime())) return null;
   return d.toISOString().slice(0, 10);
 }
