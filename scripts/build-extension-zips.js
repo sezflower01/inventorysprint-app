@@ -42,6 +42,10 @@ async function main() {
     {
       src: path.join(root, "extension-create"),
       out: path.join(root, "public", "inventorysprint-create-listing-extension.zip"),
+      // Tests are not part of what a user installs. Without this the zip
+      // shipped tests/salesWindows.test.js, which imports vitest and would be
+      // dead weight in the extension at best.
+      ignore: ["tests/**"],
     },
     // ── User Analyser: WITHHELD FROM THE PUBLIC BUILD ───────────────────
     //

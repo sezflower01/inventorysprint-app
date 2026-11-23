@@ -1,7 +1,7 @@
 // Service worker — token storage, refresh, edge-function proxy, REST insert.
 // Identical contract to the Analyzer extension so the same /tools/ext-handoff
 // page works without changes.
-importScripts("config.js");
+importScripts("config.js", "salesWindows.js");
 
 const CFG = self.INVSPRNT_CFG;
 
@@ -1085,13 +1085,39 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           const asin = encodeURIComponent(asinRaw);
 
           const today = new Date();
-          const cutoff30Date = new Date(today.getTime() - 30 * 86400000);
-          const cutoff30 = cutoff30Date.toISOString().slice(0, 10);
+          // No client-side cutoffs any more: the windows and their day
+          // boundaries are computed server-side in America/Los_Angeles, which
+          // is what order_date actually is. Deriving them from the browser's
+          // clock put ~23% of rows on the wrong calendar day for anyone not in
+          // Pacific time.
 
-          const [invRows, recentSales, allSales, settingsRows, shipItems] = await Promise.all([
+          const [invRows, salesWindows, settingsRows, shipItems] = await Promise.all([
             restGet(`inventory?user_id=eq.${uid}&asin=eq.${asin}&select=available,inbound,reserved,listing_status,sku`).catch(() => []),
-            restGet(`sales_orders?user_id=eq.${uid}&asin=eq.${asin}&order_date=gte.${cutoff30}&select=quantity,order_date&limit=2000`).catch(() => []),
-            restGet(`sales_orders?user_id=eq.${uid}&asin=eq.${asin}&select=quantity,order_date&order=order_date.asc&limit=5000`).catch(() => []),
+            // SALES WINDOWS COME FROM THE SERVER, NOT FROM SCANNING ROWS.
+            //
+            // These two reads used to be:
+            //   sales_orders?...&order_date=gte.${cutoff30}&limit=2000
+            //   sales_orders?...&order=order_date.asc&limit=5000
+            //
+            // Both asked for more rows than PostgREST will ever return:
+            // db-max-rows is 1000 here and `limit` can only LOWER that cap, not
+            // raise it. The second one was worse -- sorted ASCENDING, so the
+            // 1,000 rows it kept were the OLDEST orders and every recent sale
+            // was cut off. On a listing whose lifetime orders exceed the cap
+            // the panel showed 7d and 30d as ZERO with a small non-zero 90d,
+            // while Seller Central showed a normal week -- the exact shape of
+            // keeping the 1,000 OLDEST rows. Verified against the aggregate
+            // 2026-11-22: all three windows were substantially non-zero.
+            //
+            // One aggregate instead: bounded work whatever the volume, a single
+            // jsonb value with no row count to cap, and the SAME sales
+            // definition as the Repricer page's get_repricer_asin_sales_json,
+            // so the two screens cannot disagree. STABLE, so GET works and
+            // restGet needs no change.
+            // `asin` is already encodeURIComponent(asinRaw) from above -- encoding it
+            // again would send B0G4BQ42W3 intact but mangle anything needing escapes.
+            restGet(`rpc/get_asin_sales_windows_json?p_asin=${asin}`)
+              .catch(() => null),
             restGet(`reorder_planning_settings?user_id=eq.${uid}&select=coverage_days,supplier_lead_time_days,prep_days,shipping_to_amazon_days,amazon_receiving_days,safety_percent&limit=1`).catch(() => []),
             // WHICH SHIPMENTS OF THIS ASIN WERE RECEIVED. Needed for the
             // Reserved rule above, and NOT available from the inventory row --
@@ -1155,37 +1181,28 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
             reserved += Number(r.reserved) || 0;
           }
 
-          // Sales aggregation
-          const recent = Array.isArray(recentSales) ? recentSales : [];
-          const recentUnits = recent.reduce((s, r) => s + (Number(r.quantity) || 1), 0);
-          let earliestRecent = null;
-          for (const r of recent) {
-            if (!r.order_date) continue;
-            if (!earliestRecent || r.order_date < earliestRecent) earliestRecent = r.order_date;
-          }
+          // Sales aggregation -- read straight off the envelope.
+          //
+          // NOTE on the previous shape: flipping that ascending sort to
+          // descending would have fixed the 7/30/90 display and silently broken
+          // the historical rate, because `earliestAll` was `all[0].order_date`
+          // -- correct only while the sort is ascending. Under desc it becomes
+          // the NEWEST order, historicalDays collapses toward 1, and the
+          // fallback rate goes wildly high. The aggregate removes the ordering
+          // question altogether: min() and max() do not care.
           const daysSince = (dateStr) => {
             if (!dateStr) return 30;
             const ms = today.getTime() - new Date(dateStr).getTime();
             return Math.max(1, Math.ceil(ms / 86400000));
           };
-          const actualSalesPeriod = earliestRecent ? Math.min(30, daysSince(earliestRecent)) : 30;
-
-          const all = Array.isArray(allSales) ? allSales : [];
-          const historicalUnits = all.reduce((s, r) => s + (Number(r.quantity) || 1), 0);
-          const earliestAll = all.length ? all[0].order_date : null;
-          const historicalDays = earliestAll ? daysSince(earliestAll) : null;
-
-          // Sales buckets (7/30/90)
-          const cutoff7 = new Date(today.getTime() - 7 * 86400000).toISOString().slice(0, 10);
-          const cutoff90 = new Date(today.getTime() - 90 * 86400000).toISOString().slice(0, 10);
-          let d7 = 0, d30 = 0, d90 = 0;
-          for (const r of all) {
-            const q = Number(r.quantity) || 1;
-            const od = r.order_date || "";
-            if (od >= cutoff7) d7 += q;
-            if (od >= cutoff30) d30 += q;
-            if (od >= cutoff90) d90 += q;
-          }
+          const win = readSalesWindows(salesWindows);
+          const recentUnits = win.units30d;
+          const actualSalesPeriod = win.firstOrderDate30d
+            ? Math.min(30, daysSince(win.firstOrderDate30d))
+            : 30;
+          const historicalUnits = win.unitsLifetime;
+          const historicalDays = win.firstOrderDate ? daysSince(win.firstOrderDate) : null;
+          const d7 = win.units7d, d30 = win.units30d, d90 = win.units90d;
 
           // computeReplenishmentBreakdown — verbatim port of src/lib/replenishment.ts
           let ads = 0;
