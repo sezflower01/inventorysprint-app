@@ -1051,24 +1051,14 @@
   }
 
   // ── Dimensions & weight ────────────────────────────────────────────
-  function fmtDimUnit(u) {
-    if (!u) return "";
-    const s = String(u).toLowerCase();
-    if (s.startsWith("centim")) return "cm";
-    if (s.startsWith("millim")) return "mm";
-    if (s.startsWith("inch")) return "in";
-    if (s.startsWith("meter")) return "m";
-    return s;
-  }
-  function fmtWtUnit(u) {
-    if (!u) return "";
-    const s = String(u).toLowerCase();
-    if (s.startsWith("gram")) return "g";
-    if (s.startsWith("kilo")) return "kg";
-    if (s.startsWith("pound")) return "lb";
-    if (s.startsWith("ounce")) return "oz";
-    return s;
-  }
+  // Unit handling lives in sizeTier.js, so the dimension DISPLAY and the size
+  // TIER can no longer diverge. They did, in the dangerous direction: toInches()
+  // below understood metres and returned null for a unit it did not recognise,
+  // while classifySizeTier() had its own inline block that knew only mm and cm
+  // and read every other unit as inches. The panel showed correct inches beside
+  // a tier computed from raw millimetres. See the header of sizeTier.js.
+  const fmtDimUnit = (u) => self.INVSPRNT_UNITS.normDimUnit(u);
+  const fmtWtUnit = (u) => self.INVSPRNT_UNITS.normWtUnit(u);
   /**
    * SHOW THE UNITS THE SELLER WORKS IN (2026-09-29).
    *
@@ -1079,7 +1069,9 @@
    * on the one screen meant to make a buy/skip call quickly.
    *
    * classifySizeTier() below already converts to inches and pounds internally
-   * for exactly this reason; the display simply never did.
+   * for exactly this reason; the display simply never did. Both now call the
+   * same converter in sizeTier.js -- see 2026-11-23 there for what the two
+   * separate copies cost.
    *
    * Converted for marketplaces that sell in imperial (US only today) and left
    * metric elsewhere, since a UK or DE seller wants centimetres. The source
@@ -1090,25 +1082,9 @@
   const usesImperial = () => IMPERIAL_MARKETPLACES.has(String(state.marketplace || "US").toUpperCase());
 
   /** → inches. null when the unit is not one we recognise: better a blank than a wrong number. */
-  function toInches(n, unit) {
-    if (!Number.isFinite(n) || n <= 0) return null;
-    const u = fmtDimUnit(unit);
-    if (u === "in") return n;
-    if (u === "cm") return n / 2.54;
-    if (u === "mm") return n / 25.4;
-    if (u === "m") return n * 39.3701;
-    return null;
-  }
+  const toInches = (n, unit) => self.INVSPRNT_UNITS.toInches(n, unit);
   /** → pounds, same rule. */
-  function toPounds(n, unit) {
-    if (!Number.isFinite(n) || n <= 0) return null;
-    const u = fmtWtUnit(unit);
-    if (u === "lb") return n;
-    if (u === "oz") return n / 16;
-    if (u === "g") return n / 453.592;
-    if (u === "kg") return n * 2.20462;
-    return null;
-  }
+  const toPounds = (n, unit) => self.INVSPRNT_UNITS.toPounds(n, unit);
 
   function fmtDims(l, w, h, unit) {
     const parts = [l, w, h].filter((n) => Number.isFinite(n) && n > 0);
@@ -1971,24 +1947,14 @@
   function classifySizeTier() {
     const d = state.dims;
     if (!d) return { level: "unknown", text: "Unknown" };
-    const u = String(d.package_dim_unit || "").toLowerCase();
-    let L = d.package_length, W = d.package_width, H = d.package_height;
-    if (u.startsWith("millim") || u === "mm") { L = L/25.4; W = W/25.4; H = H/25.4; }
-    else if (u.startsWith("centim") || u === "cm") { L = L/2.54; W = W/2.54; H = H/2.54; }
-    let wt = d.package_weight;
-    const wu = String(d.package_weight_unit || "").toLowerCase();
-    if (wu.startsWith("gram") || wu === "g") wt = wt / 453.592;
-    else if (wu.startsWith("kilo")) wt = wt * 2.20462;
-    else if (wu.startsWith("ounce") || wu === "oz") wt = wt / 16;
-    const sides = [L, W, H].filter(Number.isFinite).sort((a,b) => b - a);
-    if (sides.length < 3 || !Number.isFinite(wt)) return { level: "unknown", text: "Unknown" };
-    const [longest, median, shortest] = sides;
-    const girth = longest + 2 * (median + shortest);
-    if (longest <= 15 && median <= 12 && shortest <= 0.75 && wt <= 1) return { level: "good",    text: "Small Standard" };
-    if (longest <= 18 && median <= 14 && shortest <= 8    && wt <= 20) return { level: "good",    text: "Large Standard" };
-    if (longest <= 60 && girth   <= 130 && wt <= 50)                  return { level: "caution", text: "Large Oversize" };
-    if (longest <= 108 && girth  <= 165)                              return { level: "caution", text: "Oversize" };
-    return { level: "bad", text: "Heavy/Bulky" };
+    return self.classifyFbaSizeTier({
+      length: d.package_length,
+      width: d.package_width,
+      height: d.package_height,
+      dimUnit: d.package_dim_unit,
+      weight: d.package_weight,
+      weightUnit: d.package_weight_unit,
+    });
   }
   /**
    * Fold the fee verdict into the Size Tier row.

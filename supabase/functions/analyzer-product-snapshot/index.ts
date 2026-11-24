@@ -21,6 +21,7 @@ import {
 import { isFbaOffer } from '../_shared/keepa-offers.ts';
 import { summarizeCountSeries, computeBuyBoxOwnership } from '../_shared/plRiskSeries.ts';
 import { computePrivateLabelRisk, plRiskCategoricalLabel } from '../_shared/plRisk.ts';
+import { classifyFbaSizeTier } from './fbaSizeTier.ts';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -602,6 +603,16 @@ Deno.serve(async (req) => {
       : 'info';
     const plAlertValue = plResult.level === 'unknown' ? plRiskLabel : `${plResult.level} Risk`;
 
+    // Size tier from all three sides and the weight, not from packageHeight
+    // alone -- see fbaSizeTier.ts for what the single-axis test got wrong and
+    // why this must keep agreeing with the Chrome panel.
+    const sizeTier = classifyFbaSizeTier({
+      lengthMm: p.packageLength,
+      widthMm: p.packageWidth,
+      heightMm: p.packageHeight,
+      weightG: p.packageWeight,
+    });
+
     const alerts: AnalyzerSnapshot['alerts'] = [
       { key: 'eligibility', label: 'Eligibility', status: 'info', value: 'Connect Amazon to verify' },
       { key: 'hazmat', label: 'Hazmat', status: isHazmat ? 'bad' : 'good', value: isHazmat ? 'Yes' : 'No' },
@@ -609,7 +620,7 @@ Deno.serve(async (req) => {
       { key: 'amazon_share', label: 'Amazon Share Buy Box', status: amazonOnListing ? 'warn' : 'good', value: amazonOnListing ? 'Sometimes' : 'Never on Listing' },
       { key: 'private_label', label: 'Private Label', status: plAlertStatus, value: plAlertValue },
       { key: 'ip', label: 'IP Analysis', status: 'good', value: 'No known IP issues' },
-      { key: 'size', label: 'Size', status: 'info', value: p.packageHeight && p.packageHeight > 460 ? 'Oversize' : 'Standard Size' },
+      { key: 'size', label: 'Size', status: sizeTier.status, value: sizeTier.text },
       { key: 'meltable', label: 'Meltable', status: isMeltable ? 'warn' : 'good', value: isMeltable ? 'Yes' : 'No' },
       { key: 'variations', label: 'Variations', status: hasVariations ? 'info' : 'good', value: hasVariations ? `${p.variations.length}` : 'No' },
     ];
