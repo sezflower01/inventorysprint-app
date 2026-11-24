@@ -38,6 +38,16 @@ async function main() {
     {
       src: path.join(root, "extension"),
       out: path.join(root, "public", "inventorysprint-extension.zip"),
+      // Same reason as extension-create below: a test file is not part of what
+      // a user installs. This entry had no ignore list, so the zip shipped
+      // every *.test.js in extension/ plus the package.json that exists only
+      // to make `node --test` treat them as CommonJS. Nothing secret, just
+      // dead weight in a download, and it grew every time a test was added.
+      //
+      // README.md is deliberately KEPT: someone unzipping this folder to load
+      // it unpacked is the person most likely to want the install notes, and
+      // the extension-create zip ships its own README today.
+      ignore: ["*.test.js", "package.json"],
     },
     {
       src: path.join(root, "extension-create"),
