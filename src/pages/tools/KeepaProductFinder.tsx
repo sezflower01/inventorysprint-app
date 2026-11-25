@@ -963,6 +963,19 @@ const KeepaProductFinder = () => {
                 </AlertDialogContent>
               </AlertDialog>
               <Button
+                onClick={handleExportApproved}
+                disabled={exportingApproved}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
+                title="Download every APPROVED product matching the current filters as an Excel file"
+              >
+                {exportingApproved
+                  ? <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  : <ShieldCheck className="h-4 w-4 mr-2" />}
+                {exportingApproved
+                  ? "Building Excel…"
+                  : `Download Approved${eligibilitySummary.approved > 0 ? ` (${eligibilitySummary.approved.toLocaleString()})` : ''}`}
+              </Button>
+              <Button
                 onClick={handleDownloadAll}
                 disabled={downloading || !dbStats || dbStats.total === 0}
                 variant="outline"
@@ -1152,19 +1165,6 @@ const KeepaProductFinder = () => {
                   <Label htmlFor="approved-only" className="text-sm cursor-pointer">
                     Show Approved Only
                   </Label>
-                  <Button
-                    onClick={handleExportApproved}
-                    disabled={exportingApproved}
-                    variant="outline"
-                    size="sm"
-                    className="h-8"
-                    title="Download every approved product matching these filters as an Excel file"
-                  >
-                    {exportingApproved
-                      ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
-                      : <Download className="h-3.5 w-3.5 mr-1" />}
-                    Export Approved
-                  </Button>
                 </div>
               </div>
             </Card>
