@@ -442,7 +442,7 @@ const KeepaProductFinder = () => {
       const from = searchPage * perPage;
       if (from >= maxResults) {
         setProducts([]);
-        toast({ title: "Limit reached", description: "Maximum 500 products per search. Refine your filters." });
+        toast({ title: "Limit reached", description: `Paging stops at ${MAX_SEARCH_RESULTS.toLocaleString()} products. Refine your filters.` });
         setLoading(false);
         return;
       }
@@ -467,8 +467,25 @@ const KeepaProductFinder = () => {
       const fetchedProducts = fresh.slice(0, effectiveLimit);
 
       setProducts(fetchedProducts);
-      // Display total minus owned (approximation — actual unowned count requires server filter)
-      setTotalResults(Math.min((count ?? 0) - ownedAsins.size, MAX_SEARCH_RESULTS));
+
+      // The whole matching set, used for BOTH the result count and the scan.
+      // Collected once: a second pass for the scan would double the reads on a
+      // 10,000-row import.
+      let allMatching: string[] = [];
+      try {
+        allMatching = await collectAllMatchingAsins();
+      } catch (collectErr) {
+        console.warn('[ProductFinder] Full-set collection failed:', collectErr);
+      }
+      // This used to read `count - ownedAsins.size`, which subtracted the user's
+      // TOTAL owned count from the count of rows matching THESE filters -- two
+      // different populations. Once more ASINs had been delivered than the
+      // filters match, it went negative, and `Page 1 of -4` followed from it.
+      // allMatching is the filtered set, so intersecting it with owned is exact.
+      const unownedMatching = allMatching.length > 0
+        ? allMatching.filter(a => !ownedAsins.has(a)).length
+        : Math.max(0, (count ?? 0) - ownedAsins.size);
+      setTotalResults(Math.min(unownedMatching, MAX_SEARCH_RESULTS));
       setPage(searchPage);
 
       if (!fetchedProducts || fetchedProducts.length === 0) {
@@ -526,14 +543,9 @@ const KeepaProductFinder = () => {
         //    inside its freshness window and re-checks everything else, so a
         //    forced rescan was spending SP-API calls for nothing.
         await loadStoredEligibility(fetchedProducts.map(p => p.asin));
-        let scanTargets = fetchedProducts.map(p => p.asin);
-        try {
-          const allMatching = await collectAllMatchingAsins();
-          if (allMatching.length > 0) scanTargets = allMatching;
-        } catch (collectErr) {
-          console.warn('[ProductFinder] Full-set collection failed, scanning page only:', collectErr);
-        }
-        checkEligibilityProgressive(scanTargets);
+        checkEligibilityProgressive(
+          allMatching.length > 0 ? allMatching : fetchedProducts.map(p => p.asin),
+        );
       }
     } catch (e: any) {
       toast({ title: "Search failed", description: e.message, variant: "destructive" });
@@ -740,7 +752,7 @@ const KeepaProductFinder = () => {
     if (scanAbortRef.current) scanAbortRef.current.abort();
   };
 
-  const totalPages = Math.ceil(totalResults / perPage);
+  const totalPages = Math.max(1, Math.ceil(Math.max(0, totalResults) / perPage));
 
   // Compute summary counts from eligibilityMap
   const eligibilitySummary = (() => {
