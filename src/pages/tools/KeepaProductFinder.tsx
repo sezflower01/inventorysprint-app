@@ -14,6 +14,7 @@ import { Switch } from "@/components/ui/switch";
 import { Progress } from "@/components/ui/progress";
 import { Search, Loader2, ExternalLink, ShoppingCart, ChevronLeft, ChevronRight, RotateCcw, Globe, Upload, Database, Trash2, Download, ShieldCheck, ShieldX, ShieldAlert } from "lucide-react";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
+import * as XLSX from "xlsx";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
@@ -67,6 +68,7 @@ const KeepaProductFinder = () => {
   const [perPage] = useState(250);
   const [uploading, setUploading] = useState(false);
   const [checkingAll, setCheckingAll] = useState(false);
+  const [exportingApproved, setExportingApproved] = useState(false);
   const [brands, setBrands] = useState<string[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [selectedAsins, setSelectedAsins] = useState<Set<string>>(new Set());
@@ -391,6 +393,96 @@ const KeepaProductFinder = () => {
       toast({ title: "Check failed", description: e.message, variant: "destructive" });
     } finally {
       setCheckingAll(false);
+    }
+  };
+
+  // Export every APPROVED product matching the current filters to .xlsx.
+  //
+  // Reads the verdicts from the database rather than from eligibilityMap, which
+  // only holds what this session has seen. After a 10,000-ASIN sweep the
+  // approved set is far larger than the 250 rows on screen, and an export built
+  // from the page would quietly hand back a fraction of it.
+  const handleExportApproved = async () => {
+    if (!user) return;
+    setExportingApproved(true);
+    try {
+      const matching = await collectAllMatchingAsins();
+      if (matching.length === 0) {
+        toast({ title: "Nothing to export", description: "No products match the current filters." });
+        return;
+      }
+
+      // Which of them are approved, per the stored verdicts.
+      const approved = new Map<string, string>(); // asin -> checked_at
+      for (let i = 0; i < matching.length; i += 200) {
+        const chunk = matching.slice(i, i + 200);
+        const { data, error } = await (supabase.from('user_approved_products' as any) as any)
+          .select('asin, approval_status, checked_at')
+          .eq('user_id', user.id)
+          .eq('marketplace', 'US')
+          .eq('approval_status', 'approved')
+          .in('asin', chunk);
+        if (error) throw error;
+        for (const r of (data as any[]) || []) approved.set(r.asin, r.checked_at);
+      }
+
+      if (approved.size === 0) {
+        toast({
+          title: "No approved products",
+          description: "Nothing in the current filters has an approved verdict yet. Run Check All first.",
+        });
+        return;
+      }
+
+      // Product detail for those ASINs.
+      const approvedAsins = [...approved.keys()];
+      const details = new Map<string, any>();
+      for (let i = 0; i < approvedAsins.length; i += 200) {
+        const chunk = approvedAsins.slice(i, i + 200);
+        const { data, error } = await (supabase.from('keepa_simple_products' as any) as any)
+          .select('asin, title, brand, category, image_url, new_offer_count, fba_offer_count, fbm_offer_count')
+          .in('asin', chunk);
+        if (error) throw error;
+        for (const r of (data as any[]) || []) details.set(r.asin, r);
+      }
+
+      const rows = approvedAsins
+        .map(asin => {
+          const d = details.get(asin) || {};
+          return {
+            ASIN: asin,
+            Title: d.title ?? '',
+            Brand: d.brand ?? '',
+            Category: d.category ?? '',
+            'Total Offers': d.new_offer_count ?? '',
+            'FBA Offers': d.fba_offer_count ?? '',
+            'FBM Offers': d.fbm_offer_count ?? '',
+            'Image URL': d.image_url ?? '',
+            'Amazon URL': `https://www.amazon.com/dp/${asin}`,
+            Eligibility: 'Approved',
+            'Checked At': approved.get(asin) ?? '',
+          };
+        })
+        .sort((a, b) => String(a.Title).localeCompare(String(b.Title)));
+
+      const ws = XLSX.utils.json_to_sheet(rows);
+      ws['!cols'] = [
+        { wch: 12 }, { wch: 60 }, { wch: 22 }, { wch: 24 },
+        { wch: 12 }, { wch: 11 }, { wch: 11 },
+        { wch: 40 }, { wch: 36 }, { wch: 12 }, { wch: 22 },
+      ];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Approved");
+      XLSX.writeFile(wb, `approved_products_${new Date().toISOString().slice(0, 10)}.xlsx`);
+
+      toast({
+        title: "Export ready",
+        description: `${rows.length.toLocaleString()} approved products of ${matching.length.toLocaleString()} matching.`,
+      });
+    } catch (e: any) {
+      toast({ title: "Export failed", description: e.message, variant: "destructive" });
+    } finally {
+      setExportingApproved(false);
     }
   };
 
@@ -1060,6 +1152,19 @@ const KeepaProductFinder = () => {
                   <Label htmlFor="approved-only" className="text-sm cursor-pointer">
                     Show Approved Only
                   </Label>
+                  <Button
+                    onClick={handleExportApproved}
+                    disabled={exportingApproved}
+                    variant="outline"
+                    size="sm"
+                    className="h-8"
+                    title="Download every approved product matching these filters as an Excel file"
+                  >
+                    {exportingApproved
+                      ? <Loader2 className="h-3.5 w-3.5 animate-spin mr-1" />
+                      : <Download className="h-3.5 w-3.5 mr-1" />}
+                    Export Approved
+                  </Button>
                 </div>
               </div>
             </Card>
