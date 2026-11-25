@@ -34,7 +34,22 @@ interface SimpleProduct {
 
 type EligibilityStatus = 'pending' | 'checking' | 'approved' | 'restricted' | 'approval_required' | 'error';
 
-const BATCH_SIZE = 5;
+// ASINs per check-product-eligibility invocation. The function checks them
+// SEQUENTIALLY with a 500ms pause every 5, so 20 is ~12s of wall time - well
+// inside the edge-function timeout, and ~2 SP-API calls/sec, under the
+// getListingsRestrictions limit. Raising this cuts round-trips; adding PARALLEL
+// invocations would not help, because the per-operation quota is shared.
+const BATCH_SIZE = 20;
+
+// Hard ceiling on how deep "Find Products" will page. Was 500, which capped a
+// 1,000-row Excel import at two pages. Imports here run to 5,000-10,000+, so
+// this is a runaway guard, not a product limit - do not lower it to "tidy up".
+const MAX_SEARCH_RESULTS = 1000000;
+
+// Days a stored verdict stays usable. Matches check-product-eligibility's own
+// freshness_days default, and is what makes an interrupted sweep resumable:
+// anything already decided inside this window is not sent again.
+const VERDICT_FRESH_DAYS = 7;
 
 const KeepaProductFinder = () => {
   const { user } = useAuth();
@@ -51,6 +66,7 @@ const KeepaProductFinder = () => {
   const [page, setPage] = useState(0);
   const [perPage] = useState(250);
   const [uploading, setUploading] = useState(false);
+  const [checkingAll, setCheckingAll] = useState(false);
   const [brands, setBrands] = useState<string[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [selectedAsins, setSelectedAsins] = useState<Set<string>>(new Set());
@@ -134,29 +150,87 @@ const KeepaProductFinder = () => {
   useState(() => { loadFilterOptions(); });
 
   // Progressive eligibility check — called after products are loaded
-  const checkEligibilityProgressive = useCallback(async (productList: SimpleProduct[]) => {
-    if (!user || productList.length === 0) return;
+  const checkEligibilityProgressive = useCallback(async (
+    asins: string[],
+    opts: { forceRescan?: boolean; skipKnown?: boolean } = {},
+  ) => {
+    if (!user || asins.length === 0) return;
+    const forceRescan = opts.forceRescan === true;
+    const skipKnown = opts.skipKnown !== false && !forceRescan;
 
     // Cancel any previous scan
     if (scanAbortRef.current) scanAbortRef.current.abort();
     const controller = new AbortController();
     scanAbortRef.current = controller;
 
-    const asins = productList.map(p => p.asin);
+    // Merge, do not replace: a sweep covers ASINs that are not on the displayed
+    // page, and that page's badges may already be hydrated from storage.
+    // Replacing the map would blank them.
+    setEligibilityMap(prev => {
+      const next = { ...prev };
+      for (const a of asins) if (!next[a]) next[a] = 'pending';
+      return next;
+    });
 
-    // Set all to 'pending' initially
-    const initialMap: Record<string, EligibilityStatus> = {};
-    asins.forEach(a => { initialMap[a] = 'pending'; });
-    setEligibilityMap(initialMap);
-    setEligibilityProgress({ checked: 0, total: asins.length });
+    // Resume rather than restart. A 10,000-ASIN sweep is ~90 minutes of SP-API
+    // calls, so it WILL get interrupted - a closed tab, a changed filter, a
+    // reload. The function persists each verdict as it goes (chunks of 100), so
+    // re-running only needs to cover what is still undecided.
+    //
+    // This trusts recent non-approved verdicts, which the edge function itself
+    // does not. That is safe here precisely BECAUSE of the freshness window: the
+    // reason the function re-scans non-approved rows is that pre-fix code could
+    // cache a Used/Refurbished restriction against a New listing, and such rows
+    // are far older than VERDICT_FRESH_DAYS. Anything decided this week was
+    // decided by current code.
+    let targets = asins;
+    let alreadyKnown = 0;
+    if (skipKnown) {
+      const since = new Date();
+      since.setDate(since.getDate() - VERDICT_FRESH_DAYS);
+      const decided: Record<string, EligibilityStatus> = {};
+      for (let i = 0; i < asins.length; i += 200) {
+        if (controller.signal.aborted) return;
+        const chunk = asins.slice(i, i + 200);
+        const { data } = await (supabase.from('user_approved_products' as any) as any)
+          .select('asin, approval_status, checked_at')
+          .eq('user_id', user.id)
+          .eq('marketplace', 'US')
+          .gte('checked_at', since.toISOString())
+          .in('asin', chunk);
+        for (const r of (data as any[]) || []) {
+          const st = String(r.approval_status || '').toLowerCase();
+          if (st === 'error' || !st) continue; // an error is not a verdict - retry it
+          decided[r.asin] = st === 'approved' ? 'approved'
+            : st === 'approval_required' ? 'approval_required'
+            : 'restricted';
+        }
+      }
+      alreadyKnown = Object.keys(decided).length;
+      if (alreadyKnown > 0) {
+        setEligibilityMap(prev => ({ ...prev, ...decided }));
+        targets = asins.filter(a => !decided[a]);
+      }
+    }
 
-    let checked = 0;
+    if (targets.length === 0) {
+      setEligibilityProgress(null);
+      toast({
+        title: "Already checked",
+        description: `All ${asins.length.toLocaleString()} products already have a verdict from the last ${VERDICT_FRESH_DAYS} days.`,
+      });
+      return;
+    }
+
+    setEligibilityProgress({ checked: alreadyKnown, total: asins.length });
+
+    let checked = alreadyKnown;
 
     // Process in batches of BATCH_SIZE
-    for (let i = 0; i < asins.length; i += BATCH_SIZE) {
+    for (let i = 0; i < targets.length; i += BATCH_SIZE) {
       if (controller.signal.aborted) return;
 
-      const batch = asins.slice(i, i + BATCH_SIZE);
+      const batch = targets.slice(i, i + BATCH_SIZE);
 
       // Mark this batch as 'checking'
       setEligibilityMap(prev => {
@@ -167,7 +241,7 @@ const KeepaProductFinder = () => {
 
       try {
         const { data, error } = await supabase.functions.invoke('check-product-eligibility', {
-          body: { marketplace: 'US', asins: batch, force_rescan: true },
+          body: { marketplace: 'US', asins: batch, force_rescan: forceRescan },
         });
 
         if (controller.signal.aborted) return;
@@ -206,10 +280,11 @@ const KeepaProductFinder = () => {
 
       checked += batch.length;
       setEligibilityProgress({ checked: Math.min(checked, asins.length), total: asins.length });
+      // (total stays the FULL set so the bar reflects real coverage, not just this run)
     }
 
     setEligibilityProgress(null);
-  }, [user]);
+  }, [user, toast]);
 
   // Fetch the user's owned ASINs (already delivered to them) so we can exclude them
   const fetchOwnedAsins = async (): Promise<Set<string>> => {
@@ -233,12 +308,128 @@ const KeepaProductFinder = () => {
     return owned;
   };
 
+  // One definition of the filter clauses, applied by BOTH the paged search and
+  // the full-table Check All sweep. Duplicating them is how the two would drift.
+  const applyFilters = (query: any) => {
+    if (searchText.trim()) {
+      const term = searchText.trim();
+      if (/^[A-Z0-9]{10}$/i.test(term)) {
+        query = query.ilike('asin', term);
+      } else {
+        query = query.or(`title.ilike.%${term}%,brand.ilike.%${term}%`);
+      }
+    }
+    if (brandFilter !== "all") query = query.eq('brand', brandFilter);
+    if (categoryFilter !== "all") query = query.eq('category', categoryFilter);
+
+    const fbaMin = fbaCompMin.trim() === "" ? null : parseInt(fbaCompMin, 10);
+    const fbaMax = fbaCompMax.trim() === "" ? null : parseInt(fbaCompMax, 10);
+    const totMin = totalCompMin.trim() === "" ? null : parseInt(totalCompMin, 10);
+    const totMax = totalCompMax.trim() === "" ? null : parseInt(totalCompMax, 10);
+    if (fbaMin !== null && Number.isFinite(fbaMin)) query = query.gte('fba_offer_count', fbaMin);
+    if (fbaMax !== null && Number.isFinite(fbaMax)) query = query.lte('fba_offer_count', fbaMax);
+    if (totMin !== null && Number.isFinite(totMin)) query = query.gte('new_offer_count', totMin);
+    if (totMax !== null && Number.isFinite(totMax)) query = query.lte('new_offer_count', totMax);
+    return query;
+  };
+
+  // Sweep eligibility over EVERY product matching the current filters, not just
+  // the 250 on the loaded page.
+  //
+  // Deliberately ignores the user_owned_products exclusion that handleSearch
+  // applies. That exclusion is a delivery mechanic ("do not show me what I have
+  // already been given") and every search writes the rows it returned into it -
+  // so after a few searches most of an Excel import is marked owned, and
+  // anything built on the search path would silently skip it.
+  // Every ASIN matching the current filters, paged past PostgREST's row cap.
+  // The scan reads from here rather than from the loaded page: the page is 250
+  // rows, which is what made the progress bar stop at 250.
+  const collectAllMatchingAsins = async (): Promise<string[]> => {
+    const asins: string[] = [];
+    const pageSize = 1000;
+    let offset = 0;
+    while (true) {
+      const { data, error } = await applyFilters(
+        supabase.from('keepa_simple_products' as any).select('asin'),
+      )
+        // asin is the primary key, so it orders pages without ties - a
+        // non-unique sort key repeats or skips rows at a page boundary.
+        .order('asin', { ascending: true })
+        .range(offset, offset + pageSize - 1);
+      if (error) throw error;
+      const rows = (data as any[]) || [];
+      if (rows.length === 0) break;
+      for (const r of rows) if (r.asin) asins.push(r.asin);
+      if (rows.length < pageSize) break;
+      offset += pageSize;
+      if (offset > MAX_SEARCH_RESULTS) break;
+    }
+    return asins;
+  };
+
+  const handleCheckAll = async () => {
+    if (!user) return;
+    setCheckingAll(true);
+    try {
+      const asins = await collectAllMatchingAsins();
+
+      if (asins.length === 0) {
+        toast({ title: "Nothing to check", description: "No products match the current filters." });
+        return;
+      }
+
+      // Roughly 0.6s of SP-API time per ASIN, measured against the function's
+      // own sequential loop and its 500ms pause every 5 calls.
+      const mins = Math.max(1, Math.round((asins.length * 0.6) / 60));
+      toast({
+        title: `Checking ${asins.length.toLocaleString()} products`,
+        description: `About ${mins} min if none are cached. Keep this tab open - if it closes, press Check All again and it resumes where it stopped.`,
+      });
+
+      await checkEligibilityProgressive(asins, { skipKnown: true });
+    } catch (e: any) {
+      toast({ title: "Check failed", description: e.message, variant: "destructive" });
+    } finally {
+      setCheckingAll(false);
+    }
+  };
+
+  // Badges used to live only in eligibilityMap, which handleSearch cleared on
+  // every search - so a page that had already been scanned came back blank and
+  // invited a re-scan for data already in the table. Hydrate from the stored
+  // verdicts instead, and let a live scan overwrite them.
+  const loadStoredEligibility = useCallback(async (asins: string[]) => {
+    if (!user || asins.length === 0) return;
+    const found: Record<string, EligibilityStatus> = {};
+    for (let i = 0; i < asins.length; i += 200) {
+      const chunk = asins.slice(i, i + 200);
+      const { data } = await (supabase.from('user_approved_products' as any) as any)
+        .select('asin, approval_status')
+        .eq('user_id', user.id)
+        .eq('marketplace', 'US')
+        .in('asin', chunk);
+      for (const r of (data as any[]) || []) {
+        const st = String(r.approval_status || '').toLowerCase();
+        found[r.asin] = st === 'approved' ? 'approved'
+          : st === 'approval_required' ? 'approval_required'
+          : st === 'error' ? 'error'
+          : 'restricted';
+      }
+    }
+    setEligibilityMap(prev => {
+      const next = { ...prev };
+      for (const [a, st] of Object.entries(found)) {
+        if (!next[a] || next[a] === 'pending') next[a] = st;
+      }
+      return next;
+    });
+  }, [user]);
+
   const handleSearch = async (searchPage = 0) => {
     setLoading(true);
     setSelectedAsins(new Set());
     // Cancel any ongoing scan
     if (scanAbortRef.current) scanAbortRef.current.abort();
-    setEligibilityMap({});
     setEligibilityProgress(null);
 
     try {
@@ -247,7 +438,7 @@ const KeepaProductFinder = () => {
 
       // 2. Build query, fetch a wider pool then filter out owned client-side
       //    (Postgres NOT IN with thousands of values is fragile; client-side filter is safer)
-      const maxResults = 500;
+      const maxResults = MAX_SEARCH_RESULTS;
       const from = searchPage * perPage;
       if (from >= maxResults) {
         setProducts([]);
@@ -262,25 +453,7 @@ const KeepaProductFinder = () => {
         .from('keepa_simple_products' as any)
         .select('*', { count: 'exact' });
 
-      if (searchText.trim()) {
-        const term = searchText.trim();
-        if (/^[A-Z0-9]{10}$/i.test(term)) {
-          query = query.ilike('asin', term);
-        } else {
-          query = query.or(`title.ilike.%${term}%,brand.ilike.%${term}%`);
-        }
-      }
-      if (brandFilter !== "all") query = query.eq('brand', brandFilter);
-      if (categoryFilter !== "all") query = query.eq('category', categoryFilter);
-
-      const fbaMin = fbaCompMin.trim() === "" ? null : parseInt(fbaCompMin, 10);
-      const fbaMax = fbaCompMax.trim() === "" ? null : parseInt(fbaCompMax, 10);
-      const totMin = totalCompMin.trim() === "" ? null : parseInt(totalCompMin, 10);
-      const totMax = totalCompMax.trim() === "" ? null : parseInt(totalCompMax, 10);
-      if (fbaMin !== null && Number.isFinite(fbaMin)) query = query.gte('fba_offer_count', fbaMin);
-      if (fbaMax !== null && Number.isFinite(fbaMax)) query = query.lte('fba_offer_count', fbaMax);
-      if (totMin !== null && Number.isFinite(totMin)) query = query.gte('new_offer_count', totMin);
-      if (totMax !== null && Number.isFinite(totMax)) query = query.lte('new_offer_count', totMax);
+      query = applyFilters(query);
 
       query = query.range(from, from + overFetch - 1).order('title', { ascending: true, nullsFirst: false });
 
@@ -295,7 +468,7 @@ const KeepaProductFinder = () => {
 
       setProducts(fetchedProducts);
       // Display total minus owned (approximation — actual unowned count requires server filter)
-      setTotalResults(Math.min((count ?? 0) - ownedAsins.size, 500));
+      setTotalResults(Math.min((count ?? 0) - ownedAsins.size, MAX_SEARCH_RESULTS));
       setPage(searchPage);
 
       if (!fetchedProducts || fetchedProducts.length === 0) {
@@ -343,8 +516,24 @@ const KeepaProductFinder = () => {
           console.warn('[ProductFinder] Failed to persist run:', persistErr);
         }
 
-        // 4. Auto-start eligibility checking for the loaded page
-        checkEligibilityProgressive(fetchedProducts);
+        // 4. Show any verdict already on record, then check EVERY matching
+        //    product - not just this page. The scan used to be handed
+        //    `fetchedProducts`, which is one page of `perPage` (250) rows, so
+        //    the progress bar always stopped at 250 no matter how many ASINs
+        //    the import held.
+        //
+        //    forceRescan is NOT set: the function only trusts APPROVED rows
+        //    inside its freshness window and re-checks everything else, so a
+        //    forced rescan was spending SP-API calls for nothing.
+        await loadStoredEligibility(fetchedProducts.map(p => p.asin));
+        let scanTargets = fetchedProducts.map(p => p.asin);
+        try {
+          const allMatching = await collectAllMatchingAsins();
+          if (allMatching.length > 0) scanTargets = allMatching;
+        } catch (collectErr) {
+          console.warn('[ProductFinder] Full-set collection failed, scanning page only:', collectErr);
+        }
+        checkEligibilityProgressive(scanTargets);
       }
     } catch (e: any) {
       toast({ title: "Search failed", description: e.message, variant: "destructive" });
@@ -776,6 +965,18 @@ const KeepaProductFinder = () => {
                 {loading ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Search className="h-4 w-4 mr-1" />}
                 Find Products
               </Button>
+              <Button
+                onClick={handleCheckAll}
+                disabled={checkingAll || !!eligibilityProgress || !dbStats || dbStats.total === 0}
+                variant="secondary"
+                className="h-9"
+                title="Check selling eligibility for every product matching these filters, not just the current page"
+              >
+                {checkingAll || eligibilityProgress
+                  ? <Loader2 className="h-4 w-4 animate-spin mr-1" />
+                  : <ShieldCheck className="h-4 w-4 mr-1" />}
+                Check All{dbStats ? ` (${dbStats.total.toLocaleString()})` : ''}
+              </Button>
               <Button onClick={clearAll} variant="ghost" size="sm" className="h-9">
                 <RotateCcw className="h-3.5 w-3.5 mr-1" /> Clear
               </Button>
@@ -793,7 +994,12 @@ const KeepaProductFinder = () => {
               <div className="flex items-center gap-3 mb-2">
                 <ShieldCheck className="h-4 w-4 text-primary" />
                 <p className="text-sm font-medium">
-                  Checking eligibility: {eligibilityProgress.checked} / {eligibilityProgress.total}
+                  Checking eligibility: {eligibilityProgress.checked.toLocaleString()} / {eligibilityProgress.total.toLocaleString()}
+                  {eligibilityProgress.total > products.length && (
+                    <span className="text-muted-foreground font-normal">
+                      {' '}(whole set - {products.length} shown on this page)
+                    </span>
+                  )}
                 </p>
                 {eligibilitySummary.approved > 0 && (
                   <Badge variant="default" className="text-[10px] bg-emerald-600">{eligibilitySummary.approved} approved</Badge>
@@ -802,7 +1008,21 @@ const KeepaProductFinder = () => {
                   <Badge variant="destructive" className="text-[10px]">{eligibilitySummary.restricted} restricted</Badge>
                 )}
               </div>
-              <Progress value={(eligibilityProgress.checked / eligibilityProgress.total) * 100} className="h-1.5" />
+              <div className="flex items-center gap-3">
+                <Progress value={(eligibilityProgress.checked / eligibilityProgress.total) * 100} className="h-1.5 flex-1" />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 px-2 text-xs"
+                  onClick={() => {
+                    if (scanAbortRef.current) scanAbortRef.current.abort();
+                    setEligibilityProgress(null);
+                    setCheckingAll(false);
+                  }}
+                >
+                  Stop
+                </Button>
+              </div>
             </Card>
           )}
 
