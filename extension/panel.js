@@ -1147,6 +1147,53 @@
     itemEl.title = `As supplied: ${fmtDimsRaw(d.item_length, d.item_width, d.item_height, d.item_dim_unit)}`;
     itemWtEl.textContent = fmtWt(d.item_weight, d.item_weight_unit);
     itemWtEl.title = `As supplied: ${fmtWtRaw(d.item_weight, d.item_weight_unit)}`;
+
+    /*
+     * FLAG AN IMPOSSIBLE CATALOG RECORD (2026-11-26).
+     *
+     * A product cannot be bigger than the box it ships in, so item volume can
+     * never exceed package volume. When it does, one of Amazon's two records
+     * for the ASIN is wrong. Observed on an ASIN reading item
+     * 10.5 x 5.75 x 4.25 in (257 cu in) against package 4.06 x 3.86 x 1.85 in
+     * (29 cu in) -- nine times the volume of its own package.
+     *
+     * Worth showing because the tier is computed from the PACKAGE row only
+     * (classifySizeTier below), so a wildly larger Item row sitting directly
+     * underneath reads as the app having got the size wrong when it has not.
+     * Naming the contradiction is the fix; silently hiding the Item row would
+     * discard the evidence that the catalog data is bad.
+     *
+     * Volume, not per-side: an item can sit rotated or folded in its box, so
+     * one side exceeding one package side proves nothing on its own. Volume
+     * cannot be cheated that way.
+     *
+     * 5% tolerance because a polybagged item legitimately measures almost
+     * exactly its own package, and rounding should not raise an alarm.
+     *
+     * toInches returns null for an unreadable unit (see sizeTier.js), so a
+     * mismatch is claimed only when BOTH sets converted. Same rule as the
+     * tier: never guess a unit.
+     */
+    const volIn = (l, w, h, unit) => {
+      const sides = [l, w, h].map((n) => self.INVSPRNT_UNITS.toInches(n, unit));
+      return sides.every((v) => v != null) ? sides[0] * sides[1] * sides[2] : null;
+    };
+    const pkgVol = volIn(d.package_length, d.package_width, d.package_height, d.package_dim_unit);
+    const itemVol = volIn(d.item_length, d.item_width, d.item_height, d.item_dim_unit);
+    if (pkgVol != null && itemVol != null && itemVol > pkgVol * 1.05) {
+      const warn = document.createElement("span");
+      warn.className = "apx-bad";
+      warn.style.marginLeft = "6px";
+      warn.textContent = `\u26A0 bigger than the package`;
+      warn.title =
+        `Amazon's catalog contradicts itself for this ASIN: the item measures ` +
+        `${Math.round(itemVol)} cu in but its package only ${Math.round(pkgVol)} cu in, ` +
+        `which is physically impossible. The size tier and the FBA fee use the ` +
+        `PACKAGE row, so this does not change them — but one of the two records ` +
+        `is wrong, and if it is the package one the tier is wrong with it. ` +
+        `Check the dimensions in Seller Central before sourcing on this.`;
+      itemEl.appendChild(warn);
+    }
     const srcLabel = d.cached ? "Cache" : (d.source === "spapi" ? "Amazon Catalog" : d.source === "keepa" ? "Keepa" : "—");
     const when = d.fetched_at ? new Date(d.fetched_at).toLocaleString() : "";
     srcEl.textContent = when ? `Source: ${srcLabel} · ${when}` : `Source: ${srcLabel}`;
@@ -1969,27 +2016,70 @@
    * be a different wrong number -- and a wrong number that LOOKS careful is
    * worse than one that admits it is an estimate.
    */
+  /*
+   * SAY "STANDARD" FIRST (2026-11-26).
+   *
+   * "Large Standard" was read as a size warning on a 4 x 3.9 x 1.85 in item.
+   * It is not one: in Amazon's taxonomy it is the ORDINARY standard tier, and
+   * it is where nearly everything that is not tiny sits. Oversize begins at
+   * the tier above. Leading with the word "Large" buries the one thing the
+   * seller needs off this row -- standard or oversize -- behind the one word
+   * that suggests the opposite.
+   *
+   * Reordered here in the display layer on purpose. sizeTier.js keeps Amazon's
+   * exact names because sizeTier.test.js asserts them against the Deno copy in
+   * analyzer-product-snapshot/fbaSizeTier.ts, and the seller needs the real
+   * name to look a fee up in Amazon's own tables -- so it stays in the tooltip.
+   */
+  const TIER_DISPLAY = {
+    "Small Standard": {
+      text: "Standard (Small)",
+      note: "Standard size, the cheapest FBA tier. Not oversize.",
+    },
+    "Large Standard": {
+      text: "Standard (Large)",
+      note: 'Standard size — NOT oversize. "Large Standard" is Amazon\'s name for the ordinary standard tier, which is where most of a normal catalog sits; oversize starts at the tier above this one.',
+    },
+    "Large Oversize": {
+      text: "Oversize (Large)",
+      note: "Oversize — fulfilment fees step up sharply from standard.",
+    },
+    "Oversize": {
+      text: "Oversize",
+      note: "Oversize — fulfilment fees step up sharply from standard.",
+    },
+    "Heavy/Bulky": {
+      text: "Heavy / Bulky",
+      note: "The most expensive tier there is.",
+    },
+  };
+
   function sizeTierRow(sz) {
     const b = state.feeBasis;
-    const base = { level: sz.level, text: sz.text, tip: "Estimated from package dimensions/weight." };
+    const disp = TIER_DISPLAY[sz.text];
+    const text = disp ? disp.text : sz.text;
+    // Both halves matter in the tooltip: what the tier MEANS, and the name
+    // Amazon itself uses, so a fee can still be looked up against it.
+    const meaning = disp ? `${disp.note} Amazon calls this tier "${sz.text}". ` : "";
+    const base = { level: sz.level, text, tip: `${meaning}Estimated from package dimensions/weight.` };
     if (!b) return base;
     if (b.basis === "billed") {
       return {
         level: b.understated ? "caution" : sz.level,
-        text: sz.text,
+        text,
         caption: `FBA fee $${Number(b.fee_to_use).toFixed(2)} billed`,
-        tip: `${b.note} Quote was $${b.quoted_fee ?? "—"}. ROI uses the billed figure.`,
+        tip: `${meaning}${b.note} Quote was $${b.quoted_fee ?? "—"}. ROI uses the billed figure.`,
       };
     }
     if (b.understated) {
       return {
         level: "caution",
-        text: sz.text,
+        text,
         caption: "fee may be understated",
-        tip: `${b.note} No sales history for this ASIN, so the ROI still uses Amazon's quote — treat it as a floor, not a figure.`,
+        tip: `${meaning}${b.note} No sales history for this ASIN, so the ROI still uses Amazon's quote — treat it as a floor, not a figure.`,
       };
     }
-    return { ...base, tip: b.note || base.tip };
+    return { ...base, tip: `${meaning}${b.note || "Estimated from package dimensions/weight."}` };
   }
 
   function classifyVariations() {
