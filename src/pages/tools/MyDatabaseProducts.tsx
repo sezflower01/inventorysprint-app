@@ -36,10 +36,6 @@ type EligibilityStatus = 'pending' | 'checking' | 'approved' | 'approval_require
 const PAGE_SIZE = 100;
 const ELIG_BATCH = 10;
 
-// Days a stored verdict stays usable. Matches both check-product-eligibility's
-// freshness_days default and VERDICT_FRESH_DAYS in KeepaProductFinder, so the
-// two pages agree on what counts as already-decided.
-const VERDICT_FRESH_DAYS = 7;
 
 const MyDatabaseProducts = () => {
   const { user } = useAuth();
@@ -174,7 +170,7 @@ const MyDatabaseProducts = () => {
 
       // Hydrate the eligibility map from cached DB values, then re-check only the missing ones
       const cachedMap: Record<string, EligibilityStatus> = {};
-      let needCheck: string[] = [];
+      const needCheck: string[] = [];
       for (const row of list) {
         const cached = row.eligibility_status as EligibilityStatus | null;
         if (cached === 'approved' || cached === 'approval_required' || cached === 'restricted') {
@@ -184,18 +180,26 @@ const MyDatabaseProducts = () => {
         }
       }
 
+      // THIS PAGE NEVER CALLS THE ELIGIBILITY API BY ITSELF.
+      //
+      // Product Finder has already decided these ASINs -- that is how they got
+      // here. Re-checking on load spent real SP-API calls to re-derive an answer
+      // sitting in the database, and did it on every page turn. The only scan
+      // from this page is the explicit Recheck Status button.
+      //
       // A verdict lives in TWO places under two different names:
       //   this page              -> user_owned_products.eligibility_status
       //   Product Finder's scan  -> user_approved_products.approval_status
-      // check-product-eligibility only ever writes the second one, so a row
-      // scanned in Product Finder arrives here with eligibility_status NULL and
-      // used to be re-checked from scratch -- real SP-API calls spent on an
-      // answer already on record. Adopt that verdict instead, and mirror it into
-      // this table so the next load does not have to ask again.
+      // check-product-eligibility only ever writes the second, so a row scanned
+      // in Product Finder arrives here with eligibility_status NULL. Read the
+      // verdict from where it actually lives, and mirror it into this table so
+      // the next load does not even have to look.
+      //
+      // No freshness filter: an old verdict is still the verdict on record and
+      // is shown as it stands. Judging it stale is the operator's call, via
+      // Recheck Status -- not a reason to silently spend quota.
       if (needCheck.length > 0) {
         try {
-          const since = new Date();
-          since.setDate(since.getDate() - VERDICT_FRESH_DAYS);
           const adopted: { asin: string; status: EligibilityStatus }[] = [];
           for (let i = 0; i < needCheck.length; i += 200) {
             const chunk = needCheck.slice(i, i + 200);
@@ -203,11 +207,11 @@ const MyDatabaseProducts = () => {
               .select('asin, approval_status, checked_at')
               .eq('user_id', user.id)
               .eq('marketplace', 'US')
-              .gte('checked_at', since.toISOString())
               .in('asin', chunk);
             for (const v of (verdicts as any[]) || []) {
               const st = String(v.approval_status || '').toLowerCase();
-              // An error is not a verdict -- leave it to be re-checked.
+              // An error is not a verdict. It stays blank rather than being
+              // shown as a decision, and Recheck Status can resolve it.
               if (st === 'error' || !st) continue;
               const mapped: EligibilityStatus = st === 'approved' ? 'approved'
                 : st === 'approval_required' ? 'approval_required'
@@ -217,28 +221,25 @@ const MyDatabaseProducts = () => {
             }
           }
           if (adopted.length > 0) {
-            const adoptedSet = new Set(adopted.map(a => a.asin));
-            needCheck = needCheck.filter(a => !adoptedSet.has(a));
             // Fire and forget: the map is already correct on screen, and a
             // failed mirror only costs a repeat lookup on the next load.
             persistStatuses(adopted).catch(err =>
               console.warn('[MyDatabaseProducts] Mirroring adopted verdicts failed:', err));
           }
         } catch (adoptErr) {
-          console.warn('[MyDatabaseProducts] Verdict adoption failed, falling back to a re-check:', adoptErr);
+          console.warn('[MyDatabaseProducts] Verdict lookup failed; rows show blank:', adoptErr);
         }
       }
 
+      // Anything with no verdict anywhere renders as "—". It is not queued, not
+      // scanned, and costs nothing.
       setEligibilityMap(prev => ({ ...prev, ...cachedMap }));
-      if (needCheck.length > 0) {
-        checkEligibility(needCheck);
-      }
     } catch (e: any) {
       toast({ title: "Load failed", description: e.message, variant: "destructive" });
     } finally {
       setLoading(false);
     }
-  }, [user, toast, checkEligibility, persistStatuses]);
+  }, [user, toast, persistStatuses]);
 
   useEffect(() => { load(0, ""); }, [load]);
 
