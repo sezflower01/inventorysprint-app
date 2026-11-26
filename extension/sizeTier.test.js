@@ -109,17 +109,67 @@ test('standard-size caps the LONGEST side, whichever field it arrives in', () =>
     { length: 2, width: 2, height: 30 },
   ]) {
     const r = classifyFbaSizeTier({ ...d, dimUnit: 'inches', weight: 2, weightUnit: 'pounds' });
-    assert.equal(r.text, 'Large Oversize', `failed for ${JSON.stringify(d)}`);
+    // Small Bulky since 2026-01-15; this was Large Oversize under the old table.
+    assert.equal(r.text, 'Small Bulky', `failed for ${JSON.stringify(d)}`);
   }
 });
 
-test('girth, not just length, pushes an item past Large Oversize', () => {
+test('length + girth, not length alone, pushes an item out of the bulky tiers', () => {
   const r = classifyFbaSizeTier({
     length: 50, width: 30, height: 30, dimUnit: 'inches', weight: 40, weightUnit: 'pounds',
   });
-  // girth = 50 + 2*(30+30) = 170, over both oversize girth caps
-  assert.equal(r.text, 'Heavy/Bulky');
+  // Every side is inside Large Bulky (59/33/33) and 40 lb is under its 50 lb
+  // cap, so only length + girth = 50 + 2*(30+30) = 170 against the 130 cap
+  // excludes it. That is the whole point of carrying the measure at all.
+  assert.equal(r.text, 'Extra-large (0-50 lb)');
   assert.equal(r.level, 'bad');
+});
+
+// ─── the 2026 tier table ───────────────────────────────────────────────────
+
+test('Small Bulky sits between Large Standard and Large Bulky', () => {
+  // 30 x 20 x 10 at 30 lb: length + girth = 30 + 2*(20+10) = 90, inside 130.
+  const r = classifyFbaSizeTier({
+    length: 30, width: 20, height: 10, dimUnit: 'inches', weight: 30, weightUnit: 'pounds',
+  });
+  assert.equal(r.text, 'Small Bulky');
+  assert.equal(r.level, 'caution');
+});
+
+test('past the Small Bulky side caps but inside Large Bulky is Large Bulky', () => {
+  // Longest 45 in exceeds Small Bulky's 37, and length + girth = 125 is still
+  // inside the shared 130 cap.
+  const r = classifyFbaSizeTier({
+    length: 45, width: 30, height: 10, dimUnit: 'inches', weight: 40, weightUnit: 'pounds',
+  });
+  assert.equal(r.text, 'Large Bulky');
+  assert.equal(r.level, 'caution');
+});
+
+test('over 50 lb is Extra-large however small the box, and the band follows the weight', () => {
+  // A small dense box. Both bulky tiers cap at 50 lb, so weight alone decides.
+  const dims = { length: 20, width: 15, height: 10, dimUnit: 'inches', weightUnit: 'pounds' };
+  assert.equal(classifyFbaSizeTier({ ...dims, weight: 50 }).text, 'Small Bulky');
+  assert.equal(classifyFbaSizeTier({ ...dims, weight: 51 }).text, 'Extra-large (50-70 lb)');
+  assert.equal(classifyFbaSizeTier({ ...dims, weight: 70 }).text, 'Extra-large (50-70 lb)');
+  assert.equal(classifyFbaSizeTier({ ...dims, weight: 71 }).text, 'Extra-large (70-150 lb)');
+  assert.equal(classifyFbaSizeTier({ ...dims, weight: 150 }).text, 'Extra-large (70-150 lb)');
+  assert.equal(classifyFbaSizeTier({ ...dims, weight: 151 }).text, 'Extra-large (150+ lb)');
+});
+
+test('no pre-2023 tier name can be returned any more', () => {
+  // The old names are gone from Amazon's taxonomy. If one reappears here, the
+  // table has been reverted rather than updated.
+  const gone = new Set(['Large Oversize', 'Oversize', 'Heavy/Bulky']);
+  for (const w of [2, 30, 51, 100, 200]) {
+    for (const d of [[9.5, 8, 5], [30, 2, 2], [50, 30, 30], [100, 40, 40]]) {
+      const r = classifyFbaSizeTier({
+        length: d[0], width: d[1], height: d[2], dimUnit: 'inches',
+        weight: w, weightUnit: 'pounds',
+      });
+      assert.ok(!gone.has(r.text), `got retired tier "${r.text}" for ${JSON.stringify(d)} at ${w} lb`);
+    }
+  }
 });
 
 test('the converters return null rather than a number they cannot justify', () => {

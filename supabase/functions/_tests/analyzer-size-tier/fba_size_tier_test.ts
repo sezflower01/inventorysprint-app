@@ -36,7 +36,8 @@ Deno.test('the reported item is Large Standard', () => {
 Deno.test('height is no longer the only axis that counts', () => {
   // A 30 in pole. The old test looked at packageHeight only, so whichever
   // field the 30 landed in decided the answer; now all three orderings agree.
-  const expected = 'Large Oversize';
+  // Small Bulky since 2026-01-15; this was Large Oversize under the old table.
+  const expected = 'Small Bulky';
   assertEquals(classifyFbaSizeTier(box([30, 2, 2], 2)).text, expected);
   assertEquals(classifyFbaSizeTier(box([2, 30, 2], 2)).text, expected);
   assertEquals(classifyFbaSizeTier(box([2, 2, 30], 2)).text, expected);
@@ -49,10 +50,12 @@ Deno.test('a tall slim box under the caps is standard size, not Oversize', () =>
 });
 
 Deno.test('weight is no longer ignored', () => {
-  // Same box, two weights. The old test could not tell these apart at all.
+  // One box, three weights. The old test could not tell these apart at all,
+  // and under the 2026 table each lands in a different tier.
   assertEquals(classifyFbaSizeTier(box([18, 14, 8], 19)).text, 'Large Standard');
-  assertEquals(classifyFbaSizeTier(box([18, 14, 8], 21)).text, 'Large Oversize');
-  assertEquals(classifyFbaSizeTier(box([18, 14, 8], 60)).text, 'Oversize');
+  assertEquals(classifyFbaSizeTier(box([18, 14, 8], 21)).text, 'Small Bulky');
+  assertEquals(classifyFbaSizeTier(box([18, 14, 8], 60)).text, 'Extra-large (50-70 lb)');
+  assertEquals(classifyFbaSizeTier(box([18, 14, 8], 200)).text, 'Extra-large (150+ lb)');
 });
 
 Deno.test('Small Standard boundaries', () => {
@@ -61,11 +64,19 @@ Deno.test('Small Standard boundaries', () => {
   assertEquals(classifyFbaSizeTier(box([15, 12, 0.75], 1.1)).text, 'Large Standard');
 });
 
-Deno.test('girth decides the top tiers', () => {
-  // girth = 50 + 2*(30+30) = 170, past both oversize caps.
+Deno.test('length + girth decides the top tiers', () => {
+  // Every side is inside Large Bulky (59/33/33) and 40 lb is under its 50 lb
+  // cap, so only length + girth = 50 + 2*(30+30) = 170 against the 130 cap
+  // excludes it.
   const r = classifyFbaSizeTier(box([50, 30, 30], 40));
-  assertEquals(r.text, 'Heavy/Bulky');
+  assertEquals(r.text, 'Extra-large (0-50 lb)');
   assertEquals(r.status, 'bad');
+});
+
+Deno.test('the 2026 bulky split is honoured', () => {
+  // Longest side is the only thing separating these two.
+  assertEquals(classifyFbaSizeTier(box([30, 20, 10], 30)).text, 'Small Bulky');
+  assertEquals(classifyFbaSizeTier(box([45, 30, 10], 40)).text, 'Large Bulky');
 });
 
 Deno.test('missing data abstains instead of claiming Standard Size', () => {

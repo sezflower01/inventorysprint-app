@@ -2034,23 +2034,35 @@
   const TIER_DISPLAY = {
     "Small Standard": {
       text: "Standard (Small)",
-      note: "Standard size, the cheapest FBA tier. Not oversize.",
+      note: "Standard size, the cheapest FBA tier.",
     },
     "Large Standard": {
       text: "Standard (Large)",
-      note: 'Standard size — NOT oversize. "Large Standard" is Amazon\'s name for the ordinary standard tier, which is where most of a normal catalog sits; oversize starts at the tier above this one.',
+      note: 'Standard size — NOT bulky. "Large Standard" is Amazon\'s name for the ordinary standard tier, which is where most of a normal catalog sits; bulky starts at the tier above this one.',
     },
-    "Large Oversize": {
-      text: "Oversize (Large)",
-      note: "Oversize — fulfilment fees step up sharply from standard.",
+    "Small Bulky": {
+      text: "Bulky (Small)",
+      note: "Bulky — fees step up sharply from standard, though Small Bulky is the cheaper of the two bulky tiers. Amazon added it on 15 January 2026, so an item that used to be Large Bulky may now sit here.",
     },
-    "Oversize": {
-      text: "Oversize",
-      note: "Oversize — fulfilment fees step up sharply from standard.",
+    "Large Bulky": {
+      text: "Bulky (Large)",
+      note: "Bulky — fees step up sharply from standard.",
     },
-    "Heavy/Bulky": {
-      text: "Heavy / Bulky",
-      note: "The most expensive tier there is.",
+    "Extra-large (0-50 lb)": {
+      text: "Extra-large (0–50 lb)",
+      note: "Extra-large: past Large Bulky's envelope. The most expensive tiers there are.",
+    },
+    "Extra-large (50-70 lb)": {
+      text: "Extra-large (50–70 lb)",
+      note: "Extra-large, priced by weight band. The most expensive tiers there are.",
+    },
+    "Extra-large (70-150 lb)": {
+      text: "Extra-large (70–150 lb)",
+      note: "Extra-large, priced by weight band. The most expensive tiers there are.",
+    },
+    "Extra-large (150+ lb)": {
+      text: "Extra-large (150+ lb)",
+      note: "Extra-large, the heaviest band. The most expensive tier there is.",
     },
   };
 

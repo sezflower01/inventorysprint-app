@@ -71,21 +71,46 @@
     return null;
   }
 
-  // Amazon's US tier boundaries. Named so the test can assert the Deno copy in
+  // Amazon's US tier boundaries, CURRENT as of 2026-11-26. Named so the test
+  // can assert the Deno copy in
   // supabase/functions/analyzer-product-snapshot/fbaSizeTier.ts still matches:
   // the panel and the web analyser describing the same ASIN differently is the
   // other half of the bug this file fixes.
   //
-  // NOTE: the two oversize rows carry Amazon's PRE-2023 names and cutoffs
-  // ("Large Oversize" / "Oversize" / "Heavy/Bulky"). Amazon now uses Large
-  // Bulky and four Extra-large weight bands. Left as-is here deliberately so
-  // this change stays a units fix; standard-size, which is where the reported
-  // misread happened and where almost all of this catalog sits, is correct.
+  // Updated 2026-11-26 from the pre-2023 ladder ("Large Oversize" / "Oversize"
+  // / "Heavy/Bulky", caps 60/108 in and girth 130/165) to Amazon's present
+  // one. SMALL_BULKY is genuinely new -- Amazon introduced it on 15 January
+  // 2026 between Large Standard and Large Bulky -- so an item that was Large
+  // Bulky under the old table may now sit a tier cheaper.
+  //
+  // `lengthPlusGirth` is Amazon's own term: girth is 2 x (median + shortest),
+  // and length + girth adds the longest side. The variable below computes
+  // exactly that; it was previously called `girth`, which understated what it
+  // held by one whole side.
+  //
+  // The three XL_* rows carry ONLY a weight cap. Extra-large is defined by
+  // exclusion -- anything past Large Bulky's envelope, or over 50 lb -- and is
+  // then split by weight alone, so there are no dimensions to record. They are
+  // kept as flat numeric objects because the Deno parity test regex-parses
+  // this literal; an array or a string in here is invisible to it, and a tier
+  // the test cannot see is a tier that can drift.
+  //
+  // KNOWN GAP, deliberately not closed here: Amazon assigns a tier on
+  // SHIPPING weight, the greater of actual and dimensional weight, and this
+  // uses actual weight only. So a large, light item can be classified a tier
+  // low. Not fixed because the dimensional divisor differs outside standard
+  // size and a wrong tier that looks confident is worse than one with a stated
+  // limit -- the same reasoning as the unreadable-unit rule above. See
+  // memory/fba-fee-quote-understates-bulky for the measurement that withdrew
+  // an earlier, wronger attempt at this.
   var TIERS = {
-    SMALL_STANDARD:  { longest: 15, median: 12, shortest: 0.75, maxLb: 1 },
-    LARGE_STANDARD:  { longest: 18, median: 14, shortest: 8,    maxLb: 20 },
-    LARGE_OVERSIZE:  { longest: 60, girth: 130, maxLb: 50 },
-    OVERSIZE:        { longest: 108, girth: 165 },
+    SMALL_STANDARD:  { longest: 15, median: 12,   shortest: 0.75, maxLb: 1 },
+    LARGE_STANDARD:  { longest: 18, median: 14,   shortest: 8,    maxLb: 20 },
+    SMALL_BULKY:     { longest: 37, median: 28,   shortest: 20, lengthPlusGirth: 130, maxLb: 50 },
+    LARGE_BULKY:     { longest: 59, median: 33,   shortest: 33, lengthPlusGirth: 130, maxLb: 50 },
+    XL_TO_50:        { maxLb: 50 },
+    XL_TO_70:        { maxLb: 70 },
+    XL_TO_150:       { maxLb: 150 },
   };
 
   /**
@@ -108,7 +133,8 @@
 
     var sides = inches.slice().sort(function (a, b) { return b - a; });
     var longest = sides[0], median = sides[1], shortest = sides[2];
-    var girth = longest + 2 * (median + shortest);
+    // Amazon's "length + girth": the longest side plus twice the other two.
+    var lengthPlusGirth = longest + 2 * (median + shortest);
 
     var ss = TIERS.SMALL_STANDARD;
     if (longest <= ss.longest && median <= ss.median && shortest <= ss.shortest && lb <= ss.maxLb) {
@@ -118,15 +144,21 @@
     if (longest <= ls.longest && median <= ls.median && shortest <= ls.shortest && lb <= ls.maxLb) {
       return { level: "good", text: "Large Standard" };
     }
-    var lo = TIERS.LARGE_OVERSIZE;
-    if (longest <= lo.longest && girth <= lo.girth && lb <= lo.maxLb) {
-      return { level: "caution", text: "Large Oversize" };
+    var sb = TIERS.SMALL_BULKY;
+    if (longest <= sb.longest && median <= sb.median && shortest <= sb.shortest
+        && lengthPlusGirth <= sb.lengthPlusGirth && lb <= sb.maxLb) {
+      return { level: "caution", text: "Small Bulky" };
     }
-    var os = TIERS.OVERSIZE;
-    if (longest <= os.longest && girth <= os.girth) {
-      return { level: "caution", text: "Oversize" };
+    var lbk = TIERS.LARGE_BULKY;
+    if (longest <= lbk.longest && median <= lbk.median && shortest <= lbk.shortest
+        && lengthPlusGirth <= lbk.lengthPlusGirth && lb <= lbk.maxLb) {
+      return { level: "caution", text: "Large Bulky" };
     }
-    return { level: "bad", text: "Heavy/Bulky" };
+    // Extra-large by exclusion, then split on weight alone.
+    if (lb <= TIERS.XL_TO_50.maxLb) return { level: "bad", text: "Extra-large (0-50 lb)" };
+    if (lb <= TIERS.XL_TO_70.maxLb) return { level: "bad", text: "Extra-large (50-70 lb)" };
+    if (lb <= TIERS.XL_TO_150.maxLb) return { level: "bad", text: "Extra-large (70-150 lb)" };
+    return { level: "bad", text: "Extra-large (150+ lb)" };
   }
 
   root.INVSPRNT_UNITS = {
