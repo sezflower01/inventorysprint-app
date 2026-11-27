@@ -2073,14 +2073,20 @@
     // Both halves matter in the tooltip: what the tier MEANS, and the name
     // Amazon itself uses, so a fee can still be looked up against it.
     const meaning = disp ? `${disp.note} Amazon calls this tier "${sz.text}". ` : "";
-    const base = { level: sz.level, text, tip: `${meaning}Estimated from package dimensions/weight.` };
+    // When volume decides the tier, say so. A 5 lb box reading Extra-large is
+    // not believable on its face, and an unbelievable verdict gets ignored --
+    // so the row has to carry the reason, not just the label.
+    const vol = sz.weightBasis === "dimensional" && Number.isFinite(sz.dimWeightLb)
+      ? `Placed on DIMENSIONAL weight ${Number(sz.dimWeightLb).toFixed(1)} lb (volume ÷ 139), not the ${Number(sz.unitLb).toFixed(1)} lb it weighs — Amazon tiers on whichever is greater. `
+      : "";
+    const base = { level: sz.level, text, tip: `${meaning}${vol}Estimated from package dimensions/weight.` };
     if (!b) return base;
     if (b.basis === "billed") {
       return {
         level: b.understated ? "caution" : sz.level,
         text,
         caption: `FBA fee $${Number(b.fee_to_use).toFixed(2)} billed`,
-        tip: `${meaning}${b.note} Quote was $${b.quoted_fee ?? "—"}. ROI uses the billed figure.`,
+        tip: `${meaning}${vol}${b.note} Quote was $${b.quoted_fee ?? "—"}. ROI uses the billed figure.`,
       };
     }
     if (b.understated) {
@@ -2088,10 +2094,10 @@
         level: "caution",
         text,
         caption: "fee may be understated",
-        tip: `${meaning}${b.note} No sales history for this ASIN, so the ROI still uses Amazon's quote — treat it as a floor, not a figure.`,
+        tip: `${meaning}${vol}${b.note} No sales history for this ASIN, so the ROI still uses Amazon's quote — treat it as a floor, not a figure.`,
       };
     }
-    return { ...base, tip: `${meaning}${b.note || "Estimated from package dimensions/weight."}` };
+    return { ...base, tip: `${meaning}${vol}${b.note || "Estimated from package dimensions/weight."}` };
   }
 
   function classifyVariations() {

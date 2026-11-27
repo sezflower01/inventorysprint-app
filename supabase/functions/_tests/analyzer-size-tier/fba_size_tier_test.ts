@@ -65,18 +65,43 @@ Deno.test('Small Standard boundaries', () => {
 });
 
 Deno.test('length + girth decides the top tiers', () => {
-  // Every side is inside Large Bulky (59/33/33) and 40 lb is under its 50 lb
-  // cap, so only length + girth = 50 + 2*(30+30) = 170 against the 130 cap
-  // excludes it.
-  const r = classifyFbaSizeTier(box([50, 30, 30], 40));
+  // Chosen so length + girth is the ONLY failing condition: every side is
+  // inside Large Bulky (59/33/33) and dimensional weight is 49.0 lb, just
+  // under the 50 lb cap, so weight cannot be what excludes it. Only
+  // length + girth = 59 + 2*(33+3.5) = 132 against the 130 cap does.
+  const r = classifyFbaSizeTier(box([59, 33, 3.5], 40));
   assertEquals(r.text, 'Extra-large (0-50 lb)');
   assertEquals(r.status, 'bad');
 });
 
 Deno.test('the 2026 bulky split is honoured', () => {
-  // Longest side is the only thing separating these two.
-  assertEquals(classifyFbaSizeTier(box([30, 20, 10], 30)).text, 'Small Bulky');
-  assertEquals(classifyFbaSizeTier(box([45, 30, 10], 40)).text, 'Large Bulky');
+  // Longest side is the only thing separating these two, and neither is
+  // dimensional-weight led.
+  assertEquals(classifyFbaSizeTier(box([30, 20, 10], 45)).text, 'Small Bulky');
+  assertEquals(classifyFbaSizeTier(box([45, 10, 8], 40)).text, 'Large Bulky');
+});
+
+Deno.test('the tier is placed on shipping weight, not actual weight', () => {
+  // 30 x 20 x 20 at 5 lb: 12,000 / 139 = 86.3 lb dimensional, past both bulky
+  // tiers' 50 lb cap. On actual weight alone this read Small Bulky -- three
+  // tiers cheap.
+  const r = classifyFbaSizeTier(box([30, 20, 20], 5));
+  assertEquals(r.text, 'Extra-large (70-150 lb)');
+  assertEquals(r.weightBasis, 'dimensional');
+  assertEquals(r.dimWeightLb?.toFixed(2), '86.33');
+
+  // Amazon's documented example: 2 lb in a 12 x 10 x 8 package is 6.9 lb.
+  assertEquals(classifyFbaSizeTier(box([12, 10, 8], 2)).dimWeightLb?.toFixed(1), '6.9');
+});
+
+Deno.test('dimensional weight cannot change a standard-size verdict', () => {
+  // The invariant behind omitting the 2 in floor inside the envelope.
+  const big = classifyFbaSizeTier(box([18, 14, 8], 1));
+  assertEquals(big.text, 'Large Standard');
+  assertEquals((big.dimWeightLb ?? 99) < 20, true);
+  const small = classifyFbaSizeTier(box([15, 12, 0.75], 1));
+  assertEquals(small.text, 'Small Standard');
+  assertEquals((small.dimWeightLb ?? 99) < 1, true);
 });
 
 Deno.test('missing data abstains instead of claiming Standard Size', () => {

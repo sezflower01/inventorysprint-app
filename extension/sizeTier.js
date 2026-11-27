@@ -95,14 +95,34 @@
   // this literal; an array or a string in here is invisible to it, and a tier
   // the test cannot see is a tier that can drift.
   //
-  // KNOWN GAP, deliberately not closed here: Amazon assigns a tier on
-  // SHIPPING weight, the greater of actual and dimensional weight, and this
-  // uses actual weight only. So a large, light item can be classified a tier
-  // low. Not fixed because the dimensional divisor differs outside standard
-  // size and a wrong tier that looks confident is worse than one with a stated
-  // limit -- the same reasoning as the unreadable-unit rule above. See
-  // memory/fba-fee-quote-understates-bulky for the measurement that withdrew
-  // an earlier, wronger attempt at this.
+  // SHIPPING WEIGHT (closed 2026-11-26).
+  //
+  // Amazon places a tier on SHIPPING weight: the greater of unit weight and
+  // dimensional weight, volume / 139 for the US. This used actual weight
+  // alone, so a large light item was classified a tier -- sometimes several
+  // tiers -- too cheap.
+  //
+  // The small-standard and extra-large-150+ exceptions people cite are about
+  // the FEE BASIS, not tier placement: those two are BILLED on unit weight.
+  // Placement uses shipping weight throughout, so this applies it throughout.
+  //
+  // THE CIRCULARITY, AND WHY IT IS NOT ONE. The 2 in floor on the two smaller
+  // sides applies only to bulky and extra-large, so reading it naively you
+  // need the tier to compute the weight that picks the tier. It dissolves
+  // because the standard-size ENVELOPE is a test on dimensions alone
+  // (18/14/8): which side of it an item falls on is known before any weight
+  // is involved.
+  //
+  // Two facts worth knowing before anyone "simplifies" this:
+  //   - Dimensional weight can NEVER change a standard-size verdict. The
+  //     largest standard box, 18 x 14 x 8, is 2,016 cu in = 14.5 lb, under the
+  //     20 lb cap; the largest small-standard box, 15 x 12 x 0.75, is 0.97 lb,
+  //     under its 1 lb cap. So the floor's absence inside the envelope costs
+  //     nothing, and applying the floor there WOULD break it -- flooring a
+  //     0.75 in side to 2 in turns a 1 lb small-standard item into 2.59 lb.
+  //   - length + girth is measured on the REAL sides, never the floored ones.
+  //     The floor exists to price air inside a shipping box, not to inflate
+  //     the envelope an item is tested against.
   var TIERS = {
     SMALL_STANDARD:  { longest: 15, median: 12,   shortest: 0.75, maxLb: 1 },
     LARGE_STANDARD:  { longest: 18, median: 14,   shortest: 8,    maxLb: 20 },
@@ -111,6 +131,12 @@
     XL_TO_50:        { maxLb: 50 },
     XL_TO_70:        { maxLb: 70 },
     XL_TO_150:       { maxLb: 150 },
+    // Not a tier: the dimensional-weight constants. They live in this literal
+    // on purpose, because the Deno parity test compares its keys and numbers
+    // field by field -- a divisor kept outside it could drift between the two
+    // runtimes silently, which is the one failure this whole arrangement
+    // exists to prevent.
+    DIM_WEIGHT:      { divisor: 139, bulkyMinSide: 2 },
   };
 
   /**
@@ -134,31 +160,52 @@
     var sides = inches.slice().sort(function (a, b) { return b - a; });
     var longest = sides[0], median = sides[1], shortest = sides[2];
     // Amazon's "length + girth": the longest side plus twice the other two.
+    // Always on the REAL sides -- see the note on the 2 in floor above.
     var lengthPlusGirth = longest + 2 * (median + shortest);
 
     var ss = TIERS.SMALL_STANDARD;
-    if (longest <= ss.longest && median <= ss.median && shortest <= ss.shortest && lb <= ss.maxLb) {
-      return { level: "good", text: "Small Standard" };
-    }
     var ls = TIERS.LARGE_STANDARD;
-    if (longest <= ls.longest && median <= ls.median && shortest <= ls.shortest && lb <= ls.maxLb) {
-      return { level: "good", text: "Large Standard" };
+    var dw = TIERS.DIM_WEIGHT;
+
+    // Dimensions alone, so this is answerable before any weight is known.
+    var withinStandardEnvelope =
+      longest <= ls.longest && median <= ls.median && shortest <= ls.shortest;
+    var dimMedian = withinStandardEnvelope ? median : Math.max(median, dw.bulkyMinSide);
+    var dimShortest = withinStandardEnvelope ? shortest : Math.max(shortest, dw.bulkyMinSide);
+    var dimLb = (longest * dimMedian * dimShortest) / dw.divisor;
+
+    // Shipping weight is what Amazon places the tier on.
+    var shipLb = Math.max(lb, dimLb);
+    var weigh = {
+      shippingLb: shipLb,
+      dimWeightLb: dimLb,
+      unitLb: lb,
+      // Named so a caller can explain a surprising tier rather than just
+      // assert it: "Extra-large because it bills on 86 lb of air, not 5 lb".
+      weightBasis: dimLb > lb ? "dimensional" : "unit",
+    };
+
+    if (longest <= ss.longest && median <= ss.median && shortest <= ss.shortest && shipLb <= ss.maxLb) {
+      return Object.assign({ level: "good", text: "Small Standard" }, weigh);
+    }
+    if (longest <= ls.longest && median <= ls.median && shortest <= ls.shortest && shipLb <= ls.maxLb) {
+      return Object.assign({ level: "good", text: "Large Standard" }, weigh);
     }
     var sb = TIERS.SMALL_BULKY;
     if (longest <= sb.longest && median <= sb.median && shortest <= sb.shortest
-        && lengthPlusGirth <= sb.lengthPlusGirth && lb <= sb.maxLb) {
-      return { level: "caution", text: "Small Bulky" };
+        && lengthPlusGirth <= sb.lengthPlusGirth && shipLb <= sb.maxLb) {
+      return Object.assign({ level: "caution", text: "Small Bulky" }, weigh);
     }
     var lbk = TIERS.LARGE_BULKY;
     if (longest <= lbk.longest && median <= lbk.median && shortest <= lbk.shortest
-        && lengthPlusGirth <= lbk.lengthPlusGirth && lb <= lbk.maxLb) {
-      return { level: "caution", text: "Large Bulky" };
+        && lengthPlusGirth <= lbk.lengthPlusGirth && shipLb <= lbk.maxLb) {
+      return Object.assign({ level: "caution", text: "Large Bulky" }, weigh);
     }
-    // Extra-large by exclusion, then split on weight alone.
-    if (lb <= TIERS.XL_TO_50.maxLb) return { level: "bad", text: "Extra-large (0-50 lb)" };
-    if (lb <= TIERS.XL_TO_70.maxLb) return { level: "bad", text: "Extra-large (50-70 lb)" };
-    if (lb <= TIERS.XL_TO_150.maxLb) return { level: "bad", text: "Extra-large (70-150 lb)" };
-    return { level: "bad", text: "Extra-large (150+ lb)" };
+    // Extra-large by exclusion, then split on shipping weight alone.
+    if (shipLb <= TIERS.XL_TO_50.maxLb) return Object.assign({ level: "bad", text: "Extra-large (0-50 lb)" }, weigh);
+    if (shipLb <= TIERS.XL_TO_70.maxLb) return Object.assign({ level: "bad", text: "Extra-large (50-70 lb)" }, weigh);
+    if (shipLb <= TIERS.XL_TO_150.maxLb) return Object.assign({ level: "bad", text: "Extra-large (70-150 lb)" }, weigh);
+    return Object.assign({ level: "bad", text: "Extra-large (150+ lb)" }, weigh);
   }
 
   root.INVSPRNT_UNITS = {

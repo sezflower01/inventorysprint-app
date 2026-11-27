@@ -115,12 +115,13 @@ test('standard-size caps the LONGEST side, whichever field it arrives in', () =>
 });
 
 test('length + girth, not length alone, pushes an item out of the bulky tiers', () => {
+  // Chosen so length + girth is the ONLY failing condition. Every side is
+  // inside Large Bulky (59/33/33), and dimensional weight is 59*33*3.5/139 =
+  // 49.0 lb, just under the 50 lb cap -- so weight cannot be what excludes it.
+  // Only length + girth = 59 + 2*(33+3.5) = 132 against the 130 cap does.
   const r = classifyFbaSizeTier({
-    length: 50, width: 30, height: 30, dimUnit: 'inches', weight: 40, weightUnit: 'pounds',
+    length: 59, width: 33, height: 3.5, dimUnit: 'inches', weight: 40, weightUnit: 'pounds',
   });
-  // Every side is inside Large Bulky (59/33/33) and 40 lb is under its 50 lb
-  // cap, so only length + girth = 50 + 2*(30+30) = 170 against the 130 cap
-  // excludes it. That is the whole point of carrying the measure at all.
   assert.equal(r.text, 'Extra-large (0-50 lb)');
   assert.equal(r.level, 'bad');
 });
@@ -137,13 +138,87 @@ test('Small Bulky sits between Large Standard and Large Bulky', () => {
 });
 
 test('past the Small Bulky side caps but inside Large Bulky is Large Bulky', () => {
-  // Longest 45 in exceeds Small Bulky's 37, and length + girth = 125 is still
-  // inside the shared 130 cap.
+  // Longest 45 in exceeds Small Bulky's 37; length + girth = 81 is inside the
+  // shared 130 cap; and dimensional weight is only 25.9 lb against 40 lb
+  // actual, so this stays a weight-led case rather than a volume-led one.
   const r = classifyFbaSizeTier({
-    length: 45, width: 30, height: 10, dimUnit: 'inches', weight: 40, weightUnit: 'pounds',
+    length: 45, width: 10, height: 8, dimUnit: 'inches', weight: 40, weightUnit: 'pounds',
   });
   assert.equal(r.text, 'Large Bulky');
   assert.equal(r.level, 'caution');
+  assert.equal(r.weightBasis, 'unit');
+});
+
+// ─── shipping weight: max(unit, dimensional) ───────────────────────────────
+
+test('a big light box is placed on dimensional weight, not actual', () => {
+  // 30 x 20 x 20 at 5 lb. Actual weight alone put this in Small Bulky; its
+  // dimensional weight is 12,000 / 139 = 86.3 lb, which is past both bulky
+  // tiers' 50 lb cap. THIS IS THE BUG THE GAP DESCRIBED: three tiers too
+  // cheap, on the item type where it costs most.
+  const r = classifyFbaSizeTier({
+    length: 30, width: 20, height: 20, dimUnit: 'inches', weight: 5, weightUnit: 'pounds',
+  });
+  assert.equal(r.text, 'Extra-large (70-150 lb)');
+  assert.equal(r.weightBasis, 'dimensional');
+  assert.equal(r.unitLb, 5);
+  assert.equal(r.dimWeightLb.toFixed(2), '86.33');
+  assert.equal(r.shippingLb.toFixed(2), '86.33');
+});
+
+test("Amazon's own worked example reproduces", () => {
+  // Amazon documents a 2 lb item in a 12 x 10 x 8 in package as 6.9 lb
+  // dimensional. Independent corroboration of the 139 divisor.
+  const r = classifyFbaSizeTier({
+    length: 12, width: 10, height: 8, dimUnit: 'inches', weight: 2, weightUnit: 'pounds',
+  });
+  assert.equal(r.dimWeightLb.toFixed(1), '6.9');
+  assert.equal(r.text, 'Large Standard');
+});
+
+test('dimensional weight can never change a standard-size verdict', () => {
+  // The invariant that makes the missing 2 in floor inside the envelope
+  // harmless. Largest standard box: 2,016 cu in = 14.5 lb against a 20 lb cap.
+  // Largest small-standard box: 135 cu in = 0.97 lb against 1 lb.
+  const big = classifyFbaSizeTier({
+    length: 18, width: 14, height: 8, dimUnit: 'inches', weight: 1, weightUnit: 'pounds',
+  });
+  assert.equal(big.text, 'Large Standard');
+  assert.ok(big.dimWeightLb < 20, `dim weight ${big.dimWeightLb} should be under the 20 lb cap`);
+
+  const small = classifyFbaSizeTier({
+    length: 15, width: 12, height: 0.75, dimUnit: 'inches', weight: 1, weightUnit: 'pounds',
+  });
+  assert.equal(small.text, 'Small Standard');
+  assert.ok(small.dimWeightLb < 1, `dim weight ${small.dimWeightLb} should be under the 1 lb cap`);
+});
+
+test('the 2 in floor applies outside the standard envelope, and only there', () => {
+  // A 40 x 30 x 1 in sheet. Outside the standard envelope, so the 1 in side is
+  // floored to 2: 40*30*2/139 = 17.27 lb, not 40*30*1/139 = 8.63 lb.
+  const sheet = classifyFbaSizeTier({
+    length: 40, width: 30, height: 1, dimUnit: 'inches', weight: 5, weightUnit: 'pounds',
+  });
+  assert.equal(sheet.dimWeightLb.toFixed(2), '17.27');
+
+  // Inside the envelope the floor must NOT apply: flooring this 0.75 in side
+  // to 2 in would read 2.59 lb and throw a 1 lb item out of Small Standard.
+  const thin = classifyFbaSizeTier({
+    length: 15, width: 12, height: 0.75, dimUnit: 'inches', weight: 1, weightUnit: 'pounds',
+  });
+  assert.equal(thin.text, 'Small Standard');
+});
+
+test('length + girth uses the real sides, never the floored ones', () => {
+  // 40 x 30 x 1: real length + girth = 40 + 2*(30+1) = 102, inside the 130
+  // cap. Flooring the 1 in side first would give 40 + 2*(30+2) = 104 -- still
+  // inside here, so assert the tier that follows from the real figure and that
+  // the floor stayed in the weight calculation where it belongs.
+  const r = classifyFbaSizeTier({
+    length: 40, width: 30, height: 1, dimUnit: 'inches', weight: 5, weightUnit: 'pounds',
+  });
+  assert.equal(r.text, 'Large Bulky');
+  assert.equal(r.weightBasis, 'dimensional');
 });
 
 test('over 50 lb is Extra-large however small the box, and the band follows the weight', () => {

@@ -54,13 +54,32 @@
 // regex-parses the panel's literal: an array or a string is invisible to it,
 // and a tier the test cannot see is a tier that can drift.
 //
-// KNOWN GAP, deliberately not closed: Amazon assigns a tier on SHIPPING
-// weight, the greater of actual and dimensional weight, and this uses actual
-// weight only, so a large light item can land a tier low. Left open because
-// the dimensional divisor differs outside standard size, and a wrong tier that
-// looks confident is worse than one with a stated limit -- the same rule as
-// the unreadable-unit abstention. See memory/fba-fee-quote-understates-bulky
-// for the measurement that withdrew an earlier, wronger attempt at this.
+// SHIPPING WEIGHT (closed 2026-11-26).
+//
+// Amazon places a tier on SHIPPING weight: the greater of unit weight and
+// dimensional weight, volume / 139 for the US. This used actual weight alone,
+// so a large light item was classified a tier -- sometimes several -- too
+// cheap.
+//
+// The small-standard and extra-large-150+ exceptions people cite are about the
+// FEE BASIS, not tier placement: those two are BILLED on unit weight.
+// Placement uses shipping weight throughout, so this applies it throughout.
+//
+// The 2 in floor on the two smaller sides applies only to bulky and
+// extra-large, which reads circular -- the tier would decide the weight that
+// decides the tier. It is not, because the standard-size ENVELOPE is a test on
+// dimensions alone (18/14/8), answerable before any weight is involved.
+//
+// Two facts worth knowing before anyone "simplifies" this:
+//   - Dimensional weight can NEVER change a standard-size verdict. The largest
+//     standard box, 18 x 14 x 8, is 2,016 cu in = 14.5 lb against a 20 lb cap;
+//     the largest small-standard box, 15 x 12 x 0.75, is 0.97 lb against 1 lb.
+//     So omitting the floor inside the envelope costs nothing, and APPLYING it
+//     there would break things: flooring a 0.75 in side to 2 in turns a 1 lb
+//     small-standard item into 2.59 lb.
+//   - length + girth is measured on the REAL sides, never the floored ones.
+//     The floor prices air inside a shipping box; it does not inflate the
+//     envelope an item is tested against.
 
 export const FBA_TIERS = {
   SMALL_STANDARD: { longest: 15, median: 12, shortest: 0.75, maxLb: 1 },
@@ -70,6 +89,11 @@ export const FBA_TIERS = {
   XL_TO_50: { maxLb: 50 },
   XL_TO_70: { maxLb: 70 },
   XL_TO_150: { maxLb: 150 },
+  // Not a tier: the dimensional-weight constants. They live in this literal on
+  // purpose, because the parity test compares its keys and numbers field by
+  // field -- a divisor kept outside it could drift between the two runtimes
+  // silently, which is the one failure this arrangement exists to prevent.
+  DIM_WEIGHT: { divisor: 139, bulkyMinSide: 2 },
 } as const;
 
 export type SizeTierText =
@@ -90,6 +114,15 @@ export type SizeTierResult = {
   status: SizeTierStatus;
   /** Set only when the answer is Unknown, so a caller can log WHY it abstained. */
   reason?: 'no_dimensions' | 'unreadable_dimensions' | 'unreadable_weight';
+  /** The weight the tier was actually placed on: max(unit, dimensional). */
+  shippingLb?: number;
+  dimWeightLb?: number;
+  unitLb?: number;
+  /**
+   * Which of the two won. Lets a caller explain a surprising tier rather than
+   * only assert it: "Extra-large because it bills on 86 lb of air, not 5 lb."
+   */
+  weightBasis?: 'unit' | 'dimensional';
 };
 
 /**
@@ -119,30 +152,48 @@ export function classifyFbaSizeTier(d: {
   const lengthPlusGirth = longest + 2 * (median + shortest);
 
   const ss = FBA_TIERS.SMALL_STANDARD;
-  if (longest <= ss.longest && median <= ss.median && shortest <= ss.shortest && lb <= ss.maxLb) {
-    return { text: 'Small Standard', status: 'good' };
-  }
   const ls = FBA_TIERS.LARGE_STANDARD;
-  if (longest <= ls.longest && median <= ls.median && shortest <= ls.shortest && lb <= ls.maxLb) {
-    return { text: 'Large Standard', status: 'good' };
+  const dw = FBA_TIERS.DIM_WEIGHT;
+
+  // Dimensions alone, so this is answerable before any weight is known.
+  const withinStandardEnvelope =
+    longest <= ls.longest && median <= ls.median && shortest <= ls.shortest;
+  const dimMedian = withinStandardEnvelope ? median : Math.max(median, dw.bulkyMinSide);
+  const dimShortest = withinStandardEnvelope ? shortest : Math.max(shortest, dw.bulkyMinSide);
+  const dimLb = (longest * dimMedian * dimShortest) / dw.divisor;
+
+  // Shipping weight is what Amazon places the tier on.
+  const shipLb = Math.max(lb, dimLb);
+  const weigh = {
+    shippingLb: shipLb,
+    dimWeightLb: dimLb,
+    unitLb: lb,
+    weightBasis: (dimLb > lb ? 'dimensional' : 'unit') as 'dimensional' | 'unit',
+  };
+
+  if (longest <= ss.longest && median <= ss.median && shortest <= ss.shortest && shipLb <= ss.maxLb) {
+    return { text: 'Small Standard', status: 'good', ...weigh };
+  }
+  if (longest <= ls.longest && median <= ls.median && shortest <= ls.shortest && shipLb <= ls.maxLb) {
+    return { text: 'Large Standard', status: 'good', ...weigh };
   }
   const sb = FBA_TIERS.SMALL_BULKY;
   if (
     longest <= sb.longest && median <= sb.median && shortest <= sb.shortest &&
-    lengthPlusGirth <= sb.lengthPlusGirth && lb <= sb.maxLb
+    lengthPlusGirth <= sb.lengthPlusGirth && shipLb <= sb.maxLb
   ) {
-    return { text: 'Small Bulky', status: 'warn' };
+    return { text: 'Small Bulky', status: 'warn', ...weigh };
   }
   const lbk = FBA_TIERS.LARGE_BULKY;
   if (
     longest <= lbk.longest && median <= lbk.median && shortest <= lbk.shortest &&
-    lengthPlusGirth <= lbk.lengthPlusGirth && lb <= lbk.maxLb
+    lengthPlusGirth <= lbk.lengthPlusGirth && shipLb <= lbk.maxLb
   ) {
-    return { text: 'Large Bulky', status: 'warn' };
+    return { text: 'Large Bulky', status: 'warn', ...weigh };
   }
-  // Extra-large by exclusion, then split on weight alone.
-  if (lb <= FBA_TIERS.XL_TO_50.maxLb) return { text: 'Extra-large (0-50 lb)', status: 'bad' };
-  if (lb <= FBA_TIERS.XL_TO_70.maxLb) return { text: 'Extra-large (50-70 lb)', status: 'bad' };
-  if (lb <= FBA_TIERS.XL_TO_150.maxLb) return { text: 'Extra-large (70-150 lb)', status: 'bad' };
-  return { text: 'Extra-large (150+ lb)', status: 'bad' };
+  // Extra-large by exclusion, then split on shipping weight alone.
+  if (shipLb <= FBA_TIERS.XL_TO_50.maxLb) return { text: 'Extra-large (0-50 lb)', status: 'bad', ...weigh };
+  if (shipLb <= FBA_TIERS.XL_TO_70.maxLb) return { text: 'Extra-large (50-70 lb)', status: 'bad', ...weigh };
+  if (shipLb <= FBA_TIERS.XL_TO_150.maxLb) return { text: 'Extra-large (70-150 lb)', status: 'bad', ...weigh };
+  return { text: 'Extra-large (150+ lb)', status: 'bad', ...weigh };
 }
